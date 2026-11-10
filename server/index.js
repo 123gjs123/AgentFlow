@@ -130,12 +130,36 @@ app.put('/api/flows/:id', wrap((req) => {
     return prev ? { ...s, memory: prev.memory, lastRun: prev.lastRun, chatSessionId: prev.chatSessionId, chatContextHash: prev.chatContextHash } : store.newStep(s);
   });
   const ids = new Set(steps.map((s) => s.id));
+  for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target);
   const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, steps, edges };
   engine.topoLevels(next); // throws on cycles
   const saved = store.saveFlow(next);
   engine.syncSchedule(saved);
   return saved;
+}));
+// What is left in a flow besides its steps (shown when the canvas is empty, cleared by /reset).
+app.get('/api/flows/:id/leftovers', wrap((req) => {
+  const f = need(req.params.id);
+  return { description: !!f.description?.trim(), vars: Object.keys(f.vars || {}).length, memory: (f.memory || []).length, chats: store.countChats(f.id), runs: store.countRuns(f.id), schedule: !!f.schedule?.enabled };
+}));
+app.post('/api/flows/:id/reset', wrap((req) => {
+  const all = ['steps', 'description', 'vars', 'memory', 'chats', 'runs', 'schedule'];
+  const parts = Array.isArray(req.body?.parts) ? req.body.parts.filter((p) => all.includes(p)) : all;
+  need(req.params.id);
+  engine.stopRuns(req.params.id);
+  if (parts.includes('chats')) store.clearAllChats(req.params.id);
+  if (parts.includes('runs')) store.clearRuns(req.params.id);
+  const f = store.updateFlow(req.params.id, (fl) => {
+    if (parts.includes('steps')) { fl.steps = []; fl.edges = []; }
+    if (parts.includes('description')) fl.description = '';
+    if (parts.includes('vars')) fl.vars = {};
+    if (parts.includes('memory')) fl.memory = [];
+    if (parts.includes('schedule')) fl.schedule = { ...(fl.schedule || {}), enabled: false, input: '' };
+    if (parts.includes('chats')) { fl.globalSessionId = null; fl.globalContextHash = null; for (const s of fl.steps) { s.chatSessionId = null; s.chatContextHash = null; } }
+  });
+  engine.syncSchedule(f);
+  return f;
 }));
 app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); store.deleteFlow(req.params.id); }));
 

@@ -233,7 +233,7 @@ function insertIntoSuccess(code, snippet) {
   return code.slice(0, at) + snippet + code.slice(at);
 }
 
-export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep }) {
+export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) {
   const [varsText, setVarsText] = useState(JSON.stringify(flow.vars || {}, null, 2));
   const [varsErr, setVarsErr] = useState('');
   const [runs, setRuns] = useState([]);
@@ -274,6 +274,17 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep }) {
             <input value={flow.schedule?.input || ''} onChange={(e) => onChange({ schedule: { ...flow.schedule, input: e.target.value } })} placeholder="Input para ejecuciones programadas" />
           </Field>
           <p className="muted small">Para dispararlo desde Claude Code, terminal, API, Jenkins o webhooks: pestaña <a onClick={() => setTab('external')}>Invocar</a>.</p>
+          <details className="advanced danger-zone">
+            <summary>Zona de limpieza</summary>
+            <p className="muted small">Borrar steps no borra lo que el flujo acumuló. Desde acá lo limpias por partes o todo junto (conserva nombre, directorio y la forma de invocarlo).</p>
+            <div className="chips">
+              <button className="chip btn" onClick={() => onReset(['description', 'vars'])}>Descripción y variables</button>
+              <button className="chip btn" onClick={() => onReset(['memory'])}>Memoria</button>
+              <button className="chip btn" onClick={() => onReset(['chats'])}>Chats</button>
+              <button className="chip btn" onClick={() => onReset(['runs'])}>Ejecuciones</button>
+            </div>
+            <button className="danger" onClick={() => onReset(['steps', 'description', 'vars', 'memory', 'chats', 'runs', 'schedule'])}>Vaciar flujo (empezar de cero)</button>
+          </details>
         </div>
       )}
       {tab === 'external' && <div className="panel-body pad"><ExternalInvoke flow={flow} /></div>}

@@ -118,10 +118,14 @@ export function updateChatMsg(flowId, key, id, fn) {
   return m;
 }
 export const clearChat = (flowId, key) => fs.rmSync(chatFile(flowId, key), { force: true });
+export const clearAllChats = (flowId) => fs.rmSync(path.join(DATA, 'chats', safe(flowId)), { recursive: true, force: true });
 
 // ---------- runs ----------
 const runFile = (flowId, runId) => path.join(dir('runs', safe(flowId)), `${safe(runId)}.json`);
 export const saveRun = (run) => writeJson(runFile(run.flowId, run.id), run);
+export const clearRuns = (flowId) => fs.rmSync(path.join(DATA, 'runs', safe(flowId)), { recursive: true, force: true });
+export const countRuns = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'runs', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
+export const countChats = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'chats', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
 export const getRun = (flowId, runId) => readJson(runFile(flowId, runId), null);
 export function listRuns(flowId) {
   return fs.readdirSync(dir('runs', safe(flowId))).filter((f) => f.endsWith('.json'))

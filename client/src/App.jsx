@@ -40,6 +40,8 @@ export default function App() {
   const [modal, setModal] = useState(null); // 'picker' | 'ai' | {help: section}
   const [tourStep, setTourStep] = useState(ls.get('afs.tourDone') ? null : 0);
   const endTour = () => { setTourStep(null); ls.set('afs.tourDone', '1'); };
+  const [leftovers, setLeftovers] = useState(null);
+  const [resetNonce, setResetNonce] = useState(0);
   const [autoOrder, setAutoOrder] = useState(ls.get('afs.autoOrder') !== '0');
   const dirty = useRef(false);
   const saveTimer = useRef(null);
@@ -59,6 +61,13 @@ export default function App() {
     });
   }, []);
   useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
+  // When the canvas is empty, show what is still attached to the flow (description, vars, chats, runs…).
+  const noSteps = flow && flow.steps.length === 0;
+  useEffect(() => {
+    if (!noSteps) { setLeftovers(null); return; }
+    const t = setTimeout(() => api.get(`/api/flows/${flow.id}/leftovers`).then(setLeftovers).catch(() => {}), 700);
+    return () => clearTimeout(t);
+  }, [flow?.id, noSteps, resetNonce]);
 
   async function openFlow(id) {
     let f = await api.get(`/api/flows/${id}`);
@@ -182,6 +191,19 @@ export default function App() {
     await api.put(`/api/flows/${flowRef.current.id}`, flowRef.current);
     dirty.current = false; setSaveState('guardado');
   }
+  async function resetFlow(parts, ask = true) {
+    const labels = { steps: 'steps y relaciones', description: 'descripción', vars: 'variables', memory: 'memoria del flujo', chats: 'chats', runs: 'historial de ejecuciones', schedule: 'programación' };
+    if (ask && !confirm(`Se va a borrar: ${parts.map((p) => labels[p]).join(', ')}.
+Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
+
+¿Continuar?`)) return;
+    try {
+      clearTimeout(saveTimer.current); dirty.current = false;
+      const f = await api.post(`/api/flows/${flow.id}/reset`, { parts });
+      setFlow(f); setSelectedId(null); setLive({}); setResetNonce((n) => n + 1); loadFlows();
+      notify('Flujo limpio');
+    } catch (e) { notify(e.message); }
+  }
   async function probe() {
     notify('Detectando tools y MCPs de tu Claude Code…');
     await api.post('/api/catalog/probe', { cwd: flow?.cwd });
@@ -244,7 +266,22 @@ export default function App() {
               <Canvas flow={flow} live={live} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect}
                 onDeleteSteps={onDeleteSteps} onDeleteEdges={onDeleteEdges} onMove={onMove} />
             </ReactFlowProvider>
-            {!flow.steps.length && <div className="empty">Agrega steps desde la barra superior y conéctalos arrastrando del borde derecho de un step al izquierdo de otro.</div>}
+            {!flow.steps.length && (
+              <div className="empty">
+                <div>Agrega steps desde la barra superior y conéctalos arrastrando del borde derecho de un step al izquierdo de otro.</div>
+                {leftovers && (leftovers.description || leftovers.vars || leftovers.memory || leftovers.chats || leftovers.runs || leftovers.schedule) ? (
+                  <div className="leftovers">
+                    <div>El flujo no tiene steps, pero todavía conserva:{' '}
+                      {[leftovers.description && 'descripción', leftovers.vars && `${leftovers.vars} variable${leftovers.vars > 1 ? 's' : ''}`, leftovers.memory && `${leftovers.memory} recuerdo${leftovers.memory > 1 ? 's' : ''}`, leftovers.chats && 'historial de chat', leftovers.runs && `${leftovers.runs} ejecucion${leftovers.runs > 1 ? 'es' : ''}`, leftovers.schedule && 'programación activa'].filter(Boolean).join(' · ')}
+                    </div>
+                    <div className="row center">
+                      <button className="danger" onClick={() => resetFlow(['description', 'vars', 'memory', 'chats', 'runs', 'schedule'], false)}>Limpiar todo</button>
+                      <button className="ghost" onClick={() => { setSelectedId(null); setFlowTab('settings'); }}>Revisar en “Flujo”</button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )}
             <div className="hint-bar small muted">Arrastra entre puntos para relacionar · Supr borra lo seleccionado · Click en el fondo = chat general</div>
           </section>
           <aside className="side" data-tour="side">
@@ -253,7 +290,7 @@ export default function App() {
                 onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onProbe={probe}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             ) : (
-              <FlowPanel flow={flow} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
+              <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             )}
           </aside>

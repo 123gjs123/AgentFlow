@@ -32,6 +32,7 @@ A flow is a directed acyclic graph of steps that the user draws on a canvas. Rel
 | FLOW-10 | A running flow can be stopped. Its child processes are killed. |
 | FLOW-11 | Flow variables (JSON) are available as `{{vars.x}}` in tasks and commands, and as `ctx.vars` in hooks. |
 | FLOW-12 | Optional schedule: run every N minutes with a fixed input. A scheduled run is skipped if the flow is still running. |
+| FLOW-14 | Deleting a step also deletes its chat history. Deleting steps does **not** clear flow-level data, so when the canvas is empty the app lists what is still attached (description, variables, flow memory, chats, runs, active schedule) and offers **Clear all**. Flow settings → *Cleanup zone* clears each part separately, or **Empty flow** resets everything except name, working directory and invocation address (`POST /api/flows/:id/reset {parts}`). |
 | FLOW-13 | Each flow has a working directory (`cwd`) used by Claude and by commands. It defaults to the user's home (spec 11 changes this default). |
 
 ## Data model (step)
