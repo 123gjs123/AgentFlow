@@ -48,10 +48,13 @@ function StepNode({ data, selected }) {
       <div className="node-name" title={step.name}>{step.name}</div>
       <div className="node-sub" title={ref}>{ref || <span className="muted">—</span>}</div>
       {live?.activity && status === 'running' && <div className="node-live" title={live.activity}>{live.activity}</div>}
-      {(step.memory?.length > 0 || step.hooks?.trim()) && (
+      {(step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0) && (
         <div className="node-badges">
           {step.memory?.length > 0 && <span title="Memoria">🧷 {step.memory.length}</span>}
           {step.hooks?.trim() && <span title="Hooks">🪝</span>}
+          {step.output?.format === 'json' && <span title="Entrega JSON estructurado">{'{ }'}</span>}
+          {step.lastRun?.actions?.length > 0 && <span title="Acciones en sistemas externos (última ejecución)">⚡ {step.lastRun.actions.length}</span>}
+          {step.pinned && <span className="pin" title="Salida fijada: no se ejecuta en el flujo">📌</span>}
         </div>
       )}
       <Handle type="source" position={Position.Right} />

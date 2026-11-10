@@ -77,6 +77,8 @@ export function newStep(partial = {}) {
     permissionMode: '',
     allowedTools: 'Read Grep Glob WebFetch WebSearch Skill',
     hooks: '',
+    output: { format: 'text', schema: '' },
+    input: { mode: 'full', maxChars: 12000 },
     position: { x: 0, y: 0 },
     memory: [],
     chatSessionId: null,

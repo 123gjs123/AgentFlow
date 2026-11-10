@@ -1,6 +1,6 @@
 # 14 — Step outputs: handoff, actions and deliverables
 
-**Status:** Proposed
+**Status:** Partial. Section 2 (handoff) and 3.4 (detected skill-managed actions) are implemented by [spec 15](15-data-passing.md); declared actions and deliverables are proposed.
 
 ## Summary
 

@@ -105,7 +105,8 @@ Any tool outside the list is denied by Claude Code. Denials appear in the run's 
 | `{{input}}` | The flow input |
 | `{{upstream}}` | Concatenated outputs of the direct upstream steps |
 | `{{vars.key}}` | Flow variable |
-| `{{steps.Name.output}}` | Last output of the step named `Name` (or with that id) |
+| `{{steps.Name.output}}` | Output of the step named `Name` (or with that id) |
+| `{{steps.Name.json.a.b}}` | A JSON field of that step's output (spec 15) |
 
 ## Acceptance criteria
 - A three-step chain A → B → C runs in order. C's prompt contains B's output, and the badges show 1, 2, 3.

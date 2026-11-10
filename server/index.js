@@ -127,7 +127,7 @@ app.put('/api/flows/:id', wrap((req) => {
   const byId = new Map(cur.steps.map((s) => [s.id, s]));
   const steps = (body.steps || []).map((s) => {
     const prev = byId.get(s.id);
-    return prev ? { ...s, memory: prev.memory, lastRun: prev.lastRun, chatSessionId: prev.chatSessionId, chatContextHash: prev.chatContextHash } : store.newStep(s);
+    return prev ? { ...s, memory: prev.memory, lastRun: prev.lastRun, pinned: prev.pinned, chatSessionId: prev.chatSessionId, chatContextHash: prev.chatContextHash } : store.newStep({ ...s, pinned: undefined });
   });
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
@@ -166,6 +166,8 @@ app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); eng
 // ----- runs -----
 app.post('/api/flows/:id/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', trigger: 'manual' }) })));
 app.post('/api/flows/:id/steps/:stepId/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', only: req.params.stepId, trigger: 'manual' }) })));
+app.post('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.pinStep(req.params.id, req.params.stepId, req.body || {})));
+app.delete('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.unpinStep(req.params.id, req.params.stepId)));
 app.post('/api/flows/:id/stop', wrap((req) => ({ stopped: engine.stopRuns(req.params.id) })));
 app.get('/api/flows/:id/runs', wrap((req) => store.listRuns(req.params.id)));
 app.get('/api/flows/:id/runs/:runId', wrap((req) => store.getRun(req.params.id, req.params.runId)));

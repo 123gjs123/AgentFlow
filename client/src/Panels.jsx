@@ -4,6 +4,7 @@ import Chat from './Chat.jsx';
 import Events from './Events.jsx';
 import { ACCESS, accessOf } from './presets.js';
 import { ExternalInvoke } from './Help.jsx';
+import { TplField, IoSettings, DataTab } from './Data.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -18,6 +19,7 @@ export const HOOKS_TEMPLATE = `// Hooks del step (JavaScript, se ejecutan en el 
 //   ctx.sh(cmd, {shell:'powershell'|'bash'|'cmd'}) -> {code, stdout, stderr}
 //   ctx.ai(prompt, { tools, model }) -> texto   (Claude con tu suscripción + MCPs)
 //   ctx.runStep(nombreOId, input) -> salida de otro step
+//   ctx.upstream['Nombre step'] -> { output, json }   ctx.json = JSON de salida de este step
 //   ctx.log(...), ctx.remember(texto), ctx.setVar(k, v)
 
 async function onStart(ctx) {
@@ -26,7 +28,7 @@ async function onStart(ctx) {
 }
 
 async function onSuccess(ctx) {
-  // return 'texto' para reemplazar la salida del step
+  // return 'texto' para reemplazar la salida, o { output, json } para reemplazar texto y/o JSON
 }
 
 async function onFailure(ctx) {
@@ -79,8 +81,9 @@ export function Memory({ flowId, scope, items = [] }) {
   );
 }
 
-function Field({ label, hint, children }) {
-  return <label className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</label>;
+function Field({ label, hint, children, div }) {
+  const Tag = div ? 'div' : 'label';
+  return <Tag className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</Tag>;
 }
 
 export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep }) {
@@ -106,7 +109,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
         <button className="ghost danger small" onClick={() => confirm(`¿Eliminar "${step.name}"?`) && onDelete()}>Eliminar</button>
       </div>
       <div className="tabs">
-        {[['config', 'Config'], ['chat', 'Chat'], ['activity', `Actividad${status === 'running' ? ' ●' : ''}`], ['memory', `Memoria (${step.memory?.length || 0})`], ['hooks', 'Hooks']].map(([k, l]) => (
+        {[['config', 'Config'], ['chat', 'Chat'], ['activity', `Actividad${status === 'running' ? ' ●' : ''}`], ['data', `Datos${step.pinned ? ' 📌' : ''}`], ['memory', `Memoria (${step.memory?.length || 0})`], ['hooks', 'Hooks']].map(([k, l]) => (
           <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
@@ -140,17 +143,18 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
           )}
           {step.kind === 'command' ? (
             <>
-              <Field label="Comando" hint="stdin = salida de los steps anteriores ($env:STEP_UPSTREAM); input del flujo en $env:FLOW_INPUT; plantillas {{input}} {{upstream}} {{vars.x}}">
-                <textarea className="mono" rows={4} value={step.command} onChange={set('command')} placeholder="npx playwright test --grep @sanity" />
+              <Field div label="Comando" hint="stdin = salida de los steps anteriores ($env:STEP_UPSTREAM, JSON en $env:STEP_UPSTREAM_JSON); input del flujo en $env:FLOW_INPUT">
+                <TplField flow={flow} step={step} command className="mono" rows={4} value={step.command} onChange={(v) => onChange({ command: v })} placeholder="npx playwright test --grep @sanity" />
               </Field>
               <Field label="Shell">
                 <select value={step.shell} onChange={set('shell')}><option value="powershell">PowerShell</option><option value="bash">bash</option><option value="cmd">cmd</option></select>
               </Field>
+              <IoSettings step={step} onChange={onChange} />
             </>
           ) : (
             <>
-              <Field label="¿Qué hace?" hint="lo que debe producir en cada ejecución; admite {{input}} y {{vars.x}}">
-                <textarea rows={4} value={step.task} onChange={set('task')} placeholder="Ej: Lee el ticket {{vars.issue}} y lista criterios de aceptación y riesgos." />
+              <Field div label="¿Qué hace?" hint="lo que debe producir en cada ejecución; con { } insertas datos de otros steps, variables o el input">
+                <TplField flow={flow} step={step} rows={4} value={step.task} onChange={(v) => onChange({ task: v })} placeholder="Ej: Lee el ticket {{vars.issue}} y lista criterios de aceptación y riesgos." />
               </Field>
               <Field label="¿Cómo trabaja?" hint={step.kind === 'role' ? 'quién es: rol, criterio, tono' : 'opcional: instrucciones extra para la skill/agente'}>
                 <textarea rows={3} value={step.role} onChange={set('role')} placeholder="Ej: Eres un QA lead senior, directo, que prioriza por riesgo." />
@@ -162,10 +166,11 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
                 </select>
                 <div className="muted small">{accessOf(step)?.desc || `Tools: ${step.allowedTools || '(ninguna)'}${step.permissionMode ? ` · modo ${step.permissionMode}` : ''}`}</div>
               </Field>
+              <IoSettings step={step} onChange={onChange} />
               <details className="advanced">
                 <summary>Avanzado: contexto, modelo, permisos y tools exactas</summary>
-              <Field label="Contexto" hint="datos fijos: links, proyecto Jira, reglas, etc.">
-                <textarea rows={3} value={step.context} onChange={set('context')} />
+              <Field div label="Contexto" hint="datos fijos: links, proyecto Jira, reglas, etc.">
+                <TplField flow={flow} step={step} rows={3} value={step.context} onChange={(v) => onChange({ context: v })} />
               </Field>
               <div className="grid3">
                 <Field label="Modelo"><select value={step.model} onChange={set('model')}>{MODELS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></Field>
@@ -208,6 +213,8 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
           {step.lastRun?.error && status !== 'running' && <div className="error-bar">{step.lastRun.error}</div>}
         </div>
       )}
+
+      {tab === 'data' && <DataTab flow={flow} step={step} live={live} />}
 
       {tab === 'memory' && <Memory flowId={flow.id} scope={step.id} items={step.memory} />}
 

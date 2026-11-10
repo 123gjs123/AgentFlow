@@ -12,6 +12,7 @@ function newStep(kind, name) {
   return {
     id: rid('s_'), name, kind, role: '', agentRef: '', skillRef: '', command: '', shell: 'powershell', task: '', context: '',
     model: '', effort: '', permissionMode: '', allowedTools: 'Read Grep Glob WebFetch WebSearch Skill', hooks: '',
+    output: { format: 'text', schema: '' }, input: { mode: 'full', maxChars: 12000 },
     position: { x: 0, y: 0 }, memory: [], lastRun: null,
   };
 }
@@ -112,7 +113,7 @@ export default function App() {
             steps: c.steps.map((s) => {
               const p = srv.get(s.id);
               if (!p) return s;
-              return dirty.current ? { ...s, memory: p.memory, lastRun: p.lastRun, chatSessionId: p.chatSessionId } : { ...p, position: s.position };
+              return dirty.current ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId } : { ...p, position: s.position };
             }),
           };
         });

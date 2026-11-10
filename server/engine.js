@@ -8,6 +8,7 @@ import * as store from './store.js';
 import { runClaude } from './claude.js';
 import { findAgent, findSkill } from './catalog.js';
 import * as P from './prompt.js';
+import { validate, parseSchema } from './schema.js';
 
 export const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -73,11 +74,12 @@ function loadHooks(code) {
   return new Function(body)();
 }
 
-function hookCtx({ flow, step, run, input, signal, log }) {
+function hookCtx({ flow, step, run, input, signal, log, upstream = [] }) {
   const ctx = {
     flow: { id: flow.id, name: flow.name, vars: flow.vars },
     step: { id: step.id, name: step.name, kind: step.kind },
-    runId: run?.id, input, output: undefined, error: undefined,
+    runId: run?.id, input, output: undefined, json: undefined, error: undefined,
+    upstream: Object.fromEntries(upstream.map((u) => [u.name, { output: u.output, json: u.json }])),
     vars: flow.vars || {},
     log: (...a) => log({ kind: 'hook_log', text: a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') }),
     sh: async (cmd, o = {}) => {
@@ -135,21 +137,66 @@ function setStepRun(flowId, stepId, patch) {
   return flow;
 }
 
-async function executeStep(flow, step, input, run, signal, upstream) {
-  const rs = run.steps[step.id] = { status: 'running', startedAt: now(), events: [], output: '' };
+const clipS = (x, n) => (typeof x === 'string' && x.length > n ? x.slice(0, n) + `\n… [${x.length - n} chars más]` : x);
+const EFFECT_RE = /^(create|add|edit|update|transition|delete|send|share|trash|copy|move|upload|post)/i;
+
+/** Side effects seen in a run: files written by Claude, write-type MCP calls (Jira, Confluence, Drive…). */
+function trackEffect(rs, use, res) {
+  const name = use.name || '';
+  if (['Write', 'Edit', 'NotebookEdit'].includes(name) && use.input?.file_path && !res.isError) {
+    if (!rs.files.includes(use.input.file_path)) rs.files.push(use.input.file_path);
+  } else if (name.startsWith('mcp__')) {
+    const tool = name.split('__').pop();
+    if (EFFECT_RE.test(tool)) {
+      rs.actions.push({ tool, server: (name.split('__')[1] || '').replace(/^claude_ai_/, ''), ok: !res.isError, input: JSON.stringify(use.input || {}).slice(0, 600), result: String(res.content || '').slice(0, 400) });
+    }
+  }
+}
+
+function schemaErrors(step, json, log) {
+  const { schema, error } = parseSchema(step.output?.schema);
+  if (error) { log({ kind: 'error', text: `${error} (se omite la validación)` }); return []; }
+  return schema ? validate(schema, json) : [];
+}
+
+async function summarize(text, signal, log) {
+  log({ kind: 'tool_use', name: 'resumen (haiku)', input: { chars: text.length } });
+  const r = await runClaude({
+    systemPrompt: 'Resume el texto para que otro agente lo use como input. Conserva los datos concretos: ids, keys de Jira, números, nombres, decisiones y conclusiones. Máximo 15 líneas, sin preámbulo.',
+    prompt: text.slice(0, 60000), model: 'haiku', tools: '', strictMcp: true, noPersist: true, cwd: os.homedir(), signal,
+  });
+  log({ kind: 'tool_result', content: (r.text || r.error || '').slice(0, 2000), isError: r.isError });
+  return r.isError ? null : r.text.trim();
+}
+
+async function executeStep(flow, step, input, run, signal, upstream, opts = {}) {
+  const data = opts.data || new Map();
+  const rs = run.steps[step.id] = { status: 'running', startedAt: now(), events: [], output: '', files: [], actions: [] };
+  const pending = new Map();
   const log = (ev) => {
     const e = { ...ev, t: now() };
+    if (ev.kind === 'tool_use' && ev.id) pending.set(ev.id, { name: ev.name, input: ev.input });
+    if (ev.kind === 'tool_result' && pending.has(ev.id)) trackEffect(rs, pending.get(ev.id), ev);
     if (ev.kind !== 'delta' && ev.kind !== 'thinking_delta') { rs.events.push(e); if (rs.events.length > 1500) rs.events.splice(0, 200); }
     emit({ type: 'run.event', flowId: flow.id, runId: run.id, stepId: step.id, event: e });
   };
   setStepRun(flow.id, step.id, { status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null });
   emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
 
+  // Pinned output: the step is not executed (n8n-style "pin data"), downstream gets the frozen data.
+  if (step.pinned && !opts.force) {
+    log({ kind: 'hook_log', text: '📌 Salida fijada: este step no se ejecuta. Desfíjala en la pestaña Datos para volver a ejecutarlo.' });
+    rs.status = 'success'; rs.pinned = true; rs.output = step.pinned.output || ''; rs.json = step.pinned.json; rs.inputView = { pinned: true };
+    return finish();
+  }
+
+  const upMeta = upstream.map((u) => ({ name: u.name, chars: (u.output || '').length, json: u.json !== undefined && u.json !== null }));
   let hooks = {};
   try { hooks = loadHooks(step.hooks); } catch (e) { log({ kind: 'error', text: `Error compilando hooks: ${e.message}` }); }
-  const ctx = hookCtx({ flow, step, run, input, signal, log });
+  const ctx = hookCtx({ flow, step, run, input, signal, log, upstream });
 
-  let output = ''; let error = null; let sessionId = null;
+  let output = ''; let json; let error = null; let sessionId = null;
+  const wantsJson = step.output?.format === 'json';
   try {
     if (hooks.onStart) {
       log({ kind: 'hook', text: 'onStart' });
@@ -159,36 +206,62 @@ async function executeStep(flow, step, input, run, signal, upstream) {
     }
 
     if (step.kind === 'command') {
-      const up = upstream.map((u) => u.output).filter(Boolean).join('\n\n');
-      const cmd = P.render(step.command, { flow, vars: flow.vars, input: ctx.input, upstream: up });
+      const up = upstream.map((u) => u.output || (u.json != null ? JSON.stringify(u.json, null, 2) : '')).filter(Boolean).join('\n\n');
+      const upJson = Object.fromEntries(upstream.filter((u) => u.json != null).map((u) => [u.name, u.json]));
+      const cmd = P.render(step.command, { flow, vars: flow.vars, input: ctx.input, upstream: up, data });
+      rs.inputView = { kind: 'command', command: cmd, stdin: clipS(up || ctx.input || '', 20000), upstream: upMeta };
       log({ kind: 'tool_use', name: `shell:${step.shell}`, input: { cmd } });
       // stdin = output of previous steps (or the flow input for the first step)
-      const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up }, signal });
+      const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson) }, signal });
       log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 8000), isError: r.code !== 0 });
       output = r.stdout.trim();
       if (r.code !== 0) error = `exit ${r.code}: ${r.stderr.slice(0, 2000)}`;
+      else if (wantsJson) {
+        const ex = P.extractJson(output);
+        const errs = ex.error ? [ex.error] : schemaErrors(step, ex.json, log);
+        if (errs.length) error = `Salida JSON inválida: ${errs.join('; ')}`; else json = ex.json;
+      }
     } else {
-      const addDirs = [];
-      const r = await runClaude({
-        prompt: P.runUserPrompt(flow, step, ctx.input, upstream),
-        appendSystem: P.runSystemPrompt(flow, step),
-        model: step.model || undefined,
-        effort: step.effort || undefined,
+      if ((step.input?.mode || 'full') === 'summary') {
+        for (const u of upstream) {
+          if ((u.output || '').length <= 1500) continue;
+          const key = `${u.id}`;
+          if (!opts.summaries?.has(key)) opts.summaries?.set(key, await summarize(u.output, signal, log));
+          u.summary = opts.summaries?.get(key) || null;
+        }
+      }
+      const prompt = P.runUserPrompt(flow, step, ctx.input, upstream, data);
+      const system = P.runSystemPrompt(flow, step);
+      rs.inputView = { kind: 'ai', mode: step.input?.mode || 'full', prompt: clipS(prompt, 40000), system: clipS(system, 20000), upstream: upMeta.map((m, i) => ({ ...m, summarized: !!upstream[i].summary })) };
+      const common = {
+        model: step.model || undefined, effort: step.effort || undefined,
         agent: step.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
-        permissionMode: step.permissionMode || undefined,
-        allowedTools: step.allowedTools,
-        addDirs,
-        cwd: flowCwd(flow),
-        signal,
-        onEvent: log,
-      });
+        permissionMode: step.permissionMode || undefined, allowedTools: step.allowedTools,
+        cwd: flowCwd(flow), signal, onEvent: log,
+      };
+      const r = await runClaude({ prompt, appendSystem: system, ...common });
       sessionId = r.sessionId;
       const tags = P.extractTags(r.text);
       output = tags.clean;
       for (const m of tags.remember) addMemory(flow.id, step.id, m, 'run');
       if (r.isError) error = r.error || 'error';
+      else if (wantsJson) {
+        const ex = P.extractJson(output);
+        const text = ex.error ? output : ex.text;
+        let got = ex.json;
+        let errs = ex.error ? [ex.error] : schemaErrors(step, ex.json, log);
+        if (errs.length && sessionId && !signal?.aborted) {
+          log({ kind: 'hook_log', text: `Salida JSON inválida (${errs[0]}). Pidiendo la corrección una vez…` });
+          const r2 = await runClaude({ prompt: `Tu salida no cumple el formato JSON requerido:\n- ${errs.join('\n- ')}\n\nDevuelve SOLO el bloque ${'```'}json corregido.`, resume: sessionId, ...common });
+          const ex2 = P.extractJson(P.extractTags(r2.text).clean);
+          errs = ex2.error ? [ex2.error] : schemaErrors(step, ex2.json, log);
+          got = ex2.json;
+        }
+        if (errs.length) error = `Salida JSON inválida: ${errs.join('; ')}`;
+        else { json = got; output = text; }
+      }
     }
-    ctx.output = output;
+    ctx.output = output; ctx.json = json;
     if (error) {
       ctx.error = error;
       if (hooks.onFailure) { log({ kind: 'hook', text: 'onFailure' }); await hooks.onFailure(ctx); }
@@ -196,22 +269,48 @@ async function executeStep(flow, step, input, run, signal, upstream) {
       log({ kind: 'hook', text: 'onSuccess' });
       const r = await hooks.onSuccess(ctx);
       if (typeof r === 'string') output = r;
+      else if (r && typeof r === 'object') { if (typeof r.output === 'string') output = r.output; if ('json' in r) json = r.json; }
     }
   } catch (e) {
     error = e.message;
     log({ kind: 'error', text: `Hook/step error: ${e.message}` });
   }
   rs.status = error ? (signal?.aborted ? 'stopped' : 'error') : 'success';
-  rs.output = output; rs.error = error; rs.sessionId = sessionId;
+  rs.output = output; rs.json = json; rs.error = error; rs.sessionId = sessionId;
   return finish();
 
   function finish() {
     rs.endedAt = now();
-    setStepRun(flow.id, step.id, { status: rs.status, endedAt: rs.endedAt, output: rs.output, error: rs.error || null, sessionId: rs.sessionId || null });
+    const jsonFits = rs.json === undefined || JSON.stringify(rs.json).length < 300000;
+    setStepRun(flow.id, step.id, {
+      status: rs.status, endedAt: rs.endedAt, output: rs.output, json: jsonFits ? rs.json : undefined, files: rs.files, actions: rs.actions,
+      pinned: !!rs.pinned, error: rs.error || null, sessionId: rs.sessionId || null,
+    });
     emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
     store.saveRun(run);
     return rs;
   }
+}
+
+/** Freeze a step's output: full runs reuse it instead of executing the step. */
+export function pinStep(flowId, stepId, body = {}) {
+  const flow = store.updateFlow(flowId, (f) => {
+    const s = f.steps.find((x) => x.id === stepId);
+    if (!s) throw new Error('Step no encontrado');
+    if (body.fromLast) {
+      if (!s.lastRun || (!s.lastRun.output && s.lastRun.json === undefined)) throw new Error('El step todavía no tiene una salida para fijar');
+      s.pinned = { output: s.lastRun.output || '', json: s.lastRun.json, at: now(), source: 'last', runId: s.lastRun.runId };
+    } else {
+      s.pinned = { output: String(body.output ?? ''), json: body.json === undefined ? undefined : body.json, at: now(), source: 'edited' };
+    }
+  });
+  flowChanged(flow);
+  return flow;
+}
+export function unpinStep(flowId, stepId) {
+  const flow = store.updateFlow(flowId, (f) => { const s = f.steps.find((x) => x.id === stepId); if (s) delete s.pinned; });
+  flowChanged(flow);
+  return flow;
 }
 
 /** Run the whole flow (or a single step with `only`). Returns runId immediately. */
@@ -226,7 +325,8 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual' }
   emit({ type: 'run.started', flowId, runId: run.id, only, trigger });
 
   (async () => {
-    const outputs = new Map();
+    const data = new Map(); // stepId -> { output, json, files, actions } produced in this run
+    const summaries = new Map();
     const failed = new Set();
     try {
       for (const level of levels) {
@@ -247,10 +347,11 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual' }
             }
             const upstream = ups.map((u) => {
               const s = fresh.steps.find((x) => x.id === u);
-              return { name: s?.name || u, output: outputs.get(u) ?? s?.lastRun?.output ?? '' };
+              const d = data.get(u) || (s ? P.stepData(s) : { output: '' });
+              return { id: u, name: s?.name || u, output: d.output || '', json: d.json };
             });
-            const r = await executeStep(fresh, step, input, run, controller.signal, upstream);
-            outputs.set(id, r.output);
+            const r = await executeStep(fresh, step, input, run, controller.signal, upstream, { data, summaries, force: !!only });
+            data.set(id, { output: r.output, json: r.json, files: r.files || [], actions: r.actions || [] });
             if (r.status === 'error' || r.status === 'stopped') failed.add(id);
           }
         };
@@ -464,10 +565,11 @@ export function waitRun(flowId, runId, timeoutMs = 15 * 60000) {
 export function runSummary(flow, run) {
   if (!run) return null;
   const name = (id) => flow.steps.find((s) => s.id === id)?.name || id;
-  const steps = Object.entries(run.steps || {}).map(([id, s]) => ({ step: name(id), status: s.status, output: s.output || '', error: s.error || undefined }));
+  const steps = Object.entries(run.steps || {}).map(([id, s]) => ({ step: name(id), status: s.status, output: s.output || '', json: s.json, files: s.files?.length ? s.files : undefined, actions: s.actions?.length ? s.actions : undefined, pinned: s.pinned || undefined, error: s.error || undefined }));
   const sinks = run.only ? [run.only] : flow.steps.filter((s) => !flow.edges.some((e) => e.source === s.id)).map((s) => s.id);
   const result = sinks.map((id) => run.steps?.[id]).filter((s) => s?.output).map((s) => s.output).join('\n\n---\n\n');
-  return { flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, startedAt: run.startedAt, endedAt: run.endedAt, error: run.error, result, steps };
+  const sinkJson = sinks.map((id) => run.steps?.[id]?.json).filter((j) => j !== undefined);
+  return { flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, startedAt: run.startedAt, endedAt: run.endedAt, error: run.error, result, json: sinkJson.length === 1 ? sinkJson[0] : sinkJson.length ? sinkJson : undefined, steps };
 }
 
 /** Builds a flow from a natural-language description, using the user's skills/agents catalog. */

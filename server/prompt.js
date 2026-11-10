@@ -5,18 +5,44 @@ import { findAgent, findSkill } from './catalog.js';
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + `\n… [recortado, ${s.length - n} chars más]` : s || '');
 const KIND_LABEL = { role: 'Rol', agent: 'Agente', skill: 'Skill', command: 'Comando' };
 
+export const getPath = (obj, p) => (!p ? obj : String(p).split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj));
+const show = (v) => (v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+
+/** Data a step exposes to others: this run's result if available, else its pinned or last output. */
+export function stepData(step, data) {
+  const d = data?.get?.(step.id);
+  if (d) return d;
+  if (step.pinned) return { output: step.pinned.output || '', json: step.pinned.json, files: [], actions: [] };
+  const lr = step.lastRun || {};
+  return { output: lr.output || '', json: lr.json, files: lr.files || [], actions: lr.actions || [] };
+}
+
+/** Resolves "Name.json.a.b" | "Name.output" | "Name.files" | "Name.actions" | "Name.a.b" (json shorthand). */
+export function resolveStepRef(flow, rest, data) {
+  const steps = [...flow.steps].sort((a, b) => b.name.length - a.name.length);
+  for (const s of steps) {
+    for (const label of [s.name, s.id]) {
+      if (rest !== label && !rest.startsWith(label + '.')) continue;
+      const d = stepData(s, data);
+      const sub = rest.slice(label.length + 1) || 'output';
+      const [head, ...tail] = sub.split('.');
+      if (head === 'output' || head === 'text') return show(d.output);
+      if (head === 'json') return show(getPath(d.json, tail.join('.')));
+      if (head === 'files') return (d.files || []).join('\n');
+      if (head === 'actions') return show(d.actions || []);
+      return show(getPath(d.json, sub));
+    }
+  }
+  return null;
+}
+
 export function render(tpl, ctx) {
-  return String(tpl || '').replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => {
+  return String(tpl || '').replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (m, key) => {
     if (key === 'input') return ctx.input ?? '';
     if (key === 'upstream') return ctx.upstream ?? '';
-    const [head, ...rest] = key.split('.');
-    if (head === 'vars') return String(ctx.vars?.[rest.join('.')] ?? '');
-    if (head === 'steps') {
-      const name = rest.slice(0, -1).join('.');
-      const s = ctx.flow?.steps.find((x) => x.name === name || x.id === name);
-      return s?.lastRun?.output ?? '';
-    }
-    return `{{${key}}}`;
+    if (key.startsWith('vars.')) { const k = key.slice(5); return show(ctx.vars?.[k] ?? getPath(ctx.vars, k)); }
+    if (key.startsWith('steps.') && ctx.flow) { const r = resolveStepRef(ctx.flow, key.slice(6), ctx.data); if (r !== null) return r; }
+    return m;
   });
 }
 
@@ -56,6 +82,10 @@ export function runSystemPrompt(flow, step) {
   if (step.context) parts.push(`## Contexto\n${render(step.context, { flow, vars: flow.vars })}`);
   parts.push(`## Memoria de este step\n${memList(step.memory)}`);
   if (flow.memory?.length) parts.push(`## Memoria general del flujo\n${memList(flow.memory)}`);
+  if (step.output?.format === 'json') {
+    const sc = step.output.schema?.trim();
+    parts.push('## Formato de salida: JSON\nAdemás de una explicación breve, TERMINA tu respuesta con UN único bloque ```json con los datos estructurados (JSON válido, sin comentarios). Los steps siguientes consumen ese JSON campo por campo.' + (sc ? '\nEl JSON debe cumplir este JSON Schema:\n```json\n' + sc + '\n```' : ''));
+  }
   parts.push(`## Reglas de salida
 - Tu respuesta final ES la salida de este step y se pasa a los steps siguientes: concreta y accionable.
 - Si descubres un hecho duradero útil para futuras ejecuciones de este step, agrégalo al final como <remember>hecho</remember> (uno por línea).
@@ -63,12 +93,28 @@ export function runSystemPrompt(flow, step) {
   return parts.join('\n\n');
 }
 
-export function runUserPrompt(flow, step, input, upstream) {
-  const parts = [`## Tarea\n${render(step.task, { flow, vars: flow.vars, input }) || '(sin tarea definida: usa tu rol y el input)'}`];
-  if (upstream.length) {
-    parts.push('## Salidas de los steps anteriores');
-    for (const u of upstream) parts.push(`### ${u.name}\n${clip(u.output, 12000)}`);
+const jsonBlock = (v, max) => '```json\n' + clip(JSON.stringify(v, null, 2), max) + '\n```';
+/** Upstream section according to the step's input mode: full | json | summary | refs. */
+export function upstreamSection(step, upstream) {
+  const mode = step.input?.mode || 'full';
+  const max = Number(step.input?.maxChars) || 12000;
+  if (!upstream.length || mode === 'refs') return '';
+  const parts = ['## Salidas de los steps anteriores'];
+  for (const u of upstream) {
+    const hasJson = u.json !== undefined && u.json !== null;
+    let body;
+    if (mode === 'json') body = hasJson ? jsonBlock(u.json, max) : clip(u.output, max);
+    else if (mode === 'summary') body = u.summary || clip(u.output, max);
+    else body = [clip(u.output, max), hasJson ? 'Datos (JSON):\n' + jsonBlock(u.json, max) : ''].filter(Boolean).join('\n\n');
+    parts.push(`### ${u.name}\n${body || '(sin salida)'}`);
   }
+  return parts.join('\n\n');
+}
+
+export function runUserPrompt(flow, step, input, upstream, data) {
+  const parts = [`## Tarea\n${render(step.task, { flow, vars: flow.vars, input, data }) || '(sin tarea definida: usa tu rol y el input)'}`];
+  const up = upstreamSection(step, upstream);
+  if (up) parts.push(up);
   if (input) parts.push(`## Input del flujo\n${clip(input, 8000)}`);
   if (Object.keys(flow.vars || {}).length) parts.push(`## Variables\n${JSON.stringify(flow.vars, null, 2)}`);
   return parts.join('\n\n');
@@ -102,7 +148,8 @@ export function stepContextBlock(flow, step) {
     `Modelo: ${step.model || 'por defecto'} | Effort: ${step.effort || 'por defecto'} | Permisos: ${step.permissionMode || 'por defecto'} | Tools permitidas: ${step.allowedTools || '(ninguna extra)'}`,
     `Hooks (código):\n${clip(step.hooks, 3000) || '(ninguno)'}`,
     `Steps anteriores: ${up.map((s) => s.name).join(', ') || '—'} | Steps siguientes: ${down.map((s) => s.name).join(', ') || '—'}`,
-    `Última ejecución: ${lr ? `${lr.status} (${new Date(lr.endedAt || lr.startedAt).toISOString()})\nSalida:\n${clip(lr.output, 6000)}${lr.error ? `\nError: ${clip(lr.error, 1500)}` : ''}` : 'nunca'}`,
+    `Última ejecución: ${lr ? `${lr.status} (${new Date(lr.endedAt || lr.startedAt).toISOString()})\nSalida:\n${clip(lr.output, 6000)}${lr.json !== undefined ? `\nDatos JSON:\n${clip(JSON.stringify(lr.json, null, 2), 4000)}` : ''}${lr.error ? `\nError: ${clip(lr.error, 1500)}` : ''}` : 'nunca'}`,
+    `Formato de salida: ${step.output?.format === 'json' ? 'JSON' : 'texto'} | Recibe de anteriores: ${step.input?.mode || 'full'}${step.pinned ? ' | 📌 salida fijada (no se ejecuta en el flujo)' : ''}`,
     `Memoria del step:\n${memList(step.memory)}`,
     `Memoria general del flujo:\n${memList(flow.memory)}`,
     `Variables: ${JSON.stringify(flow.vars || {})}`,
@@ -171,6 +218,21 @@ export function extractTags(text) {
     .replace(/<step-update>[\s\S]*?<\/step-update>/g, '')
     .trim();
   return { remember, updates, clean };
+}
+
+/** Pulls the last ```json block (or a bare JSON answer) out of a step's text. */
+export function extractJson(text) {
+  const t = String(text || '');
+  const re = /```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```/g;
+  let m, last = null;
+  while ((m = re.exec(t))) last = m;
+  if (last) {
+    try { return { json: JSON.parse(last[1]), text: (t.slice(0, last.index) + t.slice(last.index + last[0].length)).trim() }; }
+    catch (e) { return { error: 'JSON inválido: ' + e.message, text: t }; }
+  }
+  const x = t.trim();
+  if (/^[[{]/.test(x)) { try { return { json: JSON.parse(x), text: '' }; } catch (e) { return { error: 'JSON inválido: ' + e.message, text: t }; } }
+  return { error: 'No se encontró un bloque ```json en la respuesta', text: t };
 }
 
 export function parseJsonLoose(text) {

@@ -21,7 +21,8 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 11 | [Flow isolation](11-flow-isolation.md) | Proposed |
 | 12 | [Per-step external invocation](12-step-invocation.md) | Proposed |
 | 13 | [Skill sources: URL, folder, zip](13-skill-sources.md) | Proposed |
-| 14 | [Step outputs: handoff, actions, deliverables](14-step-outputs-and-actions.md) | Proposed |
+| 14 | [Step outputs: handoff, actions, deliverables](14-step-outputs-and-actions.md) | Partial (handoff and detected actions via spec 15) |
+| 15 | [Data passing between steps](15-data-passing.md) | Implemented ("for each" proposed) |
 
 **Status meanings**
 - **Implemented:** in `main` and verified end to end.
@@ -51,7 +52,8 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | **Memory** | Durable facts per step and per flow, injected into prompts. |
 | **Access preset** | A named bundle of allowed tools and permission mode (e.g. "Read Jira / Confluence"). |
 | **Source** | Something a step watches for changes: Jira, Confluence, git branch, URL, file, command (spec 10). |
-| **Handoff** | What a step passes to the next steps (text, markdown or validated JSON). |
+| **Handoff** | What a step passes to the next steps: text, validated JSON, files and actions (spec 15). |
+| **Pinned output** | A frozen step result reused by flow runs instead of executing the step (spec 15). |
 | **Action** | A declared change in an external system (e.g. create a Jira sub-task or bug), with approval and idempotency. |
 | **Deliverable** | A file a step produces in a given format (md, feature, xlsx, docx…), with destinations. |
 | **External API** | Token-protected `/api/ext/*` endpoints used by the CLI, the MCP server, CI and webhooks. |
