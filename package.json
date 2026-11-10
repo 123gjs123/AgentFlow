@@ -1,0 +1,28 @@
+{
+  "name": "agent-flow-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Visual builder/runner for AI agent flows powered by your local Claude Code (subscription).",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch-path=server server/index.js",
+    "build": "vite build",
+    "prod": "vite build && cross-env NODE_ENV=production node server/index.js"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "^1.1.4",
+    "@xyflow/react": "^12.3.6",
+    "dompurify": "^3.2.3",
+    "express": "^4.21.2",
+    "marked": "^15.0.6",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^7.0.3",
+    "vite": "^6.0.7"
+  }
+}
