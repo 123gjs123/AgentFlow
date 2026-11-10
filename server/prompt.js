@@ -8,6 +8,7 @@ const KIND_LABEL = { role: 'Rol', agent: 'Agente', skill: 'Skill', command: 'Com
 export function render(tpl, ctx) {
   return String(tpl || '').replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => {
     if (key === 'input') return ctx.input ?? '';
+    if (key === 'upstream') return ctx.upstream ?? '';
     const [head, ...rest] = key.split('.');
     if (head === 'vars') return String(ctx.vars?.[rest.join('.')] ?? '');
     if (head === 'steps') {

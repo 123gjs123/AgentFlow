@@ -21,6 +21,27 @@ export function listFlows() {
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 export const getFlow = (id) => readJson(path.join(dir('flows'), `${safe(id)}.json`), null);
+/** Resolve a flow by id or (case-insensitive) name — used by external callers. */
+export function findFlow(idOrName) {
+  const byId = getFlow(idOrName);
+  if (byId) return byId;
+  const n = String(idOrName).trim().toLowerCase();
+  const hit = listFlows().find((f) => f.name.trim().toLowerCase() === n);
+  return hit ? getFlow(hit.id) : null;
+}
+
+// ---------- config (external API token) ----------
+export function getConfig() {
+  const f = path.join(dir(), 'config.json');
+  let c = readJson(f, null);
+  if (!c?.token) { c = { ...(c || {}), token: crypto.randomBytes(24).toString('base64url') }; writeJson(f, c); }
+  return c;
+}
+export function rotateToken() {
+  const c = { ...getConfig(), token: crypto.randomBytes(24).toString('base64url') };
+  writeJson(path.join(dir(), 'config.json'), c);
+  return c;
+}
 export function saveFlow(flow) {
   flow.updatedAt = Date.now();
   writeJson(path.join(dir('flows'), `${safe(flow.id)}.json`), flow);

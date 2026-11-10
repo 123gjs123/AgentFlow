@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { api } from './api.js';
 import Chat from './Chat.jsx';
 import Events from './Events.jsx';
+import { ACCESS, accessOf } from './presets.js';
+import { ExternalInvoke } from './Help.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -138,7 +140,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
           )}
           {step.kind === 'command' ? (
             <>
-              <Field label="Comando" hint="usa {{input}}, {{vars.x}}, {{steps.Nombre.output}}; el input también llega por stdin y $env:FLOW_INPUT">
+              <Field label="Comando" hint="stdin = salida de los steps anteriores ($env:STEP_UPSTREAM); input del flujo en $env:FLOW_INPUT; plantillas {{input}} {{upstream}} {{vars.x}}">
                 <textarea className="mono" rows={4} value={step.command} onChange={set('command')} placeholder="npx playwright test --grep @sanity" />
               </Field>
               <Field label="Shell">
@@ -147,12 +149,21 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
             </>
           ) : (
             <>
-              <Field label={step.kind === 'role' ? 'Rol / instrucciones' : 'Instrucciones adicionales del rol'} hint="quién es y cómo trabaja">
-                <textarea rows={4} value={step.role} onChange={set('role')} placeholder="Eres un QA lead que…" />
+              <Field label="¿Qué hace?" hint="lo que debe producir en cada ejecución; admite {{input}} y {{vars.x}}">
+                <textarea rows={4} value={step.task} onChange={set('task')} placeholder="Ej: Lee el ticket {{vars.issue}} y lista criterios de aceptación y riesgos." />
               </Field>
-              <Field label="Tarea" hint="qué hace en cada ejecución; admite {{input}} y {{vars.x}}">
-                <textarea rows={4} value={step.task} onChange={set('task')} placeholder="Analiza el input y…" />
+              <Field label="¿Cómo trabaja?" hint={step.kind === 'role' ? 'quién es: rol, criterio, tono' : 'opcional: instrucciones extra para la skill/agente'}>
+                <textarea rows={3} value={step.role} onChange={set('role')} placeholder="Ej: Eres un QA lead senior, directo, que prioriza por riesgo." />
               </Field>
+              <Field label="Acceso" hint="qué puede tocar este step">
+                <select value={accessOf(step)?.id || 'custom'} onChange={(e) => { const a = ACCESS.find((x) => x.id === e.target.value); if (a) onChange({ allowedTools: a.tools, permissionMode: a.perm }); }}>
+                  {ACCESS.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+                  {!accessOf(step) && <option value="custom">Personalizado (ver Avanzado)</option>}
+                </select>
+                <div className="muted small">{accessOf(step)?.desc || `Tools: ${step.allowedTools || '(ninguna)'}${step.permissionMode ? ` · modo ${step.permissionMode}` : ''}`}</div>
+              </Field>
+              <details className="advanced">
+                <summary>Avanzado: contexto, modelo, permisos y tools exactas</summary>
               <Field label="Contexto" hint="datos fijos: links, proyecto Jira, reglas, etc.">
                 <textarea rows={3} value={step.context} onChange={set('context')} />
               </Field>
@@ -172,6 +183,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
                   <div className="small muted">MCP: {catalog.mcpServers.map((m) => <span key={m.name} className={`chip ${m.status === 'connected' ? 'ok' : 'warn'}`}>{m.name}</span>)}</div>
                 )}
               </Field>
+              </details>
             </>
           )}
           <div className="run-box">
@@ -235,7 +247,7 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep }) {
     <div className="panel">
       <div className="panel-head"><b>{flow.name}</b><span className="muted small">{flow.steps.length} steps</span></div>
       <div className="tabs">
-        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones']].map(([k, l]) => (
+        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones'], ['external', 'Invocar']].map(([k, l]) => (
           <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
@@ -261,11 +273,10 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep }) {
             </div>
             <input value={flow.schedule?.input || ''} onChange={(e) => onChange({ schedule: { ...flow.schedule, input: e.target.value } })} placeholder="Input para ejecuciones programadas" />
           </Field>
-          <Field label="Webhook (local)" hint="dispara el flujo; el body es el input">
-            <pre className="mono small">{`curl -X POST ${hook} -H "Content-Type: application/json" -d "{\\"issue\\":\\"SBK-123\\"}"`}</pre>
-          </Field>
+          <p className="muted small">Para dispararlo desde Claude Code, terminal, API, Jenkins o webhooks: pestaña <a onClick={() => setTab('external')}>Invocar</a>.</p>
         </div>
       )}
+      {tab === 'external' && <div className="panel-body pad"><ExternalInvoke flow={flow} /></div>}
       {tab === 'memory' && <Memory flowId={flow.id} scope="_flow" items={flow.memory} />}
       {tab === 'runs' && (
         <div className="panel-body pad">

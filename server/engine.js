@@ -159,9 +159,11 @@ async function executeStep(flow, step, input, run, signal, upstream) {
     }
 
     if (step.kind === 'command') {
-      const cmd = P.render(step.command, { flow, vars: flow.vars, input: ctx.input });
+      const up = upstream.map((u) => u.output).filter(Boolean).join('\n\n');
+      const cmd = P.render(step.command, { flow, vars: flow.vars, input: ctx.input, upstream: up });
       log({ kind: 'tool_use', name: `shell:${step.shell}`, input: { cmd } });
-      const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: ctx.input, env: { FLOW_INPUT: ctx.input || '' }, signal });
+      // stdin = output of previous steps (or the flow input for the first step)
+      const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up }, signal });
       log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 8000), isError: r.code !== 0 });
       output = r.stdout.trim();
       if (r.code !== 0) error = `exit ${r.code}: ${r.stderr.slice(0, 2000)}`;
@@ -443,6 +445,75 @@ export async function globalChat(flowId, message) {
   emit({ type: 'chat.done', flowId, key, message: mirror });
   return mirror;
 }
+
+// ---------- external helpers ----------
+/** Resolves when the run finishes (or after timeoutMs with status 'running'). */
+export function waitRun(flowId, runId, timeoutMs = 15 * 60000) {
+  return new Promise((resolve) => {
+    const finished = () => { const r = store.getRun(flowId, runId); return r && r.status !== 'running' ? r : null; };
+    const already = finished();
+    if (already) return resolve(already);
+    const onMsg = (m) => { if (m.type === 'run.finished' && m.runId === runId) { cleanup(); resolve(store.getRun(flowId, runId)); } };
+    const timer = setTimeout(() => { cleanup(); resolve(store.getRun(flowId, runId)); }, timeoutMs);
+    const cleanup = () => { clearTimeout(timer); bus.off('msg', onMsg); };
+    bus.on('msg', onMsg);
+  });
+}
+
+/** Compact, caller-friendly view of a run: per-step outputs + final result (outputs of the last steps). */
+export function runSummary(flow, run) {
+  if (!run) return null;
+  const name = (id) => flow.steps.find((s) => s.id === id)?.name || id;
+  const steps = Object.entries(run.steps || {}).map(([id, s]) => ({ step: name(id), status: s.status, output: s.output || '', error: s.error || undefined }));
+  const sinks = run.only ? [run.only] : flow.steps.filter((s) => !flow.edges.some((e) => e.source === s.id)).map((s) => s.id);
+  const result = sinks.map((id) => run.steps?.[id]).filter((s) => s?.output).map((s) => s.output).join('\n\n---\n\n');
+  return { flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, startedAt: run.startedAt, endedAt: run.endedAt, error: run.error, result, steps };
+}
+
+/** Builds a flow from a natural-language description, using the user's skills/agents catalog. */
+export async function generateFlow(description, catalog) {
+  const sys = `Diseñas flujos de agentes de IA. Devuelve SOLO JSON válido (sin texto, sin bloques de código) con esta forma:
+{"name":"...","description":"...","vars":{"clave":"valor de ejemplo"},
+ "steps":[{"key":"a","name":"Nombre corto","kind":"role|skill|agent|command","skillRef":"","agentRef":"","role":"quién es y cómo trabaja","task":"qué hace en cada ejecución; puede usar {{input}} y {{vars.x}}","command":"","shell":"powershell","access":"read|atlassian-read|atlassian|edit|dev|none"}],
+ "edges":[["a","b"]]}
+Reglas:
+- Usa kind "skill" con skillRef EXACTO del catálogo cuando una skill encaje; "agent" con agentRef exacto si un agente encaja; si no, "role".
+- "command" solo para comandos de shell concretos (tests, git, scripts).
+- access: read (por defecto), atlassian-read (leer Jira/Confluence), atlassian (escribir en Jira/Confluence), edit (editar archivos), dev (editar + Bash), none.
+- 2 a 7 steps, nombres cortos en español, edges sin ciclos; steps independientes pueden ir en paralelo.`;
+  const cat = `Skills disponibles:\n${catalog.skills.map((s) => `- ${s.name}: ${s.description.slice(0, 140)}`).join('\n')}\n\nAgentes disponibles:\n${catalog.agents.map((a) => `- ${a.name}: ${a.description.slice(0, 140)}`).join('\n') || '(ninguno)'}`;
+  const r = await runClaude({ systemPrompt: sys, prompt: `${cat}\n\nFlujo que quiere el usuario:\n${description}`, model: 'sonnet', tools: '', strictMcp: true, noPersist: true, cwd: os.homedir() });
+  const spec = P.parseJsonLoose(r.text);
+  if (!spec?.steps?.length) throw new Error(`No se pudo generar el flujo${r.error ? `: ${r.error}` : ''}`);
+  const flow = store.newFlow(spec.name || 'Flujo generado');
+  flow.description = spec.description || description;
+  flow.vars = spec.vars && typeof spec.vars === 'object' ? spec.vars : {};
+  const ids = {};
+  for (const s of spec.steps) {
+    const acc = ACCESS[s.access] || ACCESS.read;
+    const step = store.newStep({
+      name: s.name || 'Step', kind: ['role', 'skill', 'agent', 'command'].includes(s.kind) ? s.kind : 'role',
+      skillRef: s.skillRef || '', agentRef: s.agentRef || '', role: s.role || '', task: s.task || '',
+      command: s.command || '', shell: s.shell || 'powershell', allowedTools: acc.tools, permissionMode: acc.perm,
+    });
+    ids[s.key ?? step.name] = step.id;
+    flow.steps.push(step);
+  }
+  for (const [a, b] of spec.edges || []) if (ids[a] && ids[b] && ids[a] !== ids[b]) flow.edges.push({ id: store.uid('e_'), source: ids[a], target: ids[b] });
+  try { topoLevels(flow); } catch { flow.edges = []; }
+  return store.saveFlow(flow);
+}
+
+const READ = 'Read Grep Glob WebFetch WebSearch Skill';
+const RA = 'mcp__claude_ai_Atlassian_Rovo';
+export const ACCESS = {
+  read: { tools: READ, perm: '' },
+  'atlassian-read': { tools: `${READ} ${RA}__getAccessibleAtlassianResources ${RA}__getJiraIssue ${RA}__searchJiraIssuesUsingJql ${RA}__getConfluencePage ${RA}__searchConfluenceUsingCql ${RA}__search ${RA}__fetch`, perm: '' },
+  atlassian: { tools: `${READ} ${RA}`, perm: '' },
+  edit: { tools: `${READ} Edit Write`, perm: 'acceptEdits' },
+  dev: { tools: `${READ} Edit Write Bash`, perm: 'acceptEdits' },
+  none: { tools: '', perm: '' },
+};
 
 // ---------- schedules ----------
 const timers = new Map();

@@ -3,6 +3,7 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { api, onWs } from './api.js';
 import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel } from './Panels.jsx';
+import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 const rid = (p) => p + Math.random().toString(36).slice(2, 10);
@@ -36,6 +37,9 @@ export default function App() {
   const [showRun, setShowRun] = useState(false);
   const [toast, setToast] = useState('');
   const [saveState, setSaveState] = useState('');
+  const [modal, setModal] = useState(null); // 'picker' | 'ai' | {help: section}
+  const [tourStep, setTourStep] = useState(ls.get('afs.tourDone') ? null : 0);
+  const endTour = () => { setTourStep(null); ls.set('afs.tourDone', '1'); };
   const [autoOrder, setAutoOrder] = useState(ls.get('afs.autoOrder') !== '0');
   const dirty = useRef(false);
   const saveTimer = useRef(null);
@@ -57,7 +61,8 @@ export default function App() {
   useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
 
   async function openFlow(id) {
-    const f = await api.get(`/api/flows/${id}`);
+    let f = await api.get(`/api/flows/${id}`);
+    if (f.steps.length && f.steps.every((s) => !s.position?.x && !s.position?.y)) { f = { ...f, steps: autoLayout(f.steps, f.edges) }; api.put(`/api/flows/${f.id}`, f); }
     setFlow(f); setSelectedId(null); setLive({}); ls.set('afs.flow', id);
   }
 
@@ -141,9 +146,9 @@ export default function App() {
     const list = await api.get('/api/flows'); setFlows(list);
     if (list[0]) openFlow(list[0].id); else setFlow(null);
   }
-  function addStep(kind) {
-    const labels = { role: 'Nuevo rol', agent: 'Nuevo agente', skill: 'Nueva skill', command: 'Nuevo comando' };
-    const s = newStep(kind, labels[kind]);
+  function addStep(preset) {
+    setModal(null);
+    const s = { ...newStep(preset.step.kind, preset.group === 'En blanco' ? preset.name.replace(/ vacío| vacía/, '') : preset.name), ...preset.step };
     const sel = flow.steps.find((x) => x.id === selectedId);
     mutate((f) => {
       if (sel) { s.position = { x: sel.position.x + 300, y: sel.position.y }; }
@@ -196,28 +201,27 @@ export default function App() {
           {!flow && <option value="">— sin flujos —</option>}
           {flows.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
         </select>
-        <button onClick={() => createFlow()}>+ Flujo</button>
-        <button className="ghost" onClick={() => createFlow('demo')} title="Crea un flujo de ejemplo con tus skills de QA">Demo</button>
+        <span data-tour="flows" className="row">
+          <button onClick={() => createFlow()}>+ Flujo</button>
+          <button className="ghost" onClick={() => setModal('ai')} title="Describe el flujo y la IA lo arma con tus skills">✨ Con IA</button>
+          <button className="ghost" onClick={() => createFlow('demo')} title="Crea un flujo de ejemplo con tus skills de QA">Demo</button>
+        </span>
         {flow && <button className="ghost danger" onClick={deleteFlow} title="Eliminar flujo">🗑</button>}
         <div className="sep" />
         {flow && (
           <>
-            <span className="muted small">Agregar:</span>
-            <button onClick={() => addStep('role')}>🎭 Rol</button>
-            <button onClick={() => addStep('agent')}>🤖 Agente</button>
-            <button onClick={() => addStep('skill')}>🧩 Skill</button>
-            <button onClick={() => addStep('command')}>⌨️ Comando</button>
+            <button data-tour="add-step" onClick={() => setModal('picker')}>＋ Step</button>
             <div className="sep" />
             <button className="ghost" onClick={relayout}>⇄ Ordenar</button>
             <label className="toggle small"><input type="checkbox" checked={autoOrder} onChange={(e) => { setAutoOrder(e.target.checked); ls.set('afs.autoOrder', e.target.checked ? '1' : '0'); }} /> auto</label>
             <div className="grow" />
             {win && (
-              <span className="rate" title="Uso de tu suscripción (ventanas de 5 h y 7 días)">
+              <span className="rate" data-tour="rate" title="Uso de tu suscripción (ventanas de 5 h y 7 días)">
                 5h {Math.round((win.five_hour?.utilization || 0) * 100)}% · 7d {Math.round((win.seven_day?.utilization || 0) * 100)}%
               </span>
             )}
             <span className="muted small save">{saveState}</span>
-            <div className="run-wrap">
+            <div className="run-wrap" data-tour="run">
               <button className="primary" onClick={() => setShowRun(!showRun)} disabled={!flow.steps.length}>▶ Ejecutar flujo</button>
               {showRun && (
                 <div className="popover">
@@ -229,11 +233,13 @@ export default function App() {
             {anyRunning && <button className="danger" onClick={() => api.post(`/api/flows/${flow.id}/stop`)}>■ Detener</button>}
           </>
         )}
+        {!flow && <div className="grow" />}
+        <HelpMenu onTour={() => setTourStep(0)} onGuide={(sec) => setModal({ help: sec })} />
       </header>
 
       {flow ? (
         <main className="main">
-          <section className="canvas">
+          <section className="canvas" data-tour="canvas">
             <ReactFlowProvider>
               <Canvas flow={flow} live={live} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect}
                 onDeleteSteps={onDeleteSteps} onDeleteEdges={onDeleteEdges} onMove={onMove} />
@@ -241,7 +247,7 @@ export default function App() {
             {!flow.steps.length && <div className="empty">Agrega steps desde la barra superior y conéctalos arrastrando del borde derecho de un step al izquierdo de otro.</div>}
             <div className="hint-bar small muted">Arrastra entre puntos para relacionar · Supr borra lo seleccionado · Click en el fondo = chat general</div>
           </section>
-          <aside className="side">
+          <aside className="side" data-tour="side">
             {step ? (
               <StepPanel key={step.id} flow={flow} step={step} catalog={catalog} live={live[step.id]} tab={stepTab} setTab={setStepTab}
                 onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onProbe={probe}
@@ -256,10 +262,15 @@ export default function App() {
         <div className="welcome">
           <h2>Crea tu primer flujo</h2>
           <p className="muted">Cada step es un rol, agente, skill o comando. Corre con tu Claude Code (tu suscripción, skills y MCPs).</p>
-          <div className="row"><button className="primary" onClick={() => createFlow()}>+ Flujo vacío</button><button onClick={() => createFlow('demo')}>Flujo demo QA</button></div>
+          <div className="row"><button className="primary" onClick={() => setModal('ai')}>✨ Describirlo y que la IA lo arme</button><button onClick={() => createFlow('demo')}>Flujo demo QA</button><button className="ghost" onClick={() => createFlow()}>+ Flujo vacío</button></div>
+          <p className="muted small">¿Primera vez? <a onClick={() => setTourStep(0)}>Haz el recorrido guiado</a> o abre <a onClick={() => setModal({ help: 'start' })}>Ayuda</a>.</p>
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}
+      {modal === 'picker' && <StepPicker catalog={catalog} onPick={addStep} onClose={() => setModal(null)} />}
+      {modal === 'ai' && <AiFlowModal cwd={flow?.cwd} onClose={() => setModal(null)} onCreated={async (f) => { setModal(null); await loadFlows(); openFlow(f.id); notify(`Flujo “${f.name}” creado: revisa cada step y ejecútalo`); }} />}
+      {modal?.help && <HelpModal section={modal.help} setSection={(k) => setModal({ help: k })} onClose={() => setModal(null)} flow={flow} flows={flows} onTour={() => { setModal(null); setTourStep(0); }} />}
+      {tourStep !== null && <Tour step={tourStep} setStep={setTourStep} onClose={endTour} />}
     </div>
   );
 }
