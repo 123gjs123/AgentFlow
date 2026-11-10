@@ -41,6 +41,10 @@ npm start        # → http://127.0.0.1:4317   (or double-click start.cmd)
 - Each step only runs the tools listed under "Tools permitidas". Everything else is denied, and the denial shows up in Activity. A prefix such as `mcp__claude_ai_Atlassian_Rovo` enables a whole MCP server.
 - The server listens on `127.0.0.1` only, because hooks and commands run on your machine.
 
+## Specs
+
+Product and technical specs (English) live in [docs/specs/](docs/specs/README.md).
+
 ## Data
 
 All data lives in `data/` (flows, chats, runs) as JSON.
