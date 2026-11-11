@@ -82,6 +82,12 @@ function EventRow({ e, result }) {
     }
     case 'error':
       return <div className="ev ev-error">⚠️ {e.text}</div>;
+    case 'queued':
+      return <div className="ev ev-hook">⏳ {e.text}</div>;
+    case 'retry':
+      return <div className="ev ev-hook">↻ {e.text?.replace(/^↻\s*/, '')}</div>;
+    case 'timeout':
+      return <div className="ev ev-error">⏱ {e.text?.replace(/^⏱\s*/, '')}</div>;
     default:
       return null;
   }

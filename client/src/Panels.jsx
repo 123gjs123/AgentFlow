@@ -4,7 +4,7 @@ import Chat from './Chat.jsx';
 import Events from './Events.jsx';
 import { ACCESS, accessOf } from './presets.js';
 import { ExternalInvoke } from './Help.jsx';
-import { TplField, IoSettings, DataTab } from './Data.jsx';
+import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -98,7 +98,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
     }
   }, [tab, step.id, step.lastRun?.runId]);
 
-  const tools = new Set(String(step.allowedTools || '').split(/[\s,]+/).filter(Boolean));
+  const tools = new Set(String(step.allowedTools || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || []);
   const toggleTool = (t) => { tools.has(t) ? tools.delete(t) : tools.add(t); onChange({ allowedTools: [...tools].join(' ') }); };
   const status = live?.status || step.lastRun?.status;
 
@@ -150,6 +150,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
                 <select value={step.shell} onChange={set('shell')}><option value="powershell">PowerShell</option><option value="bash">bash</option><option value="cmd">cmd</option></select>
               </Field>
               <IoSettings step={step} onChange={onChange} />
+              <VerifySettings step={step} onChange={onChange} />
             </>
           ) : (
             <>
@@ -167,6 +168,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
                 <div className="muted small">{accessOf(step)?.desc || `Tools: ${step.allowedTools || '(ninguna)'}${step.permissionMode ? ` · modo ${step.permissionMode}` : ''}`}</div>
               </Field>
               <IoSettings step={step} onChange={onChange} />
+              <VerifySettings step={step} onChange={onChange} />
               <details className="advanced">
                 <summary>Avanzado: contexto, modelo, permisos y tools exactas</summary>
               <Field div label="Contexto" hint="datos fijos: links, proyecto Jira, reglas, etc.">
@@ -208,6 +210,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
 
       {tab === 'activity' && (
         <div className="panel-body pad">
+          {status !== 'running' && step.lastRun && <RunStats rs={step.lastRun} />}
           {live?.events?.length ? <Events events={live.events} running={live.status === 'running'} /> : runEvents ? <Events events={runEvents} /> : <div className="muted small">Ejecuta el step o el flujo para ver su proceso interno.</div>}
           {step.lastRun?.output && status !== 'running' && <details className="last-out" open><summary>Salida</summary><pre>{step.lastRun.output}</pre></details>}
           {step.lastRun?.error && status !== 'running' && <div className="error-bar">{step.lastRun.error}</div>}
@@ -280,6 +283,9 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
             </div>
             <input value={flow.schedule?.input || ''} onChange={(e) => onChange({ schedule: { ...flow.schedule, input: e.target.value } })} placeholder="Input para ejecuciones programadas" />
           </Field>
+          <Field label="Tiempo máximo de una ejecución (s)" hint="al agotarse se detiene; los steps pendientes quedan omitidos. Por llamada externa: deadlineSec">
+            <input type="number" min={10} max={14400} style={{ width: 120 }} value={flow.runTimeoutSec ?? 3600} onChange={(e) => onChange({ runTimeoutSec: Number(e.target.value) || 3600 })} />
+          </Field>
           <p className="muted small">Para dispararlo desde Claude Code, terminal, API, Jenkins o webhooks: pestaña <a onClick={() => setTab('external')}>Invocar</a>.</p>
           <details className="advanced danger-zone">
             <summary>Zona de limpieza</summary>
@@ -301,11 +307,19 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
           {runDetail ? (
             <div>
               <button className="ghost small" onClick={() => setRunDetail(null)}>← volver</button>
-              <h4>{runDetail.id} · {runDetail.status}</h4>
+              <h4>{runDetail.id} · <span className={`status s-${runDetail.status}`}>{runDetail.status}</span> {runDetail.status === 'running' && <button className="danger small" onClick={() => api.post(`/api/flows/${flow.id}/runs/${runDetail.id}/cancel`).then(() => api.get(`/api/flows/${flow.id}/runs/${runDetail.id}`).then(setRunDetail)).catch(() => {})}>■ Cancelar</button>}</h4>
+              <div className="muted small">
+                {runDetail.trigger}{runDetail.usePins === false ? ' · ignoró salidas fijadas' : ''}{runDetail.usedPins?.length ? ` · usó fijadas: ${runDetail.usedPins.join(', ')}` : ''}
+                {runDetail.totals ? ` · ${Math.round((runDetail.totals.durationMs || 0) / 1000)} s · tokens ${runDetail.totals.inputTokens}/${runDetail.totals.outputTokens}${runDetail.totals.costUsd ? ` · ≈ US$${runDetail.totals.costUsd.toFixed(4)} equiv. API` : ''}` : ''}
+                {runDetail.error ? ` · ${runDetail.error}` : ''}
+              </div>
               {runDetail.input && <details><summary>Input</summary><pre>{runDetail.input}</pre></details>}
+              {runDetail.vars && Object.keys(runDetail.vars).length > 0 && <details><summary>Variables de esta ejecución</summary><pre className="mono small">{JSON.stringify(runDetail.vars, null, 2)}</pre></details>}
               {Object.entries(runDetail.steps).map(([sid, s]) => (
                 <details key={sid} className="run-step">
-                  <summary><span className={`status s-${s.status}`}>{s.status}</span> {flow.steps.find((x) => x.id === sid)?.name || sid}</summary>
+                  <summary><span className={`status s-${s.status}`}>{s.status}</span> {flow.steps.find((x) => x.id === sid)?.name || sid}{s.code ? <span className="chip warn">{s.code}</span> : null}</summary>
+                  <RunStats rs={s} />
+                  {s.error && <div className="error-bar">{s.error}</div>}
                   <Events events={s.events} />
                   {s.output && <pre className="last-out">{s.output}</pre>}
                 </details>
@@ -319,6 +333,8 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
                   <span>{new Date(r.startedAt).toLocaleString()}</span>
                   <span className="chip">{r.trigger}{r.only ? ' · 1 step' : ''}</span>
                   <span className="muted small grow">{r.input}</span>
+                  {r.totals && <span className="muted small">{Math.round((r.totals.durationMs || 0) / 1000)} s{r.totals.costUsd ? ` · ≈US$${r.totals.costUsd.toFixed(3)}` : ''}</span>}
+                  {r.status === 'running' && <button className="danger small" onClick={(e) => { e.stopPropagation(); api.post(`/api/flows/${flow.id}/runs/${r.id}/cancel`).then(() => api.get(`/api/flows/${flow.id}/runs`).then(setRuns)).catch(() => {}); }}>■ Cancelar</button>}
                 </li>
               ))}
               {!runs.length && <li className="muted small">Sin ejecuciones.</li>}

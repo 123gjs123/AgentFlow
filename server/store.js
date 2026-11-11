@@ -129,11 +129,30 @@ export const clearRuns = (flowId) => fs.rmSync(path.join(DATA, 'runs', safe(flow
 export const countRuns = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'runs', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
 export const countChats = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'chats', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
 export const getRun = (flowId, runId) => readJson(runFile(flowId, runId), null);
+/** Full run records of a flow (for startup recovery). */
+export function rawRuns(flowId) {
+  try { return fs.readdirSync(path.join(DATA, 'runs', safe(flowId))).filter((f) => f.endsWith('.json')).map((f) => readJson(path.join(DATA, 'runs', safe(flowId), f))).filter(Boolean); } catch { return []; }
+}
+
+// ---------- idempotency keys (external runs, 24 h) ----------
+const idemFile = () => path.join(dir(), 'idempotency.json');
+export function getIdem(key) {
+  const all = readJson(idemFile(), {});
+  const e = all[key];
+  return e && e.at > Date.now() - 24 * 3600e3 ? e : null;
+}
+export function setIdem(key, entry) {
+  const all = readJson(idemFile(), {});
+  const cut = Date.now() - 24 * 3600e3;
+  for (const k of Object.keys(all)) if (all[k].at < cut) delete all[k];
+  all[key] = { ...entry, at: Date.now() };
+  writeJson(idemFile(), all);
+}
 export function listRuns(flowId) {
   return fs.readdirSync(dir('runs', safe(flowId))).filter((f) => f.endsWith('.json'))
     .map((f) => readJson(path.join(DATA, 'runs', safe(flowId), f)))
     .filter(Boolean)
-    .map((r) => ({ id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: (r.input || '').slice(0, 200), only: r.only }))
+    .map((r) => ({ id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: (r.input || '').slice(0, 200), only: r.only, totals: r.totals }))
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, 50);
 }

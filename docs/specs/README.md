@@ -13,7 +13,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 03 | [Hooks and triggers](03-hooks-and-triggers.md) | Implemented |
 | 04 | [Chats: step chat, general chat and router](04-chats.md) | Implemented |
 | 05 | [Memory](05-memory.md) | Implemented |
-| 06 | [External invocation (API, CLI, MCP, webhook)](06-external-invocation.md) | Implemented |
+| 06 | [External invocation (API, CLI, MCP, webhook)](06-external-invocation.md) | Implemented (amended by 16: per-run vars, cancel/events, exit codes) |
 | 07 | [Onboarding, help and simplified configuration](07-onboarding-help.md) | Implemented |
 | 08 | [Security model](08-security.md) | Implemented |
 | 09 | [Flow workspaces, export and import](09-flow-workspaces-export-import.md) | Proposed |
@@ -22,7 +22,9 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 12 | [Per-step external invocation](12-step-invocation.md) | Proposed |
 | 13 | [Skill sources: URL, folder, zip](13-skill-sources.md) | Proposed |
 | 14 | [Step outputs: handoff, actions, deliverables](14-step-outputs-and-actions.md) | Partial (handoff and detected actions via spec 15) |
-| 15 | [Data passing between steps](15-data-passing.md) | Implemented ("for each" proposed) |
+| 15 | [Data passing between steps](15-data-passing.md) | Implemented ("for each" proposed; amended by 16: pins and stale refs) |
+| 16 | [Run reliability, observability and step verification](16-run-reliability-and-verification.md) | Implemented (round 1, 2026-11-10; exceptions listed in the spec) |
+| 17 | [Step context box and integration helper](17-step-context-and-integration-helper.md) | Proposed |
 
 **Status meanings**
 - **Implemented:** in `main` and verified end to end.

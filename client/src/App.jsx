@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
-import { api, onWs } from './api.js';
+import { api, onWs, onConn } from './api.js';
 import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel } from './Panels.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
@@ -70,8 +70,23 @@ export default function App() {
     return () => clearTimeout(t);
   }, [flow?.id, noSteps, resetNonce]);
 
+  // Server down -> banner; back online -> reload the list and the open flow.
+  const [online, setOnlineState] = useState(true);
+  const wasOffline = useRef(false);
+  useEffect(() => onConn((v) => {
+    setOnlineState(v);
+    if (!v) { wasOffline.current = true; return; }
+    if (!wasOffline.current) return;
+    wasOffline.current = false;
+    loadFlows().catch(() => {});
+    const id = flowRef.current?.id || ls.get('afs.flow');
+    if (id) openFlow(id);
+  }), []);
+
   async function openFlow(id) {
-    let f = await api.get(`/api/flows/${id}`);
+    if (!id) return;
+    let f;
+    try { f = await api.get(`/api/flows/${id}`); } catch (e) { notify(`No se pudo abrir el flujo: ${e.message}`); return; }
     if (f.steps.length && f.steps.every((s) => !s.position?.x && !s.position?.y)) { f = { ...f, steps: autoLayout(f.steps, f.edges) }; api.put(`/api/flows/${f.id}`, f); }
     setFlow(f); setSelectedId(null); setLive({}); ls.set('afs.flow', id);
   }
@@ -304,6 +319,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           <p className="muted small">¿Primera vez? <a onClick={() => setTourStep(0)}>Haz el recorrido guiado</a> o abre <a onClick={() => setModal({ help: 'start' })}>Ayuda</a>.</p>
         </div>
       )}
+      {!online && <div className="offline-bar">⚠️ El servidor de Agent Flow Studio no responde. Arráncalo con <code>npm start</code> en la carpeta del proyecto (o con cualquier comando <code>afs</code>); esta página se reconecta sola.</div>}
       {toast && <div className="toast">{toast}</div>}
       {modal === 'picker' && <StepPicker catalog={catalog} onPick={addStep} onClose={() => setModal(null)} />}
       {modal === 'ai' && <AiFlowModal cwd={flow?.cwd} onClose={() => setModal(null)} onCreated={async (f) => { setModal(null); await loadFlows(); openFlow(f.id); notify(`Flujo “${f.name}” creado: revisa cada step y ejecútalo`); }} />}

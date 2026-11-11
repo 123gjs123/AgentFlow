@@ -8,23 +8,32 @@ const KIND_LABEL = { role: 'Rol', agent: 'Agente', skill: 'Skill', command: 'Com
 export const getPath = (obj, p) => (!p ? obj : String(p).split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj));
 const show = (v) => (v == null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 
-/** Data a step exposes to others: this run's result if available, else its pinned or last output. */
-export function stepData(step, data) {
+/** Data a step exposes to others: this run's result if available, else its pinned or last successful output.
+ *  Always says where it came from (source: run | pinned | last | none) so handoffs are traceable. */
+export function stepData(step, data, runId, opts = {}) {
   const d = data?.get?.(step.id);
-  if (d) return d;
-  if (step.pinned) return { output: step.pinned.output || '', json: step.pinned.json, files: [], actions: [] };
-  const lr = step.lastRun || {};
-  return { output: lr.output || '', json: lr.json, files: lr.files || [], actions: lr.actions || [] };
+  if (d) return { ...d, source: d.source || 'run', fromRunId: d.fromRunId || runId || null };
+  if (step.pinned && opts.usePins !== false) return { output: step.pinned.output || '', json: step.pinned.json, files: [], actions: [], source: 'pinned', fromRunId: step.pinned.runId || null, at: step.pinned.at };
+  const lr = step.lastRun;
+  if (!lr || lr.status !== 'success') return { output: '', json: undefined, files: [], actions: [], source: 'none', fromRunId: lr?.runId || null };
+  return { output: lr.output || '', json: lr.json, files: lr.files || [], actions: lr.actions || [], source: 'lastRun', fromRunId: lr.runId || null, at: lr.endedAt };
 }
 
-/** Resolves "Name.json.a.b" | "Name.output" | "Name.files" | "Name.actions" | "Name.a.b" (json shorthand). */
-export function resolveStepRef(flow, rest, data) {
+/** Resolves "Name.json.a.b" | "Name.output" | "Name.files" | "Name.actions" | "Name.a.b" (json shorthand).
+ *  ctx.allowed (Set of step ids): inside a full run only earlier steps may be referenced (others would race).
+ *  ctx.refs (array): receives {ref, step, source, fromRunId} for provenance. */
+export function resolveStepRef(flow, rest, data, ctx = {}) {
   const steps = [...flow.steps].sort((a, b) => b.name.length - a.name.length);
   for (const s of steps) {
     for (const label of [s.name, s.id]) {
       if (rest !== label && !rest.startsWith(label + '.')) continue;
-      const d = stepData(s, data);
+      if (ctx.allowed && !ctx.allowed.has(s.id)) {
+        throw Object.assign(new Error(`{{steps.${rest}}}: "${s.name}" no es un step anterior (ninguna flecha lo conecta antes de este). En una ejecución completa solo se usan datos de steps anteriores; conéctalo o ejecuta este step solo.`), { refError: true });
+      }
+      const d = stepData(s, data, ctx.runId, { usePins: ctx.usePins });
+      if (d.source === 'pinned') ctx.onPinned?.(s.name);
       const sub = rest.slice(label.length + 1) || 'output';
+      if (ctx.refs && !ctx.refs.some((r) => r.ref === rest)) ctx.refs.push({ ref: rest, step: s.name, source: d.source, fromRunId: d.fromRunId || null });
       const [head, ...tail] = sub.split('.');
       if (head === 'output' || head === 'text') return show(d.output);
       if (head === 'json') return show(getPath(d.json, tail.join('.')));
@@ -36,14 +45,51 @@ export function resolveStepRef(flow, rest, data) {
   return null;
 }
 
+function resolveKey(key, ctx) {
+  if (key === 'input') return ctx.input ?? '';
+  if (key === 'upstream') return ctx.upstream ?? '';
+  if (key.startsWith('vars.')) { const k = key.slice(5); return show(ctx.vars?.[k] ?? getPath(ctx.vars, k)); }
+  if (key.startsWith('steps.') && ctx.flow) return resolveStepRef(ctx.flow, key.slice(6), ctx.data, ctx);
+  return null;
+}
+
+const TPL_RE = /\{\{\{\s*([^{}]+?)\s*\}\}\}|\{\{\s*([^{}]+?)\s*\}\}/g;
+
+/** Fills {{…}} templates. With ctx.quote (command steps) every value goes through it, so data never becomes code.
+ *  {{{…}}} (triple braces) splices the value verbatim — opt-out for authors who template command fragments on purpose. */
 export function render(tpl, ctx) {
-  return String(tpl || '').replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (m, key) => {
-    if (key === 'input') return ctx.input ?? '';
-    if (key === 'upstream') return ctx.upstream ?? '';
-    if (key.startsWith('vars.')) { const k = key.slice(5); return show(ctx.vars?.[k] ?? getPath(ctx.vars, k)); }
-    if (key.startsWith('steps.') && ctx.flow) { const r = resolveStepRef(ctx.flow, key.slice(6), ctx.data); if (r !== null) return r; }
-    return m;
+  return String(tpl || '').replace(TPL_RE, (m, raw, key) => {
+    const k = raw ?? key;
+    const v = resolveKey(k, ctx);
+    if (v === null) return m;
+    if (raw !== undefined) { ctx.onRaw?.(k); return v; }
+    return ctx.quote ? ctx.quote(v, k) : v;
   });
+}
+
+/** Raw ({{{…}}}) placeholders used in a text. */
+export const rawPlaceholders = (tpl) => [...String(tpl || '').matchAll(/\{\{\{\s*([^{}]+?)\s*\}\}\}/g)].map((m) => m[1]);
+
+/** Command steps: each template value travels as an environment variable; the command only references it.
+ *  PowerShell: $env:AFS_V0 · bash: "$AFS_V0" · cmd: !AFS_V0! (delayed expansion happens after parsing). */
+export function shellQuoter(shell) {
+  const env = {}; const values = []; let i = 0;
+  const quote = (v, key) => {
+    const k = `AFS_V${i++}`;
+    env[k] = String(v);
+    values.push({ name: k, ref: key, value: clip(String(v), 2000) });
+    // Braced forms so adjacent text can't change the variable: {{x}}.json, {{a}}_{{b}}
+    return shell === 'bash' ? `"\${${k}}"` : shell === 'cmd' ? `"!${k}!"` : `\${env:${k}}`;
+  };
+  return { quote, env, values };
+}
+
+/** Placeholders written inside single quotes would never expand (PowerShell/bash): flag them instead of silently passing the literal. */
+export function placeholdersInSingleQuotes(cmd, shell) {
+  if (shell === 'cmd') return [];
+  const out = [];
+  for (const m of String(cmd || '').matchAll(/'[^'\n]*'/g)) for (const p of m[0].matchAll(/\{\{(?!\{)\s*([^{}]+?)\s*\}\}/g)) out.push(p[1]);
+  return out;
 }
 
 const memList = (items) => (items?.length ? items.map((m) => `- ${m.text}`).join('\n') : '(vacía)');
@@ -72,14 +118,14 @@ function describeKind(step, flow) {
 }
 
 /** System prompt appended to Claude Code's default when RUNNING a step. */
-export function runSystemPrompt(flow, step) {
+export function runSystemPrompt(flow, step, rctx = {}) {
   const parts = [
     `# Step "${step.name}" del flujo "${flow.name}"`,
     `Eres el ejecutor de este step dentro de un flujo de agentes. ${describeKind(step, flow)}.`,
   ];
   if (step.kind === 'skill' && step.skillRef) parts.push(`Usa la skill "${step.skillRef}" (vía la herramienta Skill) para realizar la tarea.`);
   if (step.role) parts.push(`## Rol\n${step.role}`);
-  if (step.context) parts.push(`## Contexto\n${render(step.context, { flow, vars: flow.vars })}`);
+  if (step.context) parts.push(`## Contexto\n${render(step.context, { flow, vars: flow.vars, ...rctx })}`);
   parts.push(`## Memoria de este step\n${memList(step.memory)}`);
   if (flow.memory?.length) parts.push(`## Memoria general del flujo\n${memList(flow.memory)}`);
   if (step.output?.format === 'json') {
@@ -93,7 +139,13 @@ export function runSystemPrompt(flow, step) {
   return parts.join('\n\n');
 }
 
-const jsonBlock = (v, max) => '```json\n' + clip(JSON.stringify(v, null, 2), max) + '\n```';
+/** JSON for prompts is never cut in the middle (that would hand invalid JSON to the next step). */
+const jsonBlock = (v, max) => {
+  let s = JSON.stringify(v, null, 2);
+  if (s.length > max) s = JSON.stringify(v);
+  if (s.length > max) return `(JSON de ${s.length} chars: supera el límite de ${max}. Usa referencias {{steps.<nombre>.json.<campo>}} en la tarea o sube "máx. caracteres".)`;
+  return '```json\n' + s + '\n```';
+};
 /** Upstream section according to the step's input mode: full | json | summary | refs. */
 export function upstreamSection(step, upstream) {
   const mode = step.input?.mode || 'full';
@@ -106,13 +158,14 @@ export function upstreamSection(step, upstream) {
     if (mode === 'json') body = hasJson ? jsonBlock(u.json, max) : clip(u.output, max);
     else if (mode === 'summary') body = u.summary || clip(u.output, max);
     else body = [clip(u.output, max), hasJson ? 'Datos (JSON):\n' + jsonBlock(u.json, max) : ''].filter(Boolean).join('\n\n');
-    parts.push(`### ${u.name}\n${body || '(sin salida)'}`);
+    const src = u.source && u.source !== 'run' ? ` (${u.source === 'pinned' ? 'salida fijada' : u.source === 'lastRun' ? 'de una ejecución anterior' : 'sin datos'})` : '';
+    parts.push(`### ${u.name}${src}\n${body || '(sin salida)'}`);
   }
   return parts.join('\n\n');
 }
 
-export function runUserPrompt(flow, step, input, upstream, data) {
-  const parts = [`## Tarea\n${render(step.task, { flow, vars: flow.vars, input, data }) || '(sin tarea definida: usa tu rol y el input)'}`];
+export function runUserPrompt(flow, step, input, upstream, data, rctx = {}) {
+  const parts = [`## Tarea\n${render(step.task, { flow, vars: flow.vars, input, data, ...rctx }) || '(sin tarea definida: usa tu rol y el input)'}`];
   const up = upstreamSection(step, upstream);
   if (up) parts.push(up);
   if (input) parts.push(`## Input del flujo\n${clip(input, 8000)}`);

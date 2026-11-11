@@ -66,7 +66,7 @@ export function DataPicker({ flow, step, onInsert, command }) {
     const vars = Object.keys(flow.vars || {});
     if (vars.length) g.push({ title: 'Variables', items: vars.flatMap((k) => [{ value: `{{vars.${k}}}`, label: k, hint: clip(typeof flow.vars[k] === 'string' ? flow.vars[k] : JSON.stringify(flow.vars[k]), 40) }]) });
     for (const s of anc) g.push({ title: `${s.name}${s.pinned ? ' 📌' : ''}`, items: stepItems(s) });
-    if (others.length) g.push({ title: 'Otros steps (no corren antes: usan su última salida)', muted: true, items: others.flatMap((s) => stepItems(s, s.name)) });
+    if (others.length) g.push({ title: step.input?.allowNonUpstream ? 'Otros steps (no corren antes: usan su última salida)' : 'Otros steps (no corren antes: en el flujo completo el step fallará; actívalo en Verificación y límites)', muted: true, items: others.flatMap((s) => stepItems(s, s.name)) });
     return g;
   }, [flow, step.id, command]);
   const match = (it) => !q || `${it.label} ${it.value} ${it.tag || ''}`.toLowerCase().includes(q.toLowerCase());
@@ -172,6 +172,87 @@ export function IoSettings({ step, onChange }) {
   );
 }
 
+const A_TYPES = [
+  ['contains', 'Contiene texto'], ['notContains', 'No contiene texto'], ['regex', 'Cumple regex'],
+  ['json', 'Campo JSON'], ['command', 'Comando (exit 0 = ok)'], ['judge', 'Juez IA (rúbrica)'],
+];
+const J_OPS = [['exists', 'existe'], ['equals', '='], ['notEquals', '≠'], ['gte', '≥'], ['lte', '≤'], ['lengthGte', 'largo ≥'], ['lengthLte', 'largo ≤'], ['matches', 'cumple regex']];
+const NEW_A = { contains: { value: '' }, notContains: { value: '' }, regex: { pattern: '' }, json: { path: '', op: 'exists' }, command: { command: '' }, judge: { rubric: '', model: 'haiku' } };
+
+/** Limits + success rules + assertions (spec 16). */
+export function VerifySettings({ step, onChange }) {
+  const isAi = step.kind !== 'command';
+  const list = Array.isArray(step.assertions) ? step.assertions : [];
+  const setA = (i, patch) => onChange({ assertions: list.map((a, k) => (k === i ? { ...a, ...patch } : a)) });
+  const n = list.length;
+  return (
+    <details className="advanced io">
+      <summary>Verificación y límites <span className="muted small">— {n ? `${n} aserción${n > 1 ? 'es' : ''} · ` : ''}máx. {step.timeoutSec || 900}s{!isAi && step.retry?.max ? ` · ${step.retry.max} reintento${step.retry.max > 1 ? 's' : ''}` : ''}</span></summary>
+      <div className="row wrap">
+        <label className="field"><span className="field-label">Tiempo máximo (s)</span><input type="number" min={10} max={7200} style={{ width: 100 }} value={step.timeoutSec ?? 900} onChange={(e) => onChange({ timeoutSec: Number(e.target.value) || 900 })} /></label>
+        {!isAi && <label className="field"><span className="field-label">Reintentos si falla</span><input type="number" min={0} max={5} style={{ width: 70 }} value={step.retry?.max ?? 0} onChange={(e) => onChange({ retry: { ...(step.retry || {}), max: Number(e.target.value) } })} /></label>}
+        {!isAi && (step.retry?.max > 0) && <label className="field"><span className="field-label">Espera inicial (s)</span><input type="number" min={1} style={{ width: 70 }} value={step.retry?.backoffSec ?? 10} onChange={(e) => onChange({ retry: { ...(step.retry || {}), backoffSec: Number(e.target.value) } })} /></label>}
+      </div>
+      {isAi && <div className="muted small">Los errores transitorios (límite de uso, sobrecarga) se reintentan solos hasta 2 veces, salvo que el intento ya haya hecho cambios.</div>}
+      <div className="col">
+        {isAi && <label className="toggle"><input type="checkbox" checked={!!step.allowDenials} onChange={(e) => onChange({ allowDenials: e.target.checked })} /> Permitir permisos denegados <span className="muted small">(si no, el step falla cuando intentó usar una herramienta sin acceso)</span></label>}
+        {isAi && <label className="toggle"><input type="checkbox" checked={!!step.allowEmpty} onChange={(e) => onChange({ allowEmpty: e.target.checked })} /> Permitir salida vacía</label>}
+        <label className="toggle"><input type="checkbox" checked={!!step.input?.allowNonUpstream} onChange={(e) => onChange({ input: { ...(step.input || { mode: 'full', maxChars: 12000 }), allowNonUpstream: e.target.checked } })} /> Permitir datos de steps que no son anteriores <span className="muted small">(usarán su última salida)</span></label>
+      </div>
+      <div className="field">
+        <span className="field-label">Aserciones <span className="hint">— se comprueban sobre la salida final; si una de tipo "error" falla, el step falla y los siguientes no corren</span></span>
+        {list.map((a, i) => (
+          <div key={i} className="assert-row">
+            <div className="row">
+              <select value={a.type} onChange={(e) => setA(i, { type: e.target.value, ...NEW_A[e.target.value] })}>{A_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+              <select value={a.severity || 'error'} onChange={(e) => setA(i, { severity: e.target.value })} title="error: falla el step · aviso: solo se registra"><option value="error">error</option><option value="warn">aviso</option></select>
+              <button type="button" className="ghost small danger" onClick={() => onChange({ assertions: list.filter((_, k) => k !== i) })}>✕</button>
+            </div>
+            {(a.type === 'contains' || a.type === 'notContains') && <input value={a.value || ''} onChange={(e) => setA(i, { value: e.target.value })} placeholder="texto (no distingue mayúsculas)" />}
+            {a.type === 'regex' && <input className="mono" value={a.pattern || ''} onChange={(e) => setA(i, { pattern: e.target.value })} placeholder="^## Riesgos" />}
+            {a.type === 'json' && (
+              <div className="row">
+                <input className="mono" value={a.path || ''} onChange={(e) => setA(i, { path: e.target.value })} placeholder="cases (o cases.0.title)" />
+                <select value={a.op || 'exists'} onChange={(e) => setA(i, { op: e.target.value })}>{J_OPS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+                {a.op && a.op !== 'exists' && <input style={{ width: 110 }} value={a.value ?? ''} onChange={(e) => setA(i, { value: e.target.value })} placeholder="valor" />}
+              </div>
+            )}
+            {a.type === 'command' && <input className="mono" value={a.command || ''} onChange={(e) => setA(i, { command: e.target.value })} placeholder="$input | Select-String 'Feature:' -Quiet; if (-not $?) { exit 1 }" title="La salida llega por stdin; el JSON en $env:AFS_OUTPUT_JSON. exit 0 = pasa." />}
+            {a.type === 'judge' && <textarea rows={2} value={a.rubric || ''} onChange={(e) => setA(i, { rubric: e.target.value })} placeholder="Criterios: cada caso tiene precondición, pasos y resultado esperado; no inventa datos del ticket." />}
+          </div>
+        ))}
+        <div className="chips">{A_TYPES.map(([v, l]) => <button key={v} type="button" className="chip btn" onClick={() => onChange({ assertions: [...list, { type: v, severity: 'error', ...NEW_A[v] }] })}>+ {l}</button>)}</div>
+      </div>
+    </details>
+  );
+}
+
+const SRC = { run: ['esta ejecución', 'ok'], pinned: ['📌 fijada', 'warn'], lastRun: ['ejecución anterior', 'warn'], none: ['sin datos', 'warn'] };
+const fmtMs = (ms) => (ms == null ? '' : ms < 1000 ? `${ms} ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.floor(ms / 60000)} min ${Math.round((ms % 60000) / 1000)} s`);
+const fmtN = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0));
+
+/** One-line summary of a step run: duration · turns · tokens · cost · attempts · failure code. */
+export function RunStats({ rs }) {
+  if (!rs || rs.status === 'running') return null;
+  const u = rs.usage || {};
+  const tokIn = (u.inputTokens || 0) + (u.cacheReadTokens || 0) + (u.cacheCreationTokens || 0);
+  const parts = [
+    rs.durationMs != null && fmtMs(rs.durationMs),
+    u.numTurns ? `${u.numTurns} turno${u.numTurns > 1 ? 's' : ''}` : null,
+    tokIn || u.outputTokens ? `tokens ${fmtN(tokIn)} in / ${fmtN(u.outputTokens)} out` : null,
+    u.costUsd ? `≈ US$${(u.costUsd + (u.judge?.costUsd || 0)).toFixed(4)} equiv. API` : null,
+    (Array.isArray(rs.attempts) ? rs.attempts.length : rs.attempts) > 1 ? `${Array.isArray(rs.attempts) ? rs.attempts.length : rs.attempts} intentos` : null,
+    rs.exitCode != null ? `exit ${rs.exitCode}` : null,
+  ].filter(Boolean);
+  return (
+    <div className="run-stats small">
+      {parts.join(' · ')}
+      {rs.code && <span className="chip warn" title="código estable para scripts/CI">{rs.code}</span>}
+      {rs.skipReason && rs.skipReason !== 'pinned' && <span className="chip">omitido: {({ upstream_failed: 'falló uno anterior', deadline: 'tiempo de la ejecución agotado', cancelled: 'ejecución detenida', hook: 'lo pidió un hook' })[rs.skipReason] || rs.skipReason}</span>}
+    </div>
+  );
+}
+
 function CopyBtn({ text }) {
   const [ok, setOk] = useState(false);
   return <button type="button" className="ghost small" onClick={() => { navigator.clipboard.writeText(text); setOk(true); setTimeout(() => setOk(false), 1000); }}>{ok ? '✓' : 'copiar'}</button>;
@@ -180,13 +261,14 @@ function CopyBtn({ text }) {
 /** Input/Output view of the last run + pin/unpin (n8n-style pin data). */
 export function DataTab({ flow, step, live }) {
   const [view, setView] = useState(null);
+  const [runMeta, setRunMeta] = useState(null);
   const [edit, setEdit] = useState(null);
   const [err, setErr] = useState('');
   const runId = step.lastRun?.runId;
   const running = (live?.status || step.lastRun?.status) === 'running';
   useEffect(() => {
-    setView(null);
-    if (runId && !running) api.get(`/api/flows/${flow.id}/runs/${runId}`).then((r) => setView(r?.steps?.[step.id] || null)).catch(() => {});
+    setView(null); setRunMeta(null);
+    if (runId && !running) api.get(`/api/flows/${flow.id}/runs/${runId}`).then((r) => { setView(r?.steps?.[step.id] || null); setRunMeta(r ? { id: r.id, vars: r.vars, trigger: r.trigger, usePins: r.usePins } : null); }).catch(() => {});
   }, [runId, step.lastRun?.endedAt, running]);
 
   const pinned = step.pinned;
@@ -234,18 +316,27 @@ export function DataTab({ flow, step, live }) {
         </div>
       )}
 
-      <h4 className="io-title">⬅ Entrada</h4>
+      {view && <RunStats rs={view} />}
+      {view?.warnings?.length > 0 && <ul className="io-list warn-list">{view.warnings.map((w, i) => <li key={i} className="warn-text small">⚠ {w}</li>)}</ul>}
+
+      <h4 className="io-title">⬅ Entrada {runMeta && <span className="muted small">— ejecución {runMeta.id} ({runMeta.trigger})</span>}</h4>
       {running ? <div className="muted small"><span className="spinner" /> ejecutando…</div> : !iv ? (
         <div className="muted small">{pinned && view?.pinned ? 'La última ejecución usó la salida fijada.' : 'Ejecuta el step o el flujo para ver exactamente qué recibió.'}</div>
       ) : iv.pinned ? <div className="muted small">La última ejecución usó la salida fijada (no recibió entrada).</div> : (
         <>
           {iv.upstream?.length ? (
             <ul className="io-list">
-              {iv.upstream.map((u) => <li key={u.name}><b>{u.name}</b> <span className="muted small">{u.chars.toLocaleString()} caracteres{u.json ? ' · JSON' : ''}{u.summarized ? ' · resumido' : ''}</span></li>)}
+              {iv.upstream.map((u) => { const [l, c] = SRC[u.source || 'run'] || SRC.run; return <li key={u.name}><b>{u.name}</b> <span className={`chip ${c}`} title={u.fromRunId ? `ejecución ${u.fromRunId}` : ''}>{l}</span> <span className="muted small">{u.chars.toLocaleString()} caracteres{u.json ? ' · JSON' : ''}{u.summarized ? ' · resumido' : ''}</span></li>; })}
             </ul>
           ) : <div className="muted small">Sin steps anteriores: solo recibe el input del flujo.</div>}
-          {iv.kind === 'ai' && <div className="muted small">Modo: {MODES.find((m) => m[0] === iv.mode)?.[1] || iv.mode} · prompt de {iv.prompt?.length?.toLocaleString()} caracteres</div>}
-          {iv.kind === 'command' && <details open><summary>Comando ejecutado</summary><pre className="mono small">{iv.command}</pre></details>}
+          {view?.inputs?.some((x) => x.viaRef) && (
+            <div className="small">Referencias {'{{steps…}}'}: {view.inputs.filter((x) => x.viaRef).map((x) => { const [l, c] = SRC[x.source] || SRC.run; return <span key={x.step} className={`chip ${c}`} title={x.fromRunId || ''}>{x.step}: {l}</span>; })}</div>
+          )}
+          {runMeta?.vars && Object.keys(runMeta.vars).length > 0 && <details><summary>Variables usadas en esta ejecución</summary><pre className="mono small">{JSON.stringify(runMeta.vars, null, 2)}</pre></details>}
+          {iv.kind === 'ai' && <div className="muted small">Modo: {MODES.find((m) => m[0] === iv.mode)?.[1] || iv.mode} · prompt de {iv.prompt?.length?.toLocaleString()} caracteres{iv.tools !== undefined ? ` · herramientas: ${iv.tools || 'ninguna'}` : ''}</div>}
+          {iv.kind === 'command' && <details open><summary>Comando ejecutado <span className="muted small">— los datos van en variables de entorno, nunca como código</span></summary><pre className="mono small">{iv.command}</pre>
+            {iv.values?.length > 0 && <ul className="io-list">{iv.values.map((v) => <li key={v.name} className="small"><code>{v.name}</code> = <span className="muted">{'{{'}{v.ref}{'}}'}</span> → <span className="mono">{clip(v.value, 160)}</span></li>)}</ul>}
+          </details>}
           {iv.kind === 'command' && iv.stdin && <details><summary>stdin</summary><pre className="small">{iv.stdin}</pre></details>}
           {iv.kind === 'ai' && <details><summary>Prompt enviado</summary><div className="row end"><CopyBtn text={iv.prompt} /></div><pre className="small">{iv.prompt}</pre></details>}
           {iv.kind === 'ai' && <details><summary>Instrucciones de sistema del step</summary><pre className="small">{iv.system}</pre></details>}
@@ -265,6 +356,21 @@ export function DataTab({ flow, step, live }) {
               <ul className="io-list">{out.actions.map((a, i) => <li key={i}><span className={`chip ${a.ok ? 'ok' : 'warn'}`}>{a.ok ? 'ok' : 'error'}</span> <b>{a.tool}</b> <span className="muted small">{a.server}</span><div className="mono small muted">{clip(a.input, 200)}</div></li>)}</ul>
             </details>
           )}
+        </>
+      )}
+
+      {view && !running && (step.output?.format === 'json' || view.assertions?.length > 0 || view.code) && (
+        <>
+          <h4 className="io-title">✔ Verificación</h4>
+          <ul className="io-list">
+            {step.output?.format === 'json' && !pinned && (
+              <li><span className={`chip ${['INVALID_JSON', 'SCHEMA_MISMATCH', 'INVALID_SCHEMA'].includes(view.code) ? 'warn' : 'ok'}`}>{['INVALID_JSON', 'SCHEMA_MISMATCH', 'INVALID_SCHEMA'].includes(view.code) ? '✗' : '✓'}</span> JSON{step.output.schema?.trim() ? ' + schema' : ''}{view.attempts?.some?.((a) => a.reason === 'correction') ? <span className="muted small"> (se pidió 1 corrección)</span> : null}</li>
+            )}
+            {(view.assertions || []).map((a, i) => (
+              <li key={i}><span className={`chip ${a.pass ? 'ok' : 'warn'}`}>{a.pass ? '✓' : a.severity === 'warn' ? '⚠' : '✗'}</span> <b>{a.name}</b> <span className="muted small">{a.message}{a.durationMs != null ? ` · ${fmtMs(a.durationMs)}` : ''}</span></li>
+            ))}
+            {['PERMISSION_DENIED', 'EMPTY_OUTPUT', 'NON_UPSTREAM_REF'].includes(view.code) && <li><span className="chip warn">✗</span> {view.error}</li>}
+          </ul>
         </>
       )}
     </div>

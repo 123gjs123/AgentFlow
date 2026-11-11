@@ -1,6 +1,6 @@
 # 06 — External invocation (API, CLI, MCP, webhook)
 
-**Status:** Implemented. Per-step invocation details are covered in spec 12.
+**Status:** Implemented. Per-step invocation details are covered in spec 12. Amended by spec 16 (2026-11-10): per-run vars, pins ignored by external runs, cancel/events endpoints, idempotency, exit codes 0/1/2/3.
 
 ## Summary
 
@@ -19,12 +19,12 @@ All four go through a token-protected external API.
 | EXT-1 | `/api/ext/*` requires the token, sent as `Authorization: Bearer <t>`, `X-AFS-Token: <t>` or `?token=<t>`. The comparison is constant-time. |
 | EXT-2 | Flows are addressable by **id or name** (case-insensitive). Steps are addressable by id or name. |
 | EXT-3 | Runs can be synchronous (`wait=true`, returns the final result) or asynchronous (returns `runId` and a status URL). |
-| EXT-4 | Callers can set flow variables per call (`vars`) and run a single step (`step`). |
+| EXT-4 | Callers can set flow variables per call (`vars`) and run a single step (`step`). **Changed by spec 16 REL-3:** `vars` apply to that run only (stored in `run.vars`) and are never written to the flow file. |
 | EXT-5 | For webhooks, a body without an `input` field is passed to the flow, pretty-printed, as its input. |
 | EXT-6 | A run summary exposes `status`, per-step `{step, status, output, error}`, and `result`, which is the concatenated output of the sink steps (or of the single step). |
 | EXT-7 | The token is shown and regenerated in the UI (Help → Invoke from outside). It is stored in `data/config.json`. |
 | EXT-8 | The CLI and the MCP server start the app automatically if it isn't running. |
-| EXT-9 | The CLI exits with code 1 when the run fails, so CI stages fail correctly. |
+| EXT-9 | The CLI exits with code 1 when the run fails, so CI stages fail correctly. **Extended by spec 16 EXT-14:** `0` success, `1` error/stopped/interrupted, `2` usage error, `3` timeout (run `timeout` or wait elapsed). |
 
 ## HTTP API
 
@@ -32,7 +32,9 @@ All four go through a token-protected external API.
 |---|---|---|
 | `GET /api/ext/ping` | — | `{ok, app}` |
 | `GET /api/ext/flows` | — | `[{id, name, description, vars, steps[{id,name,kind}]}]` |
-| `POST /api/ext/flows/:flow/run` | `{input?, step?, vars?, wait?, timeoutSec?, source?}` or a raw payload; query `wait, step, source, timeoutSec` also accepted | async: `{runId, status:'running', statusUrl}` · sync: run summary |
+| `POST /api/ext/flows/:flow/run` | `{input?, step?, vars?, wait?, timeoutSec?, source?, usePins?, deadlineSec?}` or a raw payload; query `wait, step, source, timeoutSec` also accepted; header `Idempotency-Key` | async: `{runId, status:'running', statusUrl}` · sync: run summary · wait elapsed: **202** `{timedOut:true, …summary}` · 422 `RAW_TEMPLATE_EXTERNAL` / `INVALID_SCHEMA` · 409 `IDEMPOTENCY_CONFLICT` (spec 16) |
+| `POST /api/ext/flows/:flow/runs/:runId/cancel` | — | `{runId, status:'stopped'}`; 404 unknown, 409 finished (spec 16 EXT-12) |
+| `GET /api/ext/flows/:flow/runs/:runId/events?after=<seq>` | — | `{events[], next, done}`, max 500 per page (spec 16 EXT-15) |
 | `GET /api/ext/flows/:flow/runs/:runId` | — | run summary |
 | `POST /api/ext/flows/:flow/ask` | `{message, step?}` | `{answer, routedTo, status}`. Without `step`, it goes through the general-chat router. |
 
@@ -49,6 +51,8 @@ curl -X POST "http://127.0.0.1:4317/api/ext/flows/My%20flow/run" \
 ```
 afs list
 afs run  <flow> [-i text | -f file | stdin] [-s step] [--var k=v]... [--no-wait] [--json] [--timeout sec]
+         [--pins] [--deadline sec] [--key idempotency-key] [--follow]
+afs cancel <flow> <runId>
 afs ask  <flow> "<question>" [--step S]
 afs status <flow> <runId>
 ```
@@ -63,8 +67,9 @@ A newline-delimited JSON-RPC server over stdio. It handles `initialize`, `ping`,
 | Tool | Arguments |
 |---|---|
 | `list_flows` | — |
-| `run_flow` | `flow, input?, step?, vars?, wait? (default true), timeoutSec?` |
+| `run_flow` | `flow, input?, step?, vars?, wait? (default true), timeoutSec?, usePins?, deadlineSec?, idempotencyKey?` — `isError` unless status `success`; `structuredContent` = summary; sink JSON as fenced block (spec 16) |
 | `get_run` | `flow, runId` |
+| `cancel_run` | `flow, runId` (spec 16) |
 | `ask_flow` | `flow, message, step?` |
 
 **Registration** (done by the user; the app never changes Claude config by itself):
