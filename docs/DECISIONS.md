@@ -52,3 +52,15 @@ Context: the user asked to see each step's context (role, skill/agent, tools, me
 | D30 | Results back to Jira Cloud: the flow comments through the Atlassian MCP, and the call is fire-and-forget (Jira's web request waits only ~30 s). CI callers wait or poll, map exit codes and archive `afs-result.json`. | No fragile long waits in Jira. CI stages fail correctly. |
 | D31 | Default idempotency keys come from the caller's natural id (`BUILD_TAG`, `issue.key`+`issue.updated`, `run_id`+`run_attempt`…). | Retries by the caller don't start duplicate runs (spec 16 EXT-11). |
 | D32 | `config.publicUrl` is set by the user, never auto-detected. | Snippets for cloud callers use the real public base. No guessing. |
+
+## 2026-11-11 — Spec 17 acceptance (implementation deviations)
+
+Context: acceptance of spec 17 on an isolated instance (`PORT=4319`, empty `AFS_DATA`, 1 Haiku + 1 Sonnet call). The product owner accepts these deviations. Template and wizard defects T1–T11 stay open in the spec.
+
+| # | Decision | Consequence |
+|---|---|---|
+| D33 | CTX-1 is met by shared pure pieces (`systemSections`/`userSections`, `cliOptions`, `buildArgs`) instead of one `buildStepInvocation`. | Criterion 3 proves byte-identical system/user/tools. Any new prompt part must be added as a section in `prompt.js`, or the preview drifts. |
+| D34 | CI and script callers share two stdlib clients (`afs_call.py`, `afs-call.ps1`) that hold the HTTP contract. Pipeline files only pass arguments. Templates live in one file, `server/integrations.js`. `bash-cron` uses the Python client, not curl. | One place to fix contract bugs (T6, T7). Callers need python3 (Linux) or PowerShell (Windows) on the agent. Criterion 14 is read as "the generated output", not "the Jenkinsfile". |
+| D35 | Generated `source` must equal the caller id (INT-3). The current first-segment/ad-hoc values (`jira`, `tarea`, `bash`…) are a defect (T9), not a decision. | The wizard's "first call arrived" indicator must match on the caller id. |
+| D36 | Deferred: CTX-6 `summary: cached`, CTX-16 hover, the "Datos" ↔ box links, the exact-request "Probar", the INT-13 p90 gate. | Spec 17 status "Implemented with exceptions". |
+| D37 | Generated YAML/Groovy must survive any flow name the app accepts (`:`, `#`, `'`). `scripts/verify/int-templates.mjs` keeps a hostile-name fixture (`Smoke: QA #1 'x'`); it must pass before T1–T5 are closed. | Today 11 hostile-name checks fail (T1, T2, T5; T4 Groovy found by reading). |

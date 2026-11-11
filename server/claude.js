@@ -132,15 +132,15 @@ export async function runClaude(opts) {
   try { return await runClaudeNow(opts); } finally { release(); }
 }
 
-function runClaudeNow(opts) {
+/** argv for one Claude Code turn. fileFor(kind, text) returns the path to pass for system prompts (temp file at run time, a label in previews). */
+export function buildArgs(opts, fileFor) {
   const {
-    prompt, appendSystem, systemPrompt, model, effort, agent, resume, permissionMode,
-    allowedTools, disallowedTools, tools, addDirs, cwd, onEvent = () => {}, signal, noPersist, strictMcp,
+    appendSystem, systemPrompt, model, effort, agent, resume, permissionMode,
+    allowedTools, disallowedTools, tools, addDirs, noPersist, strictMcp,
   } = opts;
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
-  const files = [];
-  if (systemPrompt) { const f = tmpFile(systemPrompt); files.push(f); args.push('--system-prompt-file', f); }
-  if (appendSystem) { const f = tmpFile(appendSystem); files.push(f); args.push('--append-system-prompt-file', f); }
+  if (systemPrompt) args.push('--system-prompt-file', fileFor('system', systemPrompt));
+  if (appendSystem) args.push('--append-system-prompt-file', fileFor('append', appendSystem));
   if (model) args.push('--model', model);
   if (effort) args.push('--effort', effort);
   if (agent) args.push('--agent', agent);
@@ -150,10 +150,17 @@ function runClaudeNow(opts) {
   if (strictMcp) args.push('--strict-mcp-config');
   if (tools !== undefined) args.push('--tools', tools);
   // Tool lists: space/comma separated, but a space inside parentheses belongs to the pattern: Bash(git status:*)
-  const list = (v) => (Array.isArray(v) ? v : String(v || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || []).map((s) => s.trim()).filter(Boolean);
+  const list = (v) => (Array.isArray(v) ? v : String(v || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || []).map((x) => x.trim()).filter(Boolean);
   if (list(addDirs).length) args.push('--add-dir', ...list(addDirs));
   if (list(allowedTools).length) args.push('--allowedTools', list(allowedTools).join(','));
   if (list(disallowedTools).length) args.push('--disallowedTools', list(disallowedTools).join(','));
+  return args;
+}
+
+function runClaudeNow(opts) {
+  const { prompt, cwd, onEvent = () => {}, signal } = opts;
+  const files = [];
+  const args = buildArgs(opts, (_k, text) => { const f = tmpFile(text); files.push(f); return f; });
 
   return new Promise((resolve) => {
     const ctx = { result: null, text: '', sessionId: null, stderr: '', model: null };

@@ -21,6 +21,7 @@ Opciones de run:
   --deadline <seg>          Tiempo máximo de la ejecución en el servidor (por defecto el del flujo, 3600)
   --key <clave>             Idempotency-Key: reintentar con la misma clave no lanza otra ejecución
   --follow                  Muestra la actividad de cada step mientras corre (stderr)
+  --dry-run                 Solo comprueba (flujo, step, variables, token) sin ejecutar nada
   --no-wait                 No espera: devuelve el runId
   --json                    Salida JSON completa
   --timeout <seg>           Máximo a esperar aquí (900)
@@ -43,6 +44,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--deadline') opts.deadline = Number(argv[++i]);
   else if (a === '--key') opts.key = argv[++i];
   else if (a === '--follow') opts.follow = true;
+  else if (a === '--dry-run') opts.dryRun = true;
   else if (a === '--no-wait') opts.noWait = true;
   else if (a === '--json') opts.json = true;
   else if (a === '--timeout') opts.timeout = Number(argv[++i]);
@@ -79,6 +81,11 @@ async function main() {
     if (!flow) { err('Falta <flujo>. Ver: afs help'); return 2; }
     const input = opts.input ?? (await readStdin());
     const body = { input, step: opts.step, vars: Object.keys(opts.vars).length ? opts.vars : undefined, source: 'cli', usePins: !!opts.pins, deadlineSec: opts.deadline || undefined };
+    if (opts.dryRun) {
+      const r = await call('POST', `${flowPath(flow)}/run`, { ...body, dryRun: true }, opts.key ? { 'Idempotency-Key': opts.key } : {});
+      if (opts.json) console.log(JSON.stringify(r, null, 2)); else { console.log(`OK (dry run): se ejecutarían ${r.steps.length} step(s): ${r.steps.join(' → ')}`); for (const w of r.warnings) err(`⚠ ${w}`); }
+      return 0;
+    }
     if (opts.noWait) { const r = await call('POST', `${flowPath(flow)}/run`, { ...body, wait: false }, opts.key ? { 'Idempotency-Key': opts.key } : {}); console.log(opts.json ? JSON.stringify(r) : r.runId); return 0; }
     const r = await runAndWait(flow, body, { timeoutSec: opts.timeout || 900, idempotencyKey: opts.key, onStep: (s) => err(`${ICON[s.status] || '·'} ${s.step} ${s.status}${s.code ? ` (${s.code})` : ''}`), onEvent: opts.follow ? printEvent : null });
     if (opts.json) console.log(JSON.stringify(r, null, 2));

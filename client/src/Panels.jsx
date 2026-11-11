@@ -5,6 +5,7 @@ import Events from './Events.jsx';
 import { ACCESS, accessOf } from './presets.js';
 import { ExternalInvoke } from './Help.jsx';
 import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
+import ContextBox from './Context.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -113,6 +114,8 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
           <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
+
+      {(tab === 'config' || tab === 'chat') && <ContextBox flow={flow} step={step} target={tab === 'chat' ? 'chat' : 'run'} />}
 
       {tab === 'config' && (
         <div className="panel-body pad">

@@ -117,26 +117,33 @@ function describeKind(step, flow) {
   }
 }
 
-/** System prompt appended to Claude Code's default when RUNNING a step. */
-export function runSystemPrompt(flow, step, rctx = {}) {
-  const parts = [
-    `# Step "${step.name}" del flujo "${flow.name}"`,
-    `Eres el ejecutor de este step dentro de un flujo de agentes. ${describeKind(step, flow)}.`,
-  ];
-  if (step.kind === 'skill' && step.skillRef) parts.push(`Usa la skill "${step.skillRef}" (vía la herramienta Skill) para realizar la tarea.`);
-  if (step.role) parts.push(`## Rol\n${step.role}`);
-  if (step.context) parts.push(`## Contexto\n${render(step.context, { flow, vars: flow.vars, ...rctx })}`);
-  parts.push(`## Memoria de este step\n${memList(step.memory)}`);
-  if (flow.memory?.length) parts.push(`## Memoria general del flujo\n${memList(flow.memory)}`);
+/**
+ * Labelled pieces of the system prompt for RUNNING a step (spec 17 CTX-1). The engine joins them; the context
+ * preview shows them one by one — same code, so the preview is exactly what gets sent.
+ */
+export function systemSections(flow, step, rctx = {}) {
+  const S = (id, label, source, text) => ({ id, label, source, toModel: 'system', text });
+  const ref = step.kind === 'skill' ? step.skillRef : step.kind === 'agent' ? step.agentRef : '';
+  const out = [S('header', 'Encabezado y tipo', `step.kind${ref ? ` · ${ref}` : ''}`, `# Step "${step.name}" del flujo "${flow.name}"\n\nEres el ejecutor de este step dentro de un flujo de agentes. ${describeKind(step, flow)}.`)];
+  if (step.kind === 'skill' && step.skillRef) out.push(S('skillHint', 'Instrucción de usar la skill', 'step.skillRef', `Usa la skill "${step.skillRef}" (vía la herramienta Skill) para realizar la tarea.`));
+  if (step.role) out.push(S('role', 'Rol / cómo trabaja', 'step.role', `## Rol\n${step.role}`));
+  if (step.context) out.push(S('context', 'Contexto (renderizado)', 'step.context', `## Contexto\n${render(step.context, { flow, vars: flow.vars, ...rctx })}`));
+  out.push(S('memoryStep', `Memoria del step (${step.memory?.length || 0})`, 'step.memory', `## Memoria de este step\n${memList(step.memory)}`));
+  if (flow.memory?.length) out.push(S('memoryFlow', `Memoria del flujo (${flow.memory.length})`, 'flow.memory', `## Memoria general del flujo\n${memList(flow.memory)}`));
   if (step.output?.format === 'json') {
     const sc = step.output.schema?.trim();
-    parts.push('## Formato de salida: JSON\nAdemás de una explicación breve, TERMINA tu respuesta con UN único bloque ```json con los datos estructurados (JSON válido, sin comentarios). Los steps siguientes consumen ese JSON campo por campo.' + (sc ? '\nEl JSON debe cumplir este JSON Schema:\n```json\n' + sc + '\n```' : ''));
+    out.push(S('outputFormat', 'Formato de salida: JSON' + (sc ? ' + schema' : ''), 'step.output', '## Formato de salida: JSON\nAdemás de una explicación breve, TERMINA tu respuesta con UN único bloque ```json con los datos estructurados (JSON válido, sin comentarios). Los steps siguientes consumen ese JSON campo por campo.' + (sc ? '\nEl JSON debe cumplir este JSON Schema:\n```json\n' + sc + '\n```' : '')));
   }
-  parts.push(`## Reglas de salida
+  out.push(S('rules', 'Reglas de salida (fijas)', 'app', `## Reglas de salida
 - Tu respuesta final ES la salida de este step y se pasa a los steps siguientes: concreta y accionable.
 - Si descubres un hecho duradero útil para futuras ejecuciones de este step, agrégalo al final como <remember>hecho</remember> (uno por línea).
-- No inventes datos: si te falta información o una herramienta fue denegada, dilo explícitamente.`);
-  return parts.join('\n\n');
+- No inventes datos: si te falta información o una herramienta fue denegada, dilo explícitamente.`));
+  return out;
+}
+
+/** System prompt appended to Claude Code's default when RUNNING a step. */
+export function runSystemPrompt(flow, step, rctx = {}) {
+  return systemSections(flow, step, rctx).map((s) => s.text).join('\n\n');
 }
 
 /** JSON for prompts is never cut in the middle (that would hand invalid JSON to the next step). */
@@ -164,13 +171,19 @@ export function upstreamSection(step, upstream) {
   return parts.join('\n\n');
 }
 
-export function runUserPrompt(flow, step, input, upstream, data, rctx = {}) {
-  const parts = [`## Tarea\n${render(step.task, { flow, vars: flow.vars, input, data, ...rctx }) || '(sin tarea definida: usa tu rol y el input)'}`];
+/** Labelled pieces of the user prompt (task, upstream, input, vars). */
+export function userSections(flow, step, input, upstream, data, rctx = {}) {
+  const U = (id, label, source, text) => ({ id, label, source, toModel: 'user', text });
+  const out = [U('task', 'Tarea (renderizada)', 'step.task', `## Tarea\n${render(step.task, { flow, vars: flow.vars, input, data, ...rctx }) || '(sin tarea definida: usa tu rol y el input)'}`)];
   const up = upstreamSection(step, upstream);
-  if (up) parts.push(up);
-  if (input) parts.push(`## Input del flujo\n${clip(input, 8000)}`);
-  if (Object.keys(flow.vars || {}).length) parts.push(`## Variables\n${JSON.stringify(flow.vars, null, 2)}`);
-  return parts.join('\n\n');
+  if (up) out.push(U('upstream', `Lo que recibe de steps anteriores (${({ full: 'todo', json: 'solo JSON', summary: 'resumen', refs: 'referencias' })[step.input?.mode || 'full']}, ${upstream.length})`, `upstream: ${upstream.map((u) => u.name).join(', ')}`, up));
+  if (input) out.push(U('input', 'Input del flujo', 'run input', `## Input del flujo\n${clip(input, 8000)}`));
+  if (Object.keys(flow.vars || {}).length) out.push(U('vars', `Variables (${Object.keys(flow.vars).length})`, 'flow.vars + vars de la ejecución', `## Variables\n${JSON.stringify(flow.vars, null, 2)}`));
+  return out;
+}
+
+export function runUserPrompt(flow, step, input, upstream, data, rctx = {}) {
+  return userSections(flow, step, input, upstream, data, rctx).map((s) => s.text).join('\n\n');
 }
 
 /** Static system prompt for a step chat (kept stable so the resumed session stays coherent). */

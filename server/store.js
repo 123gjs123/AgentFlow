@@ -37,6 +37,12 @@ export function getConfig() {
   if (!c?.token) { c = { ...(c || {}), token: crypto.randomBytes(24).toString('base64url') }; writeJson(f, c); }
   return c;
 }
+export function setConfig(patch) {
+  const c = { ...getConfig(), ...patch };
+  for (const k of Object.keys(c)) if (c[k] === undefined) delete c[k];
+  writeJson(path.join(dir(), 'config.json'), c);
+  return c;
+}
 export function rotateToken() {
   const c = { ...getConfig(), token: crypto.randomBytes(24).toString('base64url') };
   writeJson(path.join(dir(), 'config.json'), c);

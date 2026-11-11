@@ -168,6 +168,18 @@ function trackEffect(rs, use, res) {
   }
 }
 
+/** CLI options for an AI step run (shared by the engine and the context preview, spec 17 CTX-1/CTX-9). */
+export function cliOptions(step) {
+  return {
+    model: step.model || undefined, effort: step.effort || undefined,
+    agent: step.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
+    permissionMode: step.permissionMode || undefined, allowedTools: step.allowedTools,
+    // Least privilege: --allowedTools only pre-approves; --tools makes other built-in tools unavailable.
+    // Agent steps keep the tools of their agent definition.
+    tools: step.kind === 'agent' ? undefined : builtinTools(step),
+  };
+}
+
 /** Built-in tool names from a step's access list ("Read Grep Bash(git:*) mcp__x" -> "Read,Grep,Bash"). */
 export function builtinTools(step) {
   const names = (String(step.allowedTools || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || [])
@@ -422,14 +434,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       const system = P.runSystemPrompt(flow, step, rctx);
       addRefInputs();
       rs.inputView = { kind: 'ai', mode: step.input?.mode || 'full', prompt: clipS(prompt, 60000), system: clipS(system, 30000), upstream: upMeta.map((m, i) => ({ ...m, summarized: !!upstream[i].summary })) };
-      const common = {
-        model: step.model || undefined, effort: step.effort || undefined,
-        agent: step.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
-        permissionMode: step.permissionMode || undefined, allowedTools: step.allowedTools,
-        // Least privilege: --allowedTools only pre-approves; --tools makes other built-in tools unavailable.
-        // Agent steps keep the tools of their agent definition.
-        tools: step.kind === 'agent' ? undefined : builtinTools(step),
-      };
+      const common = cliOptions(step);
       rs.inputView.tools = common.tools ?? '(los del agente)';
       const r = await ai({ prompt, appendSystem: system, ...common });
       sessionId = r.sessionId;
@@ -570,7 +575,7 @@ export function unpinStep(flowId, stepId) {
   return flow;
 }
 
-function ancestorsOf(flow, id) {
+export function ancestorsOf(flow, id) {
   const seen = new Set(); const stack = [id];
   while (stack.length) {
     const cur = stack.pop();

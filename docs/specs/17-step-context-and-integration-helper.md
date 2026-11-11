@@ -1,6 +1,6 @@
 # 17 — Step context box and integration helper
 
-**Status:** Proposed (2026-11-11). Decisions D21–D32 in `docs/DECISIONS.md`.
+**Status:** Implemented with exceptions (accepted 2026-11-11). Acceptance: 19 of 23 criteria pass; 14 and 16 pass with accepted deviations; 10 is verified except the AI half (`willResend:false` after a chat turn: code reading); 12 (UI) is verified by code reading only. Not implemented: CTX-6 `summary: cached`, CTX-16 node hover, the "Datos" ↔ box links, the exact-request "Probar" of INT-10, the INT-13 p90 gate for Jira `wait`. Template and wizard defects T1–T11 and adversarial round-3 findings were fixed on 2026-11-11 (see "Round 3 fixes" at the end); `scripts/verify/int-templates.mjs` passes 49/49 including hostile flow names. Decisions: D21–D32 (design) and D33–D37 (acceptance) in `docs/DECISIONS.md`.
 
 ## Summary
 
@@ -156,7 +156,88 @@ Same setup as spec 16: an isolated instance (`PORT=4319 AFS_DATA=<empty temp dir
 22. **INT-11 inbound.** After a 401 call and a 200 dry run with `source:"jira"`, `GET /api/integrations/inbound` lists both with status, `source`, `remoteIp`, and no token or body fields.
 23. **INT-13.** `jira-cloud` generation for a flow without a Jira-comment step → `notes` include "añade un step final 'Comentar en Jira'". `github-actions` with `mode:"wait"` → the workflow uploads `afs-result.json`.
 
+## Implementation notes (2026-11-11)
+
+Files: `server/context.js` (`previewStep`, `definitionFile`), `server/prompt.js` (`systemSections` / `userSections`, used by the engine and the preview), `server/claude.js` (`buildArgs`, shared), `server/integrations.js` (callers, reachability, templates, lint, AI adaptation, inbound log), `server/index.js` (endpoints, `dryRun`, inbound logging, `PUT /api/info/public-url`, forwarded-header guard), `bin/afs.js` (`--dry-run`), `client/src/Context.jsx`, `client/src/Integrations.jsx`, wired in `Panels.jsx` and `Help.jsx`.
+
+Deliberate differences from the text above (accepted, DECISIONS D33–D37):
+- CTX-1: there is no single `buildStepInvocation`. The shared pure pieces are `systemSections` / `userSections` (prompt.js), `cliOptions` (engine.js) and `buildArgs` (claude.js). Fidelity is proven by criterion 3 (byte-identical).
+- INT-3: all templates live in `server/integrations.js`, not one file per caller. CI and script callers share two stdlib clients, `afs_call.py` and `afs-call.ps1`, that hold the HTTP contract (endpoint, `Idempotency-Key` header, 202/poll, exit codes). Generated pipeline files only pass arguments. Criterion 14 is met through the client, not by literals in the Jenkinsfile. `bash-cron` calls `afs_call.py` (python3), not curl.
+- INT-4: `powershell-task` (location local) calls `127.0.0.1` over HTTP. `afs run` is offered in the notes.
+- INT-7: of the `Ngrok-*` family only `Ngrok-Trace-Id` is checked. Real ngrok traffic also carries `X-Forwarded-For`, so it is still blocked.
+
+Not implemented: CTX-6 `summary: cached` (always `pending`); CTX-16 hover card; the links "Ver previsualización actual" / "Ver lo enviado en la última ejecución"; the sample "input: [ ]" field in the box; INT-13 p90 < 25 s gate before offering Jira `wait`; INT-10 "Probar" sends a body rebuilt from `mapping` without the `Idempotency-Key` header, not the exact generated request.
+
+Open defects (fix before calling the spec done):
+
+| # | Where | What breaks | Fix |
+|---|---|---|---|
+| T1 | `integrations.js` GitHub/Bitbucket `name:` line | Flow name with `": "` (e.g. `Smoke: QA`) produces invalid YAML (`mapping values are not allowed here`). | Emit `name: ${JSON.stringify('Ejecutar flujo ' + flowName)}`. |
+| T2 | Bitbucket/GitLab `location: local` script line `- afs run …` | A plain scalar: `": "` breaks the YAML, and `" #"` in the flow name starts a comment, cutting off `--key …`. | Always use the `- >-` block form (already used for the remote variant), or JSON-quote the line. |
+| T3 | Bitbucket `runs-on: [self.hosted, windows]` / GitLab Windows shell runner | Commands use bash syntax `$BITBUCKET_REPO_SLUG`, `$CI_PIPELINE_ID`. In PowerShell these are undefined variables, so the key becomes `-` / `--`, and every build after the first replays the first run (`idempotentReplay`). | Windows runner: use `$env:NAME`. Otherwise use a Linux shell runner (`linux.shell`) and keep bash syntax. |
+| T4 | Jenkins (both), flow name with `'` | `bat '…"O'Brien"…'` and `powershell '''… -Flow 'O''Brien''' …'''` end the Groovy string early, so the Jenkinsfile does not compile. | Escape `'` → `\'` for Groovy single-quoted strings. For `'''` strings, pass the flow name in an `environment {}` variable (`AFS_FLOW`) and read `$env:AFS_FLOW` / `"$AFS_FLOW"`. |
+| T5 | `lintIntegration` endpoint regex | `encodeURIComponent` leaves `'` unencoded, and the path regex stops at `'`, so a flow name with `'` gives a false `WRONG_ENDPOINT` for Jira/webhook and the copy buttons are disabled. | Encode `'` as `%27` in templates (`encodeURIComponent(n).replace(/'/g,'%27')`). |
+| T6 | `afs_call.py`, `afs-call.ps1` on 409 `IDEMPOTENCY_CONFLICT` | Exit 0: a CI retry with changed parameters passes green without running. INT-4 says to fail on non-2xx. | Exit 2 with the message. |
+| T7 | `afs-call.ps1` on PowerShell 7 (`pwsh`) | `$_.Exception.Response.GetResponseStream()` does not exist in PS 7. A 401/404/422 throws, and the script exits 1 ("flow failed") instead of 2 with the code. | Read `$_.ErrorDetails.Message` (works in 5.1 and 7), or use `-SkipHttpErrorCheck` on PS 7. |
+| T8 | `ejecutar-flujo.sh` (bash-cron) on Windows Git Bash | `python3` resolves to the Microsoft Store alias: exit 49 "Python was not found". Verified on this machine; it works when `python3` is a real interpreter. | `PY=$(command -v python3 >/dev/null && python3 -c '' 2>/dev/null && echo python3 || echo python)`. |
+| T9 | Wizard + checklist | (a) The inbound indicator waits for `source = caller.split('-')[0]`, but `jira-dc` sends `jira-dc` and `powershell-task` sends `tarea`, so it never turns green for them. (b) Copy sets `localStorage['afs.extCopied']`, but the checklist reads `afs.didExternal`, so INT-16 never ticks. | (a) Send `source = caller id` everywhere (INT-3) and match on it. (b) Use one key. |
+| T10 | ext `run` with `dryRun` and an already-used `Idempotency-Key` | Returns the previous run (`idempotentReplay:true`), not a dry-run answer. | Evaluate `dryRun` before the idempotency replay (still without recording the key). |
+| T11 | Low | `afs_call.py`: a connection error prints a traceback and exits 1 (should be 2 with a message). Tailscale option text contains a literal `PORT`. GitHub template triggers on every `push` to `main` (runs the flow and uses the subscription on each push); default to `workflow_dispatch` only. | As described. |
+
+Acceptance evidence (isolated instance `PORT=4319`, empty `AFS_DATA`, 2 AI calls: 1 Haiku, 1 Sonnet):
+
+| # | Result | Evidence |
+|---|---|---|
+| 1, 2, 4, 6–9, 11, 13, 17, 19, 22, 23 | PASS | Implementer script re-run by the PO: 21/21 (perf p95 4 ms; skill `definition` from the real catalog, `../../data/config` → 404). |
+| 3 | PASS (Haiku) | Run `r_099e7a72` single step `Analizar`: system 967/967 chars, user 157/157 chars, byte-identical; `cli.tools` = `inputView.tools` = `Read,Grep,ToolSearch`. |
+| 5 | PASS | A output 3,000 chars, input mode `summary` → `summary:"pending"`, warning `SUMMARY_PENDING`, answer in 3 ms (no model call possible). |
+| 10 | PASS (non-AI part) | `chat.block` starts with `<step-context>`, `hash` = sha1 of the body; editing the role changes the hash, `willResend:true`. The `false` case after a chat turn is checked by code reading only (engine.js:791/850 store the hash from the same `stepContextBlock`). |
+| 12 | Code reading | `Panels.jsx:118` renders the box only on Config/Chat; `Context.jsx:46-58` previews the unsaved step 400 ms after a change; `:75` chip "≈ N tokens"; `:78-85` diff against the last run. Not exercised in a browser. |
+| 14 | PASS with deviation | `withCredentials`, `${BUILD_TAG}`, no token, lint clean. `Idempotency-Key` and `/api/ext/flows/<flow>/run` live in `afs_call.py` / `afs-call.ps1`, not in the Jenkinsfile (D34). |
+| 15 | PASS | `scripts/verify/int-templates.mjs`: 25/25 for all callers (remote and local) incl. YAML, Jira JSON, PowerShell parser, `py_compile`, `bash -n`. With the hostile flow name `Smoke: QA #1 'x'`: 11 failures, see T1, T2, T5. |
+| 16 | PASS with deviation | PowerShell and Python clients: success 0, `exit 1` → 1, `deadlineSec:2` on `Start-Sleep 30` → 3, same key → same `runId`. bash-cron passes only with a real `python3` on PATH (T8). |
+| 18 | PASS | `X-Forwarded-For` on `/api/flows` → 403; `CF-Connecting-IP` on `/` → 403; WS with XFF → socket destroyed; `/api/ext/ping` + token + XFF → 200; plain `/api/flows` → 200. |
+| 20 | PASS (Sonnet) | 11 s; lint clean; `vars.issue = {{issue.key}}`; mode `fire-and-forget`; `resultTo` says the flow comments; setup says "Issue transitioned … To status = QA", JQL `project = SBK`; 3,967 input tokens; no token in output. |
+| 21 | PASS | Dry run with key `k9` → 200; run files on disk 0 → 0; `?dryRun=1` → 200; real run with `k9` → new run; raw template → 422; no token → 401; `afs run po17-int --dry-run` → exit 0, "se ejecutarían 1 step(s): Uno". |
+
 ## Open questions (non-blocking)
 1. **Per-caller tokens** (one revocable token per integration, scoped to flows). Useful once a tunnel is in place, but it changes the security model in spec 08. Escalate to the user before scheduling.
 2. Confirm in a real Jira Cloud site: the exact web request timeout (assumed ~30 s), the "Hidden" header option, and that `{{issue.updated.format(...)}}` renders in headers. Adjust the template if not.
 3. Calibrate the 4 chars/token estimate against `usage.inputTokens` from OBS-3 once 20+ runs exist. The box could later show "real last run: N tokens" next to the estimate.
+
+## Round 3 fixes (2026-11-11)
+
+Adversarial review round 3 and the product verification found defects in the generated code (T1–T11 and others). The design changed so that whole classes of defects cannot happen, instead of patching each template:
+
+- **No caller data through a shell.** Caller expressions are written as `{ENV_NAME}` placeholders (`{BUILD_TAG}`, `{GIT_COMMIT}`, `{NOW}`) that the shared clients (`afs_call.py`, `afs-call.ps1`) expand from the environment themselves. `${X}`, `$X`, `%X%` and `$env:X` typed in the wizard are converted. GitHub `${{ … }}` expressions go to the step's `env:` block, never into `run:`, which prevents Actions script injection. Command arguments are literal: bash `'…'`, PowerShell `'…'`, Groovy `'''…'''` with backslashes doubled. YAML uses literal `|` blocks and JSON-quoted names.
+- **Flows and steps by id** in every generated URL and argument. Names with `'`, `"`, `:`, `#` or accents no longer break YAML, Groovy, Windows codepages or the lint.
+- **Local runners on Windows** (Jenkins agent, GitHub/Bitbucket/GitLab self-hosted) use `afs-call.ps1` against 127.0.0.1, instead of `afs run` with bash syntax that left the idempotency key constant.
+- **Clients.**
+  - Exit 2 on 409 IDEMPOTENCY_CONFLICT, on connection errors and on repeated poll errors (no traceback).
+  - `--var` without `=` is an error.
+  - PowerShell client: TLS 1.2; `ErrorDetails` (works on PowerShell 7); `ReadAllText` for input files; UTF-8 output without BOM; vars as `-VarsJson` (works through `-File`).
+  - The bash wrapper uses `python3` or, if missing, `python`.
+- **Jira:** smart values mapped by the user get `.jsonEncode` automatically.
+- **Lint.**
+  - New `DANGEROUS_COMMAND` check: `| sh`, Invoke-Expression, base64 decoding, `set -x`, printing env/token, mass delete.
+  - New `FOREIGN_HOST` check: any host other than the chosen base.
+  - Also catches a token in `X-AFS-Token` or the query string.
+  - Setup steps and notes are linted too.
+  - The token is redacted from the description before it reaches the model.
+- **Preview fidelity.**
+  - Summary mode shows the upstream text; the `pending` flag is metadata only.
+  - Upstream steps that will run fresh are labelled as the engine labels them. Their sample is the last output, flagged in metadata.
+  - Hook-skipped outputs are included in run samples.
+  - The box accepts a test input.
+- **Server.**
+  - Dry run is evaluated before the idempotency check and returns variable names only.
+  - `GET /api/ext/flows` returns variable names only, because values may be secrets.
+  - The public URL must be `https://`, parsed with `URL` and stored as origin plus path.
+  - `source` = caller id, so the wizard's "first call arrived" indicator works for every caller.
+  - The GitHub template triggers on `workflow_dispatch` only.
+
+Verification after the fixes:
+- `scripts/verify/int-templates.mjs`: 49/49, with hostile names, YAML parse, PowerShell parser, `py_compile`, `bash -n`.
+- Spec 17 suite: 21/21, plus 22/22 including the Sonnet adaptation before the rewrite.
+- Spec 16 regression: 30/30. Round-2 regression: 13/13.
+

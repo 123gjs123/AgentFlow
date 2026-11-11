@@ -13,6 +13,8 @@ import * as store from './store.js';
 import * as engine from './engine.js';
 import { listAgents, listSkills } from './catalog.js';
 import { lastInit, lastRateLimit, probeInit, claudeBin } from './claude.js';
+import { previewStep, definitionFile } from './context.js';
+import * as integ from './integrations.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT || 4317);
@@ -38,6 +40,7 @@ const isLocalReq = (req) => isLoopback(req.socket.remoteAddress) && okHost(req.h
 const wrap = (fn) => async (req, res) => {
   try { const r = await fn(req, res); if (!res.headersSent) res.json(r ?? { ok: true }); }
   catch (e) {
+    res.locals.code = e.code || null;
     const status = e.status || (e instanceof SyntaxError || e instanceof TypeError || e instanceof RangeError || e instanceof ReferenceError ? 500 : 400);
     if (status >= 500) console.error(e);
     res.status(status).json({ error: e.message, code: e.code || CODES[status] || 'ERROR' });
@@ -49,6 +52,15 @@ const need = (id) => { const f = store.getFlow(id); if (!f) throw fail(404, 'Flu
 
 // ============ external API (token) ============
 const ext = express.Router();
+ext.use((req, res, next) => {
+  const at = Date.now();
+  res.on('finish', () => integ.logInbound({
+    at, method: req.method, path: req.path.slice(0, 200), source: String(req.body?.source || req.query.source || '').slice(0, 20) || null,
+    status: res.statusCode, code: res.locals.code || null, remoteIp: req.socket.remoteAddress, forwardedFor: req.get('x-forwarded-for') || null,
+    userAgent: (req.get('user-agent') || '').slice(0, 120), runId: res.locals.runId || null, dryRun: !!res.locals.dryRun,
+  }));
+  next();
+});
 ext.use((req, res, next) => {
   const auth = req.get('authorization')?.replace(/^Bearer\s+/i, '') || req.get('x-afs-token') || req.query.token;
   const token = store.getConfig().token;
@@ -62,7 +74,7 @@ const inputOf = (body) => {
   if (typeof body === 'string') return body;
   if (body && typeof body.input === 'string') return body.input;
   if (body && body.input !== undefined) return JSON.stringify(body.input, null, 2);
-  const rest = { ...(body || {}) }; for (const k of ['step', 'wait', 'timeoutSec', 'source', 'vars', 'usePins', 'deadlineSec']) delete rest[k];
+  const rest = { ...(body || {}) }; for (const k of ['step', 'wait', 'timeoutSec', 'source', 'vars', 'usePins', 'deadlineSec', 'dryRun']) delete rest[k];
   return Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''; // raw webhook payloads (Bitbucket, Jenkins…)
 };
 const stableJson = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((key) => [key, x[key]])) : x));
@@ -71,7 +83,7 @@ const truthy = (v) => v === true || v === 1 || /^(1|true|yes|si|sí)$/i.test(Str
 ext.get('/ping', wrap(() => ({ ok: true, app: 'agent-flow-studio' })));
 ext.get('/flows', wrap(() => store.listFlows().map((f) => {
   const full = store.getFlow(f.id);
-  return { id: f.id, name: f.name, description: full.description, vars: full.vars, steps: full.steps.map((s) => ({ id: s.id, name: s.name, kind: s.kind })) };
+  return { id: f.id, name: f.name, description: full.description, vars: Object.keys(full.vars || {}), steps: full.steps.map((s) => ({ id: s.id, name: s.name, kind: s.kind })) };
 })));
 // Run a flow or one step. vars are per run (never saved into the flow). External runs ignore pins unless usePins.
 ext.post('/flows/:flow/run', wrap(async (req, res) => {
@@ -92,6 +104,19 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
   };
   const input = inputOf(req.body);
   const key = String(req.get('idempotency-key') || '').trim();
+  if (key.length > 200) throw fail(400, 'Idempotency-Key: máximo 200 caracteres', 'BAD_IDEMPOTENCY_KEY');
+  if (truthy(body.dryRun ?? req.query.dryRun)) {
+    const problem0 = engine.externalRunProblem(flow, { only, vars: body.vars });
+    if (problem0) throw fail(problem0.status, problem0.error, problem0.code);
+    // Every pre-start check, nothing started, idempotency key not recorded (spec 17 INT-10).
+    res.locals.dryRun = true;
+    const usePins = truthy(body.usePins);
+    const steps = only ? flow.steps.filter((s) => s.id === only) : flow.steps;
+    const warnings = [];
+    if (!input) warnings.push('input vacío');
+    for (const k of Object.keys(body.vars || {})) if (!(k in (flow.vars || {}))) warnings.push(`la variable "${k}" no existe en el flujo`);
+    return { dryRun: true, ok: true, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, warnings };
+  }
   let bodyHash = null;
   if (key) {
     if (key.length > 200) throw fail(400, 'Idempotency-Key: máximo 200 caracteres', 'BAD_IDEMPOTENCY_KEY');
@@ -109,6 +134,7 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
   const trigger = String(body.source || req.query.source || 'api').slice(0, 20);
   const runId = engine.startRun(flow.id, { input, only, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null });
   if (key) store.setIdem(`${flow.id}:${key}`, { runId, bodyHash, flowId: flow.id });
+  res.locals.runId = runId;
   return respond(runId);
 }));
 ext.get('/flows/:flow/runs/:runId', wrap((req) => {
@@ -263,8 +289,61 @@ app.get('/api/catalog', wrap((req) => ({
   tools: lastInit.tools, mcpServers: lastInit.mcpServers, rateLimit: lastRateLimit.info, claudeBin: claudeBin(),
 })));
 app.post('/api/catalog/probe', wrap(async (req) => probeInit(req.body?.cwd)));
+app.get('/api/catalog/file', wrap((req) => definitionFile(String(req.query.kind || ''), String(req.query.name || ''), req.query.flow ? String(req.query.flow) : null)));
+
+// ----- context box (spec 17 CTX) -----
+app.post('/api/flows/:id/steps/:stepId/preview', wrap((req) => previewStep(req.params.id, req.params.stepId, { draft: req.body?.draft, target: req.body?.target === 'chat' ? 'chat' : 'run', sample: req.body?.sample || {} })));
+
+// ----- integration helper (spec 17 INT) -----
+app.get('/api/integrations/callers', wrap(() => integ.CALLERS));
+const integCtx = (flowRef, callerId, opts = {}) => {
+  const flow = store.findFlow(String(flowRef || ''));
+  if (!flow) throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND');
+  const caller = integ.CALLERS.find((c) => c.id === callerId);
+  if (!caller) throw fail(400, 'Origen desconocido', 'UNKNOWN_CALLER');
+  if (opts.step && !flow.steps.some((x) => x.id === opts.step || x.name === opts.step)) throw fail(404, `Step no encontrado: ${opts.step}`, 'STEP_NOT_FOUND');
+  const cfg = store.getConfig();
+  const reach = integ.reachability(caller, { location: opts.location, host: HOST, port: PORT, publicUrl: cfg.publicUrl });
+  const lintCtx = { flow, flows: store.listFlows(), callerId, token: cfg.token, flowVars: flow.vars || {} };
+  return { flow, caller, reach, lintCtx };
+};
+app.post('/api/integrations/generate', wrap(async (req) => {
+  const b = req.body || {};
+  const o = b.options || {};
+  const { flow, caller, reach, lintCtx } = integCtx(b.flow, b.caller, o);
+  const step = o.step ? flow.steps.find((x) => x.id === o.step || x.name === o.step)?.name : '';
+  const mode = ['wait', 'async-poll', 'fire-and-forget'].includes(o.mode) ? o.mode : caller.id.startsWith('jira') || caller.id === 'webhook' ? 'fire-and-forget' : 'wait';
+  const params = {
+    base: reach.base, flowId: flow.id, flowName: flow.name, step, stepId: o.step ? flow.steps.find((x) => x.id === o.step || x.name === o.step)?.id : '', mode, input: o.input, vars: o.vars && typeof o.vars === 'object' ? o.vars : undefined,
+    idempotencyKey: o.idempotencyKey, timeoutSec: Math.min(Number(o.timeoutSec) || 1800, 4 * 3600), deadlineSec: Number(o.deadlineSec) || 0,
+    source: caller.id, reach, info: { node: process.execPath, mcp: path.join(ROOT, 'bin', 'mcp.js'), cli: path.join(ROOT, 'bin', 'afs.js') },
+  };
+  const tpl = integ.buildTemplate(caller.id, params);
+  if (caller.id.startsWith('jira') && mode !== 'wait' && !flow.steps.some((s) => /coment|comment/i.test(`${s.name} ${s.task || ''}`))) {
+    tpl.notes.push('Este flujo no tiene un step que comente en Jira: añade un step final "Comentar en Jira" (acceso Atlassian) que comente el resultado en {{vars.issue}}.');
+  }
+  if (b.ai && String(b.description || '').trim()) {
+    const out = await integ.adaptWithAI({ caller, flow, description: b.description, template: tpl, reach, lintCtx });
+    return { ...out, reachability: reach, template: tpl };
+  }
+  return { ...tpl, reachability: reach, lint: integ.lintIntegration(tpl.files, { ...lintCtx, mappedVars: tpl.mapping?.vars, base: reach.base, texts: [...tpl.setup, ...tpl.notes] }), ai: { used: false } };
+}));
+app.post('/api/integrations/lint', wrap((req) => {
+  const { lintCtx, reach } = integCtx(req.body?.flow, req.body?.caller);
+  return integ.lintIntegration(Array.isArray(req.body?.files) ? req.body.files : [], { ...lintCtx, mappedVars: req.body?.vars, base: reach.base });
+}));
+app.get('/api/integrations/inbound', wrap((req) => integ.inboundSince(Number(req.query.since) || 0)));
+app.put('/api/info/public-url', wrap((req) => {
+  const url = String(req.body?.url || '').trim();
+  let clean;
+  if (url) {
+    try { const u = new URL(url); if (u.protocol !== 'https:' || u.username || u.password) throw new Error(); clean = (u.origin + u.pathname).replace(/\/+$/, ''); }
+    catch { throw fail(400, 'URL inválida: debe ser https://host[/ruta] sin usuario ni contraseña', 'BAD_URL'); }
+  }
+  return { publicUrl: store.setConfig({ publicUrl: clean }).publicUrl || null };
+}));
 app.get('/api/info', wrap(() => ({
-  token: store.getConfig().token, port: PORT, host: HOST, root: ROOT,
+  token: store.getConfig().token, port: PORT, host: HOST, root: ROOT, publicUrl: store.getConfig().publicUrl || null,
   cli: path.join(ROOT, 'bin', 'afs.js'), mcp: path.join(ROOT, 'bin', 'mcp.js'), node: process.execPath,
 })));
 app.post('/api/info/rotate-token', wrap(() => ({ token: store.rotateToken().token })));

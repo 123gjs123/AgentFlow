@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useState } from 'react';
 import { api } from './api.js';
 import { PRESETS } from './presets.js';
+import IntegrationWizard from './Integrations.jsx';
 
 // ---------------- modal shell ----------------
 export function Modal({ title, onClose, children, wide }) {
@@ -134,6 +135,8 @@ export function ExternalInvoke({ flow }) {
   const s = snippets[tab];
   return (
     <div className="ext">
+      {flow ? <IntegrationWizard flow={flow} /> : <p className="muted small">Abre un flujo para usar el asistente de integración.</p>}
+      <details className="advanced"><summary>Snippets rápidos y token</summary>
       <div className="row wrap">
         <span className="small"><b>Token:</b> <code>{show ? info.token : '••••••••••••'}</code></span>
         <button className="ghost small" onClick={() => setShow(!show)}>{show ? 'ocultar' : 'mostrar en snippets'}</button>
@@ -144,6 +147,7 @@ export function ExternalInvoke({ flow }) {
       <p className="small">{s.intro}</p>
       {s.code.map((c, i) => <Copy key={i} text={c} />)}
       <p className="muted small">El flujo se identifica por <b>nombre</b> o id (<code>{flow?.id}</code>). Las ejecuciones externas aparecen en Ejecuciones con su origen (api, cli, mcp, webhook).</p>
+      </details>
     </div>
   );
 }
@@ -256,7 +260,15 @@ export function HelpModal({ section, setSection, onClose, flow, flows, onTour })
           </>)}
           {section === 'external' && (<>
             <h3>Invocar desde fuera</h3>
-            <p>Puedes disparar o consultar este flujo desde Claude Code (MCP), la terminal, scripts, Jenkins o webhooks.</p>
+            <p>Puedes disparar o consultar este flujo desde Jira, Jenkins, GitHub/Bitbucket/GitLab, scripts, la terminal u otro agente (MCP).</p>
+            <ul className="small">
+              <li><b>Asistente de integración.</b> Elige quién llama y describe cuándo: te genero el código o la regla listos para pegar. "Adaptar con IA" lo ajusta a tu descripción y un control revisa todo lo que genera (sin token escrito, solo llamadas a esta app, nada de comandos peligrosos).</li>
+              <li><b>¿Llega la llamada?</b> Si quien llama corre en esta PC, usa 127.0.0.1 y no expones nada. Si está en tu red, la app tiene que escuchar en la red (HOST=0.0.0.0). Los servicios en la nube (Jira Cloud, GitHub, Bitbucket) no llegan a tu PC: usa un runner en esta PC, un túnel que deje pasar solo <code>/api/ext/</code> (pega su URL en "URL pública"), o que el flujo consulte Jira de forma programada.</li>
+              <li><b>Token.</b> Nunca va escrito en el código: va en los secretos de quien llama (credencial de Jenkins, secret de GitHub, variable segura de Bitbucket/GitLab, header "Hidden" en Jira o variable de entorno <code>AFS_TOKEN</code>). Si se filtra, regenéralo.</li>
+              <li><b>Datos del que llama.</b> Se escriben como <code>{'{BUILD_TAG}'}</code>, <code>{'{GIT_COMMIT}'}</code>…: los reemplaza el script desde las variables de entorno, sin pasar por el shell (comillas o $ no rompen nada ni inyectan comandos). En Jira se usan smart values <code>{'{{issue.key}}'}</code>.</li>
+              <li><b>Idempotency-Key.</b> Un id único por evento: si quien llama reintenta con la misma clave no se lanza otra ejecución (si la anterior falló, sí).</li>
+              <li><b>Probar.</b> "Probar (sin ejecutar)" valida flujo, step, variables y token sin crear nada ni gastar. En terminal: <code>afs run "&lt;flujo&gt;" --dry-run</code>. Abajo verás cuándo llega la primera llamada real (un 401 = llegó sin token válido).</li>
+            </ul>
             <ExternalInvoke flow={flow} />
           </>)}
           {section === 'faq' && (<>

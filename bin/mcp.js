@@ -65,7 +65,7 @@ async function callTool(name, a = {}) {
   switch (name) {
     case 'list_flows': {
       const flows = await call('GET', '/flows');
-      return flows.map((f) => `• ${f.name} (${f.id})${f.description ? ` — ${f.description}` : ''}\n  steps: ${f.steps.map((s) => s.name).join(' → ') || '—'}${Object.keys(f.vars || {}).length ? `\n  vars: ${JSON.stringify(f.vars)}` : ''}`).join('\n') || 'No hay flujos.';
+      return flows.map((f) => `• ${f.name} (${f.id})${f.description ? ` — ${f.description}` : ''}\n  steps: ${f.steps.map((s) => s.name).join(' → ') || '—'}${(f.vars || []).length ? `\n  variables: ${f.vars.join(', ')}` : ''}`).join('\n') || 'No hay flujos.';
     }
     case 'run_flow': {
       const body = { input: a.input || '', step: a.step, vars: a.vars, source: 'mcp', usePins: !!a.usePins, deadlineSec: a.deadlineSec };
