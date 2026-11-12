@@ -315,11 +315,11 @@ What you can attach:
 
 How it reaches the model:
 - Sources are **not pasted into the prompt**. The model gets a short index, "what is available and where", plus the access to reach each source:
-  - read access to the folders and files ( + Read/Grep/Glob);
+  - read access to the folders and files (`--add-dir` + Read/Grep/Glob);
   - WebFetch for pages;
   - the Atlassian MCP read tools for Jira and Confluence.
 - Each skill, agent or role consults them when it needs to.
-- References accept templates (, ).
+- References accept templates (`{{vars.issue}}`, `{{input}}`).
 - Each source shows a ✓/✗ check, and a folder browser helps pick paths.
 
 ### Reusable boxes
