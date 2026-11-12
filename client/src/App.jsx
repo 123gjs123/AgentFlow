@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { api, onWs, onConn, pendingSave, TAB_ID } from './api.js';
 import { mergeFlows } from './merge.js';
+import { createHistory } from './history.js';
 import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
@@ -55,6 +56,8 @@ export default function App() {
   const [autoOrder, setAutoOrder] = useState(ls.get('afs.autoOrder') !== '0');
   const dirty = useRef(false);
   const version = useRef(0); // bumped on every local edit: a save only clears `dirty` if nothing changed meanwhile
+  const historyRef = useRef(createHistory()); // undo/redo of this tab's edits on the open flow
+  const [, setHistTick] = useState(0);
   const baseRef = useRef(null); // last version of the open flow this tab got from the server (base of the 3-way merge)
   const saveTimer = useRef(null);
   const flowRef = useRef(null);
@@ -110,6 +113,7 @@ export default function App() {
       f = await api.put(`/api/flows/${f.id}`, { ...laid, baseRev: f.rev || 0 }).catch(() => laid);
     }
     baseRef.current = f;
+    historyRef.current.clear(); setHistTick((n) => n + 1);
     setFlow(f); setSelectedId(null); setSelectedEdge(null); setLive({}); setPaused(null); setReviewOpen(false);
     ls.set('afs.flow', id); ss.set('afs.flow', id);
     try { history.replaceState(null, '', `?flow=${encodeURIComponent(id)}`); } catch {}
@@ -157,15 +161,38 @@ export default function App() {
     saveTimer.current = setTimeout(() => { saveNow().catch(() => {}); }, 500);
   }, []);
 
-  const mutate = useCallback((fn, { layout = false } = {}) => {
-    setFlow((cur) => {
-      let next = fn(structuredClone(cur));
-      if (layout && autoOrder) next = { ...next, steps: autoLayout(next.steps, next.edges) };
-      flowRef.current = next; // a flush right after an edit must send this version
-      return next;
-    });
+  const mutate = useCallback((fn, { layout = false, record = true } = {}) => {
+    const cur = flowRef.current;
+    if (!cur) return;
+    let next = fn(structuredClone(cur));
+    if (layout && autoOrder) next = { ...next, steps: autoLayout(next.steps, next.edges) };
+    if (record) { historyRef.current.record(cur, next); setHistTick((n) => n + 1); }
+    flowRef.current = next; // a flush right after an edit must send this version
+    setFlow(next);
     scheduleSave();
   }, [scheduleSave, autoOrder]);
+  /** Ctrl+Z / Ctrl+Y: undo or redo only what that action changed (later edits from other tabs stay). */
+  const undoRedo = useCallback((dir) => {
+    const cur = flowRef.current;
+    if (!cur) return;
+    const next = dir === 'undo' ? historyRef.current.undo(cur) : historyRef.current.redo(cur);
+    setHistTick((n) => n + 1);
+    if (!next) return;
+    mutate(() => next, { record: false });
+  }, [mutate]);
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const t = e.target;
+      // Inside a text field the browser's own undo applies (it undoes the typing there).
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undoRedo('undo'); }
+      else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); undoRedo('redo'); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undoRedo]);
 
   // ---- websocket ----
   useEffect(() => onWs((m) => {
@@ -179,7 +206,8 @@ export default function App() {
         const base = baseRef.current;
         // A new revision = the definition changed elsewhere (other tab, chat proposal, ctx.setVar, reset): merge it.
         if (base && base.id === m.flow.id && (m.flow.rev || 0) !== (base.rev || 0)) {
-          if (m.by !== TAB_ID || dirty.current) adoptRemote(m.flow); else baseRef.current = m.flow;
+          // Also when this tab caused it: a restore or a reset is transformed on the server (for a plain save it's identical).
+          adoptRemote(m.flow);
           break;
         }
         // Same revision: only run state changed (lastRun, memory, pins, chat sessions).
@@ -268,7 +296,12 @@ export default function App() {
     setSelectedId(s.id); setStepTab('config');
   }
   const onConnect = (source, target, sourceHandle, targetHandle) => {
-    if (flow.edges.some((e) => e.source === source && e.target === target)) return notify('Esas cajas ya están unidas: selecciona la flecha para cambiar qué pasa o el lado.');
+    // Already connected: drawing again between the same boxes MOVES that arrow to the chosen points.
+    const existing = flow.edges.find((e) => e.source === source && e.target === target);
+    if (existing) {
+      mutate((f) => { const e = f.edges.find((x) => x.id === existing.id); if (e) { if (sourceHandle) e.sourceHandle = sourceHandle; if (targetHandle) e.targetHandle = targetHandle; } return f; });
+      return notify('Flecha movida a los puntos elegidos.');
+    }
     if (wouldCycle(flow.edges, source, target)) return notify('Esa relación crearía un ciclo.');
     const sides = { ...(sourceHandle ? { sourceHandle } : {}), ...(targetHandle ? { targetHandle } : {}) };
     // Arrows drawn on a chosen side keep the manual layout; plain left→right ones re-order if "auto" is on.
@@ -318,7 +351,7 @@ export default function App() {
     if (users.length && !confirm(`Otros steps usan datos del que vas a borrar:\n${users.join('\n')}\n\nEsas referencias quedarán sin resolver. ¿Borrar igual?`)) return;
     onDeleteStepsRaw(ids);
   };
-  const relayout = () => { setFlow((f) => ({ ...f, steps: autoLayout(f.steps, f.edges) })); scheduleSave(); };
+  const relayout = () => mutate((f) => ({ ...f, steps: autoLayout(f.steps, f.edges) }));
 
   async function runFlow() {
     setShowRun(false);
@@ -376,6 +409,9 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         {flow && (
           <>
             <button data-tour="add-step" onClick={() => setModal('picker')}>＋ Step</button>
+            <div className="sep" />
+            <button className="ghost icon-btn" onClick={() => undoRedo('undo')} disabled={!historyRef.current.canUndo} title="Deshacer (Ctrl+Z)" aria-label="Deshacer">↶</button>
+            <button className="ghost icon-btn" onClick={() => undoRedo('redo')} disabled={!historyRef.current.canRedo} title="Rehacer (Ctrl+Y o Ctrl+Shift+Z)" aria-label="Rehacer">↷</button>
             <div className="sep" />
             <button className="ghost" onClick={relayout}>⇄ Ordenar</button>
             <label className="toggle small"><input type="checkbox" checked={autoOrder} onChange={(e) => { setAutoOrder(e.target.checked); ls.set('afs.autoOrder', e.target.checked ? '1' : '0'); }} /> auto</label>

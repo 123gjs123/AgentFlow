@@ -110,7 +110,7 @@ test('chat general desde el panel del flujo', async (t) => {
   if (guard(t)) return;
   await page.locator('.react-flow__pane').click({ position: { x: 20, y: 20 } });
   await page.locator('.tabs button', { hasText: 'Chat general' }).click();
-  await page.getByPlaceholder('Escribe… (Ctrl+Enter para enviar)').fill('¿qué hace este flujo?');
+  await page.getByPlaceholder('Escribe… (Enter envía · Alt+Enter nueva línea)').fill('¿qué hace este flujo?');
   await page.getByRole('button', { name: 'Enviar' }).click();
   await page.getByText(/Respuesta de chat \(mock\)/).first().waitFor({ timeout: 30000 });
 });

@@ -293,3 +293,13 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .lib-item .preset { flex: 1; }
 .pause-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
 .pause-card textarea { width: 100%; }
+
+/* arrow ends: visible grab points on the selected arrow (drag them to another dot to move the arrow) */
+.react-flow__edge .react-flow__edgeupdater { cursor: move; }
+.react-flow__edge.selected .react-flow__edgeupdater { fill: var(--accent); fill-opacity: .35; stroke: var(--accent); stroke-width: 1.5; }
+.react-flow__edge:hover .react-flow__edgeupdater { fill: var(--accent); fill-opacity: .2; }
+
+.icon-btn { font-size: 16px; padding: 2px 9px; }
+.icon-btn:disabled { opacity: .35; cursor: default; }
+.version-list { list-style: none; padding: 0; margin: 10px 0 0; }
+.version-list li { border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }

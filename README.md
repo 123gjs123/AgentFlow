@@ -31,6 +31,7 @@ Runs use your Claude Code login: your subscription, skills, agents and MCP conne
    - [Context box](#context-box)
    - [Reusable boxes](#reusable-boxes)
    - [Pinned outputs](#pinned-outputs)
+   - [Undo, redo and versions](#undo-redo-and-versions)
    - [Several tabs](#several-tabs)
    - [Schedules](#schedules)
 6. [Running flows from outside](#running-flows-from-outside)
@@ -178,7 +179,7 @@ Without `NODE_ENV=production` the server mounts Vite in middleware mode and serv
 
 ### Arrows: N inputs / N outputs, routing
 
-- Every box has an input and an output dot on **each side**. Drag an arrow's end to move it to another side.
+- Every box has an input and an output dot on **each side**. To move an arrow, select it and drag one of its highlighted ends to another dot, or simply draw it again between the same boxes from the dots you want.
 - A box can receive from N boxes and send to N boxes.
 - Click an arrow to configure it:
 
@@ -280,6 +281,7 @@ External runs ignore breaks unless they ask for them:
   - In **improve mode** it can edit the skill or agent file itself.
   - If the session expired, it starts a new one with the full context.
 - **General chat.** A router (Haiku, no tools) decides whether a step answers, the whole flow answers, or a step or the flow is run, and shows why.
+- **Chat keys.** Enter sends; Alt+Enter (or Shift+Enter) inserts a new line. The **Enviar** button works too.
 - **Hooks.** Per-step JavaScript functions:
   - `onStart(ctx)`: change the input or skip the step;
   - `onSuccess(ctx)`: transform the output or JSON, or return `routes`;
@@ -311,6 +313,16 @@ Freeze a step's output (from its last run, or typed by hand) to test the steps a
 
 - UI runs use pins.
 - External runs **ignore** them unless they pass `usePins: true`.
+
+### Undo, redo and versions
+
+- **Undo / redo**: Ctrl+Z, and Ctrl+Y or Ctrl+Shift+Z (⌘ on macOS), or the ↶ ↷ buttons in the toolbar.
+  - Each action is undone on its own: changes that came later from another tab or a hook are kept, and run results are never undone.
+  - Inside a text field, Ctrl+Z undoes the typing in that field.
+- **Versions** (**Flujo → Versiones**):
+  - While you edit, a version is saved automatically at most every N minutes. The default is 5; 0 turns it off. The state before your first change is kept too.
+  - **Guardar versión** saves a named one, which is never deleted.
+  - **Restaurar** brings a version back. It first saves the current state as "Antes de restaurar…", so you can go back.
 
 ### Several tabs
 
@@ -536,7 +548,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **146 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **154 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

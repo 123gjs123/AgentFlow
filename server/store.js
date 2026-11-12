@@ -86,6 +86,7 @@ export function deleteFlow(id) {
   fs.rmSync(path.join(dir('flows'), `${safe(id)}.json`), { force: true });
   fs.rmSync(path.join(DATA, 'chats', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'runs', safe(id)), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA, 'versions', safe(id)), { recursive: true, force: true });
 }
 
 export function newStep(partial = {}) {
@@ -198,3 +199,32 @@ export function saveToLibrary(step, name) {
   return item;
 }
 export function deleteFromLibrary(id) { writeJson(LIB(), listLibrary().filter((x) => x.id !== id)); }
+
+// ---------- versions (spec 20): snapshots of a flow's definition ----------
+// Only the definition travels (no run state, memory or chat sessions). Automatic ones are pruned; named ones are kept.
+const verDir = (flowId) => dir('versions', safe(flowId));
+const definitionOf = (f) => ({
+  name: f.name, description: f.description, cwd: f.cwd, vars: f.vars, schedule: f.schedule, runTimeoutSec: f.runTimeoutSec, versionEveryMin: f.versionEveryMin,
+  steps: (f.steps || []).map(({ lastRun, memory, pinned, chatSessionId, chatContextHash, ...s }) => s),
+  edges: f.edges || [],
+});
+export const definitionHash = (f) => crypto.createHash('sha256').update(JSON.stringify(definitionOf(f))).digest('hex');
+export function listVersions(flowId) {
+  let files = [];
+  try { files = fs.readdirSync(at('versions', safe(flowId))).filter((x) => x.endsWith('.json')); } catch { return []; }
+  return files.map((x) => readJson(at('versions', safe(flowId), x), null)).filter(Boolean)
+    .map(({ flow, ...meta }) => ({ ...meta, steps: flow?.steps?.length || 0, edges: flow?.edges?.length || 0 }))
+    .sort((a, b) => b.at - a.at);
+}
+export const getVersion = (flowId, id) => readJson(at('versions', safe(flowId), `${safe(id)}.json`), null);
+export function saveVersion(flow, { label = '', auto = false } = {}) {
+  const v = { id: uid('v_'), at: Date.now(), label: String(label || '').slice(0, 120), auto: !!auto, rev: flow.rev || 0, hash: definitionHash(flow), flow: definitionOf(flow) };
+  writeJson(path.join(verDir(flow.id), `${v.id}.json`), v);
+  // keep the last 30 automatic versions (named ones are never pruned)
+  const autos = listVersions(flow.id).filter((x) => x.auto);
+  for (const old of autos.slice(30)) fs.rmSync(at('versions', safe(flow.id), `${safe(old.id)}.json`), { force: true });
+  const { flow: _f, ...meta } = v;
+  return meta;
+}
+export const deleteVersion = (flowId, id) => fs.rmSync(at('versions', safe(flowId), `${safe(id)}.json`), { force: true });
+export const clearVersions = (flowId) => fs.rmSync(at('versions', safe(flowId)), { recursive: true, force: true });

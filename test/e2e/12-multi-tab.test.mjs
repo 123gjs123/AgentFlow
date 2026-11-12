@@ -106,6 +106,8 @@ let ui = {};
 const guard = (t) => { if (ui.skipReason) { t.skip(ui.skipReason); return true; } return false; };
 let pageB;
 afterEach(async (t) => { await captureOnFailure(ui.page, t); });
+// Close the browser and its server even if a test failed (otherwise the test process never exits).
+after(async () => { await ui.close?.(); });
 test('pestañas del navegador: cada una con su flujo (URL ?flow=, título); recargar mantiene el de cada pestaña', async (t) => {
   ui = await openUi('tabsui');
   if (guard(t)) return;
@@ -178,5 +180,4 @@ test('borrar el flujo en una pestaña: la otra avisa y pasa a otro flujo', async
   await pageB.getByText('Este flujo se eliminó en otra pestaña.').waitFor();
   await pageB.waitForFunction((id) => !location.search.includes(id), d.id);
   assert.deepEqual([...ui.page.errors], []);
-  await ui.close();
 });

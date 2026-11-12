@@ -217,6 +217,45 @@ app.use('/api', (req, res, next) => {
   next();
 });
 
+// ----- versions (spec 20) -----
+// While a flow is being edited, a snapshot is taken at most every versionEveryMin minutes (default 5; 0 = off).
+// The first edit also keeps the state it started from, so the oldest version is "before any change".
+const VERSION_DEFAULT_MIN = Number(process.env.AFS_VERSION_EVERY_MIN ?? 5);
+function autoVersion(before, after) {
+  const every = after.versionEveryMin ?? VERSION_DEFAULT_MIN;
+  if (!(every > 0) || store.definitionHash(before) === store.definitionHash(after)) return;
+  const list = store.listVersions(after.id);
+  if (!list.length) store.saveVersion(before, { label: 'Estado inicial', auto: true });
+  const lastAuto = list.find((v) => v.auto);
+  if (!lastAuto || Date.now() - lastAuto.at >= every * 60000) {
+    if (list[0]?.hash !== store.definitionHash(after)) store.saveVersion(after, { auto: true });
+  }
+}
+app.get('/api/flows/:id/versions', wrap((req) => { need(req.params.id); return store.listVersions(req.params.id); }));
+app.post('/api/flows/:id/versions', wrap((req) => store.saveVersion(need(req.params.id), { label: typeof req.body?.label === 'string' && req.body.label.trim() ? req.body.label : 'Versión guardada' })));
+app.get('/api/flows/:id/versions/:vid', wrap((req) => { need(req.params.id); const v = store.getVersion(req.params.id, req.params.vid); if (!v) throw fail(404, 'Versión no encontrada', 'VERSION_NOT_FOUND'); return v; }));
+app.delete('/api/flows/:id/versions/:vid', wrap((req) => { need(req.params.id); store.deleteVersion(req.params.id, req.params.vid); }));
+/** Restore: the current state is saved first ("Antes de restaurar…"), so a restore can always be undone. Run state is kept for steps that still exist. */
+app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
+  const cur = need(req.params.id);
+  const v = store.getVersion(req.params.id, req.params.vid);
+  if (!v) throw fail(404, 'Versión no encontrada', 'VERSION_NOT_FOUND');
+  if (engine.isRunning(cur.id)) throw fail(409, 'Hay una ejecución en curso: deténla antes de restaurar una versión', 'RUN_IN_PROGRESS');
+  const when = new Date(v.at).toLocaleString('es');
+  store.saveVersion(cur, { label: `Antes de restaurar ${v.label || when}` });
+  const prev = new Map(cur.steps.map((s) => [s.id, s]));
+  const d = v.flow;
+  const steps = (d.steps || []).map((s) => { const p = prev.get(s.id); return p ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId, chatContextHash: p.chatContextHash } : { ...s, memory: [], lastRun: null }; });
+  for (const s of cur.steps) if (!steps.some((x) => x.id === s.id)) store.clearChat(cur.id, s.id);
+  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
+  engine.topoLevels(next);
+  const saved = store.saveFlow(next);
+  engine.syncSchedule(saved);
+  engine.flowChanged(saved, String(req.get('x-afs-tab') || '').slice(0, 40) || null);
+  if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
+  return saved;
+}));
+
 // ----- flows -----
 // Arrows keep only known fields (spec 18): sides on the boxes, label, condition and the JSON field they carry.
 const EDGE_WHEN = ['always', 'route', 'contains', 'notContains', 'regex', 'json'];
@@ -277,7 +316,9 @@ app.put('/api/flows/:id', wrap((req, res) => {
   engine.topoLevels(next); // throws on cycles
   next.rev = (cur.rev || 0) + 1;
   delete next.baseRev;
+  if (body.versionEveryMin !== undefined) next.versionEveryMin = Math.min(1440, Math.max(0, Number(body.versionEveryMin) || 0));
   const saved = store.saveFlow(next);
+  autoVersion(cur, saved);
   engine.syncSchedule(saved);
   engine.flowChanged(saved, String(req.get('x-afs-tab') || '').slice(0, 40) || null);
   if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });

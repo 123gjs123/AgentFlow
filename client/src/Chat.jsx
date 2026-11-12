@@ -77,8 +77,24 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
       </div>
       {err && <div className="error-bar">{err}</div>}
       <div className="chat-input">
-        <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Escribe… (Ctrl+Enter para enviar)" rows={3}
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }} />
+        <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Escribe… (Enter envía · Alt+Enter nueva línea)" rows={3}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+            // Alt+Enter (or Shift+Enter) = new line; Enter alone = send.
+            if (e.altKey) {
+              e.preventDefault();
+              // Native insertion: keeps the caret where it is (even while typing fast) and the browser's own undo.
+              if (!document.execCommand?.('insertText', false, '\n')) {
+                const t = e.target; const a = t.selectionStart; const b = t.selectionEnd;
+                t.setRangeText('\n', a, b, 'end');
+                setText(t.value);
+              }
+              return;
+            }
+            if (e.shiftKey) return;
+            e.preventDefault();
+            if (!busy && text.trim()) send();
+          }} />
         <div className="chat-actions">
           {allowImprove && (
             <label className="toggle" title="Permite que el agente edite los archivos de la skill/agente de este step (Edit/Write, acceptEdits)">

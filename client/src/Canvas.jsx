@@ -143,6 +143,7 @@ export default function Canvas({ flow, live, selectedId, onSelect, onConnect, on
       nodes={nodes} edges={edges} nodeTypes={nodeTypes}
       onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
       connectionMode={ConnectionMode.Strict}
+      reconnectRadius={18}
       onConnect={(c) => onConnect(c.source, c.target, c.sourceHandle, c.targetHandle)}
       onReconnect={(old, c) => onReconnect?.(old.id, c)}
       onEdgeClick={(_, e) => { setEdgeSel(e.id); onSelect(null); }}

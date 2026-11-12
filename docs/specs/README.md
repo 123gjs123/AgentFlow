@@ -27,6 +27,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 17 | [Step context box and integration helper](17-step-context-and-integration-helper.md) | Implemented with exceptions (2026-11-11; round-3 fixes applied, see the spec) |
 | 18 | [Arrows on any side, routing, reusable boxes and breaks](18-routing-and-breaks.md) | Implemented (2026-11-12; e2e: `test/e2e/10-*`, `11-*`) |
 | 19 | [Several browser tabs (different flows, or the same flow)](19-multi-tab.md) | Implemented (2026-11-12; e2e: `test/e2e/12-*`) |
+| 20 | [Undo/redo, versions, moving arrow ends, chat keys](20-history-versions-chat-keys.md) | Implemented (2026-11-12; e2e: `test/e2e/13-*`) |
 
 **Status meanings**
 - **Implemented:** in `main` and verified end to end.

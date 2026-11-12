@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api } from './api.js';
+import { api, pendingSave } from './api.js';
 import Chat from './Chat.jsx';
 import Events from './Events.jsx';
 import { ACCESS, accessOf } from './presets.js';
@@ -271,7 +271,7 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
     <div className="panel">
       <div className="panel-head"><b>{flow.name}</b><span className="muted small">{flow.steps.length} steps</span></div>
       <div className="tabs">
-        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones'], ['external', 'Invocar']].map(([k, l]) => (
+        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones'], ['versions', 'Versiones'], ['external', 'Invocar']].map(([k, l]) => (
           <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
@@ -315,6 +315,7 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
         </div>
       )}
       {tab === 'external' && <div className="panel-body pad"><ExternalInvoke flow={flow} /></div>}
+      {tab === 'versions' && <div className="panel-body pad"><Versions flow={flow} onChange={onChange} /></div>}
       {tab === 'memory' && <Memory flowId={flow.id} scope="_flow" items={flow.memory} />}
       {tab === 'runs' && (
         <div className="panel-body pad">
@@ -402,6 +403,47 @@ export function EdgePanel({ flow, edge, onChange, onDelete, onClose }) {
         </Field>
         <div className="row"><button className="ghost danger small" onClick={onDelete}>Eliminar flecha</button></div>
       </div>
+    </div>
+  );
+}
+
+// ---------------- versions (spec 20) ----------------
+function Versions({ flow, onChange }) {
+  const [list, setList] = useState(null);
+  const [label, setLabel] = useState('');
+  const [msg, setMsg] = useState('');
+  const load = () => api.get(`/api/flows/${flow.id}/versions`).then(setList).catch((e) => setMsg(e.message));
+  useEffect(() => { load(); }, [flow.id, flow.rev]);
+  const every = flow.versionEveryMin ?? 5;
+  async function saveNow() {
+    try { await pendingSave.flush(); await api.post(`/api/flows/${flow.id}/versions`, { label: label.trim() || 'Versión guardada' }); setLabel(''); setMsg('Versión guardada'); load(); } catch (e) { setMsg(e.message); }
+  }
+  async function restore(v) {
+    if (!confirm(`¿Restaurar la versión del ${new Date(v.at).toLocaleString()}${v.label ? ` (“${v.label}”)` : ''}?\n\nEl estado actual se guarda antes como versión, así que puedes volver.`)) return;
+    try { await pendingSave.flush(); await api.post(`/api/flows/${flow.id}/versions/${v.id}/restore`, {}); setMsg('Versión restaurada'); load(); } catch (e) { setMsg(e.message); }
+  }
+  async function remove(v) { try { await api.del(`/api/flows/${flow.id}/versions/${v.id}`); load(); } catch (e) { setMsg(e.message); } }
+  return (
+    <div className="versions">
+      <p className="muted small">Mientras editas, se guarda una versión automática como máximo cada {every || '—'} minutos (y el estado inicial antes del primer cambio). Las versiones con nombre no se borran; de las automáticas se guardan las últimas 30. Ctrl+Z / Ctrl+Y deshacen y rehacen cambios recientes.</p>
+      <Field label="Versión automática cada (minutos)" hint="0 = desactivada">
+        <input type="number" min={0} max={1440} value={every} onChange={(e) => onChange({ versionEveryMin: Math.max(0, Number(e.target.value) || 0) })} style={{ width: 90 }} />
+      </Field>
+      <div className="row">
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Nombre de la versión (opcional)" onKeyDown={(e) => e.key === 'Enter' && saveNow()} />
+        <button className="primary" onClick={saveNow}>Guardar versión</button>
+      </div>
+      {msg && <div className="muted small">{msg}</div>}
+      {!list ? <div className="muted small">Cargando…</div> : !list.length ? <div className="muted small">Todavía no hay versiones.</div> : (
+        <ul className="version-list">
+          {list.map((v) => (
+            <li key={v.id}>
+              <div><b>{new Date(v.at).toLocaleString()}</b> {v.label ? <span>· {v.label}</span> : null} <span className="muted small">· {v.auto ? 'automática' : 'guardada'} · {v.steps} steps, {v.edges} flechas</span></div>
+              <div className="row"><button className="small" onClick={() => restore(v)}>Restaurar</button><button className="ghost small danger" onClick={() => remove(v)} title="Borrar esta versión">✕</button></div>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
