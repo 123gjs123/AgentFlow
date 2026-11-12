@@ -242,7 +242,9 @@ app.post('/api/flows', wrap((req) => {
     f.steps.push(a, b, c);
     f.edges.push({ id: store.uid('e_'), source: a.id, target: b.id }, { id: store.uid('e_'), source: b.id, target: c.id });
   }
-  return store.saveFlow(f);
+  const saved = store.saveFlow(f);
+  engine.bus.emit('msg', { type: 'flows.changed' });
+  return saved;
 }));
 app.post('/api/flows/generate', wrap(async (req) => {
   const description = String(req.body?.description || '').trim();
@@ -250,9 +252,14 @@ app.post('/api/flows/generate', wrap(async (req) => {
   return engine.generateFlow(description, { skills: listSkills(req.body?.cwd), agents: listAgents(req.body?.cwd) });
 }));
 app.get('/api/flows/:id', wrap((req) => need(req.params.id)));
-app.put('/api/flows/:id', wrap((req) => {
+app.put('/api/flows/:id', wrap((req, res) => {
   const cur = need(req.params.id);
   const body = req.body || {};
+  // Optimistic concurrency (tabs): a save based on an older revision gets 409 + the current flow, and the tab merges.
+  if (body.baseRev !== undefined && Number(body.baseRev) !== (cur.rev || 0)) {
+    res.status(409);
+    return { error: 'El flujo cambió en otra pestaña o por otra acción: se combinan los cambios', code: 'FLOW_CONFLICT', flow: cur };
+  }
   // Server-managed fields are never overwritten by the UI.
   const byId = new Map(cur.steps.map((s) => [s.id, s]));
   if (body.steps !== undefined && !Array.isArray(body.steps)) throw fail(400, '"steps" debe ser una lista', 'BAD_REQUEST');
@@ -268,8 +275,12 @@ app.put('/api/flows/:id', wrap((req) => {
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
   const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, steps, edges };
   engine.topoLevels(next); // throws on cycles
+  next.rev = (cur.rev || 0) + 1;
+  delete next.baseRev;
   const saved = store.saveFlow(next);
   engine.syncSchedule(saved);
+  engine.flowChanged(saved, String(req.get('x-afs-tab') || '').slice(0, 40) || null);
+  if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
   return saved;
 }));
 // What is left in a flow besides its steps (shown when the canvas is empty, cleared by /reset).
@@ -291,11 +302,13 @@ app.post('/api/flows/:id/reset', wrap((req) => {
     if (parts.includes('memory')) fl.memory = [];
     if (parts.includes('schedule')) fl.schedule = { ...(fl.schedule || {}), enabled: false, input: '' };
     if (parts.includes('chats')) { fl.globalSessionId = null; fl.globalContextHash = null; for (const s of fl.steps) { s.chatSessionId = null; s.chatContextHash = null; } }
+    engine.bumpRev(fl);
   });
+  engine.flowChanged(f);
   engine.syncSchedule(f);
   return f;
 }));
-app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); store.deleteFlow(req.params.id); }));
+app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); store.deleteFlow(req.params.id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: req.params.id }); engine.bus.emit('msg', { type: 'flows.changed' }); }));
 
 // ----- runs -----
 // UI runs honour breaks unless {breakpoints:false}.

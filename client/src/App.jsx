@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
-import { api, onWs, onConn, pendingSave } from './api.js';
+import { api, onWs, onConn, pendingSave, TAB_ID } from './api.js';
+import { mergeFlows } from './merge.js';
 import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+// Per-tab memory: each browser tab keeps its own open flow (also in the URL, so reload and links work).
+const ss = { get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} } };
+const urlFlow = () => { try { return new URLSearchParams(location.search).get('flow'); } catch { return null; } };
 const rid = (p) => p + Math.random().toString(36).slice(2, 10);
 
 function newStep(kind, name) {
@@ -51,7 +55,7 @@ export default function App() {
   const [autoOrder, setAutoOrder] = useState(ls.get('afs.autoOrder') !== '0');
   const dirty = useRef(false);
   const version = useRef(0); // bumped on every local edit: a save only clears `dirty` if nothing changed meanwhile
-  const varsDirty = useRef(false); // vars edited locally (else server-side changes such as ctx.setVar win)
+  const baseRef = useRef(null); // last version of the open flow this tab got from the server (base of the 3-way merge)
   const saveTimer = useRef(null);
   const flowRef = useRef(null);
   flowRef.current = flow;
@@ -61,14 +65,17 @@ export default function App() {
   const loadCatalog = (cwd) => api.get(`/api/catalog${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`).then((c) => { setCatalog(c); if (c.rateLimit) setRate(c.rateLimit); });
 
   useEffect(() => {
-    const last = ls.get('afs.flow');
+    // This tab's flow: URL (?flow=) → this tab's session → the last one used in any tab → the first.
+    const wanted = [urlFlow(), ss.get('afs.flow'), ls.get('afs.flow')];
     api.get('/api/flows').then((list) => {
       setFlows(list);
-      const id = list.find((f) => f.id === last)?.id || list[0]?.id;
+      const id = wanted.map((w) => list.find((f) => f.id === w)?.id).find(Boolean) || list[0]?.id;
       if (id) openFlow(id);
     }).catch(() => {});
   }, []);
   useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
+  // Tab title = flow name, to tell tabs apart.
+  useEffect(() => { document.title = flow ? `${flow.name} · Agent Flow Studio` : 'Agent Flow Studio'; }, [flow?.name]);
   // When the canvas is empty, show what is still attached to the flow (description, vars, chats, runs…).
   const noSteps = flow && flow.steps.length === 0;
   useEffect(() => {
@@ -88,33 +95,61 @@ export default function App() {
     loadFlows().catch(() => {});
     // Unsaved local edits win: save them instead of reloading the flow from the server.
     if (dirty.current) { flushSave().catch(() => {}); return; }
-    const id = flowRef.current?.id || ls.get('afs.flow');
+    const id = flowRef.current?.id || ss.get('afs.flow') || ls.get('afs.flow');
     if (id) openFlow(id);
   }), []);
 
   async function openFlow(id) {
     if (!id) return;
     // Save pending edits of the current flow first (the debounced save would otherwise write the NEW flow).
-    try { await flushSave(); } catch (e) { if (!confirm(`No se pudieron guardar los últimos cambios (${e.message}). ¿Abrir el otro flujo igual? Se perderán.`)) return; clearTimeout(saveTimer.current); dirty.current = false; varsDirty.current = false; }
+    try { await flushSave(); } catch (e) { if (!confirm(`No se pudieron guardar los últimos cambios (${e.message}). ¿Abrir el otro flujo igual? Se perderán.`)) return; clearTimeout(saveTimer.current); dirty.current = false; }
     let f;
     try { f = await api.get(`/api/flows/${id}`); } catch (e) { notify(`No se pudo abrir el flujo: ${e.message}`); return; }
-    if (f.steps.length && f.steps.every((s) => !s.position?.x && !s.position?.y)) { f = { ...f, steps: autoLayout(f.steps, f.edges) }; api.put(`/api/flows/${f.id}`, f).catch(() => {}); }
-    setFlow(f); setSelectedId(null); setSelectedEdge(null); setLive({}); setPaused(null); setReviewOpen(false); ls.set('afs.flow', id);
+    if (f.steps.length && f.steps.every((s) => !s.position?.x && !s.position?.y)) {
+      const laid = { ...f, steps: autoLayout(f.steps, f.edges) };
+      f = await api.put(`/api/flows/${f.id}`, { ...laid, baseRev: f.rev || 0 }).catch(() => laid);
+    }
+    baseRef.current = f;
+    setFlow(f); setSelectedId(null); setSelectedEdge(null); setLive({}); setPaused(null); setReviewOpen(false);
+    ls.set('afs.flow', id); ss.set('afs.flow', id);
+    try { history.replaceState(null, '', `?flow=${encodeURIComponent(id)}`); } catch {}
     // A run of this flow may be waiting at a break (e.g. after reloading the page).
     api.get(`/api/flows/${id}/runs`).then((runs) => { const p = (runs || []).find((r) => r.status === 'paused'); if (p) setPaused({ runId: p.id }); }).catch(() => {});
   }
 
   // ---- persistence (debounced) ----
   /** Saves the open flow now. `dirty` is cleared only if no edit happened while the PUT was in flight; on error it stays dirty. */
+  /** Another version of the open flow exists on the server (other tab, chat proposal, hook): merge it into this tab. */
+  function adoptRemote(remote) {
+    const local = flowRef.current;
+    if (!local || local.id !== remote.id) return;
+    const { merged, conflicts } = dirty.current ? mergeFlows(baseRef.current, local, remote) : { merged: { ...remote, steps: remote.steps.map((s) => ({ ...s, position: s.position })) }, conflicts: [] };
+    baseRef.current = remote;
+    flowRef.current = merged;
+    setFlow(merged);
+    if (conflicts.length) notify(`También se cambió en otra pestaña: ${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? '…' : ''}. Se mantuvo lo tuyo.`);
+  }
+  /**
+   * Saves the open flow with the revision it is based on. If the server has a newer one (409), merge and retry.
+   * `dirty` is cleared only if no edit happened while the PUT was in flight; on error it stays dirty.
+   */
   async function saveNow() {
-    const f = flowRef.current;
-    if (!f) return;
-    const v = version.current;
-    try {
-      await api.put(`/api/flows/${f.id}`, f);
-      if (version.current === v) { dirty.current = false; varsDirty.current = false; setSaveState('guardado'); }
-      loadFlows().catch(() => {});
-    } catch (e) { setSaveState('error'); notify(`No se guardó: ${e.message}`); throw e; }
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const f = flowRef.current;
+      if (!f) return;
+      const v = version.current;
+      try {
+        const saved = await api.put(`/api/flows/${f.id}`, { ...f, baseRev: baseRef.current?.id === f.id ? baseRef.current.rev || 0 : f.rev || 0 });
+        baseRef.current = saved;
+        if (version.current === v) { dirty.current = false; setSaveState('guardado'); }
+        loadFlows().catch(() => {});
+        return;
+      } catch (e) {
+        if (e.status === 409 && e.body?.flow) { adoptRemote(e.body.flow); continue; }
+        setSaveState('error'); notify(`No se guardó: ${e.message}`); throw e;
+      }
+    }
+    setSaveState('error'); notify('No se pudo guardar: el flujo cambia sin parar en otra pestaña. Reintenta.');
   }
   const scheduleSave = useCallback(() => {
     dirty.current = true; version.current++; setSaveState('…');
@@ -126,7 +161,6 @@ export default function App() {
     setFlow((cur) => {
       let next = fn(structuredClone(cur));
       if (layout && autoOrder) next = { ...next, steps: autoLayout(next.steps, next.edges) };
-      if (JSON.stringify(next.vars || {}) !== JSON.stringify(cur.vars || {})) varsDirty.current = true;
       flowRef.current = next; // a flush right after an edit must send this version
       return next;
     });
@@ -138,21 +172,32 @@ export default function App() {
     const cur = flowRef.current;
     if (m.type === 'run.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
     if (m.type === 'chat.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
+    if (m.type === 'flows.changed') { loadFlows().catch(() => {}); return; } // created / renamed / deleted in another tab
     if (!cur || m.flowId !== cur.id) return;
     switch (m.type) {
-      case 'flow.updated':
+      case 'flow.updated': {
+        const base = baseRef.current;
+        // A new revision = the definition changed elsewhere (other tab, chat proposal, ctx.setVar, reset): merge it.
+        if (base && base.id === m.flow.id && (m.flow.rev || 0) !== (base.rev || 0)) {
+          if (m.by !== TAB_ID || dirty.current) adoptRemote(m.flow); else baseRef.current = m.flow;
+          break;
+        }
+        // Same revision: only run state changed (lastRun, memory, pins, chat sessions).
+        baseRef.current = m.flow;
         setFlow((c) => {
           if (!c || c.id !== m.flow.id) return c;
           const srv = new Map(m.flow.steps.map((s) => [s.id, s]));
           return {
-            ...c, memory: m.flow.memory, globalSessionId: m.flow.globalSessionId, vars: varsDirty.current ? c.vars : m.flow.vars,
-            steps: c.steps.map((s) => {
-              const p = srv.get(s.id);
-              if (!p) return s;
-              return dirty.current ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId } : { ...p, position: s.position };
-            }),
+            ...c, memory: m.flow.memory, globalSessionId: m.flow.globalSessionId,
+            steps: c.steps.map((s) => { const p = srv.get(s.id); return p ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId, chatContextHash: p.chatContextHash } : s; }),
           };
         });
+        break;
+      }
+      case 'flow.deleted':
+        notify('Este flujo se eliminó en otra pestaña.');
+        clearTimeout(saveTimer.current); dirty.current = false;
+        api.get('/api/flows').then((list) => { setFlows(list); if (list[0]) openFlow(list[0].id); else setFlow(null); }).catch(() => {});
         break;
       case 'step.status':
         setLive((l) => ({ ...l, [m.stepId]: { ...(m.status === 'running' ? { events: [] } : l[m.stepId]), status: m.status, runId: m.runId } }));
@@ -197,14 +242,14 @@ export default function App() {
       const f = await api.post('/api/flows', { name, template });
       await loadFlows();
       const laid = { ...f, steps: autoLayout(f.steps, f.edges) };
-      await api.put(`/api/flows/${f.id}`, laid);
+      await api.put(`/api/flows/${f.id}`, { ...laid, baseRev: f.rev || 0 });
       openFlow(f.id);
     } catch (e) { notify(e.message); }
   }
   async function deleteFlow() {
     if (!confirm(`¿Eliminar el flujo "${flow.name}" con sus chats y ejecuciones?`)) return;
     try {
-      clearTimeout(saveTimer.current); dirty.current = false; varsDirty.current = false;
+      clearTimeout(saveTimer.current); dirty.current = false;
       await api.del(`/api/flows/${flow.id}`);
       const list = await api.get('/api/flows'); setFlows(list);
       if (list[0]) openFlow(list[0].id); else setFlow(null);
@@ -298,7 +343,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
     try {
       clearTimeout(saveTimer.current); dirty.current = false;
       const f = await api.post(`/api/flows/${flow.id}/reset`, { parts });
-      setFlow(f); setSelectedId(null); setLive({}); setResetNonce((n) => n + 1); loadFlows();
+      baseRef.current = f; setFlow(f); setSelectedId(null); setLive({}); setResetNonce((n) => n + 1); loadFlows();
       notify('Flujo limpio');
     } catch (e) { notify(e.message); }
   }
@@ -325,6 +370,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           <button className="ghost" onClick={() => setModal('ai')} title="Describe el flujo y la IA lo arma con tus skills">✨ Con IA</button>
           <button className="ghost" onClick={() => createFlow('demo')} title="Crea un flujo de ejemplo con tus skills de QA">Demo</button>
         </span>
+        {flow && <button className="ghost" onClick={() => window.open(`?flow=${encodeURIComponent(flow.id)}`, '_blank')} title="Abrir este flujo en otra pestaña (cada pestaña puede tener su flujo; si dos editan el mismo, los cambios se combinan)">⧉</button>}
         {flow && <button className="ghost danger" onClick={deleteFlow} title="Eliminar flujo">🗑</button>}
         <div className="sep" />
         {flow && (

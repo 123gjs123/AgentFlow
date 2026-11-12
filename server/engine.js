@@ -14,7 +14,10 @@ import { validate, parseSchema } from './schema.js';
 export const bus = new EventEmitter();
 bus.setMaxListeners(100);
 const emit = (msg) => bus.emit('msg', msg);
-const flowChanged = (flow) => emit({ type: 'flow.updated', flowId: flow.id, flow });
+/** Every change of a flow reaches all tabs. `rev` changes only for edits of its definition (see bumpRev); `by` = tab that saved. */
+export const flowChanged = (flow, by = null) => emit({ type: 'flow.updated', flowId: flow.id, flow, by });
+/** Definition edits (not run state) bump the revision, so an open tab with older data merges instead of overwriting. */
+export const bumpRev = (f) => { f.rev = (f.rev || 0) + 1; };
 
 // Test seam: scales the waits of transient retries and schedules (AFS_TIME_SCALE=0.01 in the e2e suite).
 const TIME_SCALE = Number(process.env.AFS_TIME_SCALE) > 0 ? Number(process.env.AFS_TIME_SCALE) : 1;
@@ -122,7 +125,7 @@ function hookCtx({ flow, step, run, input, signal, log, upstream = [], data }) {
       return r.output;
     },
     remember: (text) => addMemory(flow.id, step.id, text, 'hook'),
-    setVar: (k, v) => { ctx.vars[k] = v; store.updateFlow(flow.id, (f) => { f.vars = { ...(f.vars || {}), [k]: v }; }); },
+    setVar: (k, v) => { ctx.vars[k] = v; const fl = store.updateFlow(flow.id, (f) => { f.vars = { ...(f.vars || {}), [k]: v }; bumpRev(f); }); if (fl) flowChanged(fl); },
   };
   return ctx;
 }
@@ -1015,6 +1018,7 @@ export async function applyProposal(flowId, key, messageId, proposalId) {
   const flow = store.updateFlow(flowId, (f) => {
     const s = f.steps.find((x) => x.id === key);
     if (s) for (const k of allowed) if (k in p.patch) s[k] = p.patch[k];
+    bumpRev(f);
   });
   store.updateChatMsg(flowId, key, messageId, (m) => { const q = m.proposals.find((x) => x.id === proposalId); if (q) q.applied = true; });
   flowChanged(flow);

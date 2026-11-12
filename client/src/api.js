@@ -4,13 +4,15 @@ const connSubs = new Set();
 const setOnline = (v) => { if (v !== online) { online = v; connSubs.forEach((f) => f(v)); } };
 export function onConn(fn) { connSubs.add(fn); fn(online); return () => connSubs.delete(fn); }
 
+/** Identifies this browser tab in its saves (other tabs see who changed the flow). */
+export const TAB_ID = Math.random().toString(36).slice(2, 10);
 async function req(method, url, body) {
   let r;
-  try { r = await fetch(url, { method, headers: body !== undefined ? { 'Content-Type': 'application/json' } : {}, body: body !== undefined ? JSON.stringify(body) : undefined }); }
+  try { r = await fetch(url, { method, headers: { 'X-AFS-Tab': TAB_ID, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined }); }
   catch (e) { setOnline(false); throw new Error('El servidor de Agent Flow Studio no responde'); }
   setOnline(true);
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  if (!r.ok) throw Object.assign(new Error(j.error || r.statusText), { status: r.status, code: j.code, body: j });
   return j;
 }
 /** Pending-edit flush registered by App (debounced save). Await before any call that reads the flow on the server. */

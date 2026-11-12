@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (138 tests)
+## Qué cubre (146 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -53,6 +53,7 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `09-ui-browser` | En Chromium real, sobre el código fuente (Vite): bienvenida, crear flujo vacío o demo (con los diálogos), eliminar, crear con IA, abrir desde el selector, ejecutar y ver los steps en verde, pestañas Contexto/Actividad/Datos, chat general, asistente de integración (Generar + Probar + indicador "llamada recibida" con una llamada real de Jira simulada), servidor caído → aviso → reconexión |
 | `10-routing-and-breaks` | Spec 18 en el motor y la API: lados de las flechas, fan-out/fan-in con el mismo output repartido por campo, condiciones en flechas (json, regex) con ramas "no enrutadas" en cascada, el step decide destinos y contenido por destino (`<route to>`) — también un comando —, caja de contexto con flechas, breaks antes/después (continuar, editar, re-ejecutar con corrección, omitir, detener), deadline en pausa, ramas paralelas en pausa, API externa con `breakpoints:true`, caída en pausa → interrupted, biblioteca de steps |
 | `11-ui-routing-breaks` | Lo mismo en el navegador: dibujar una flecha de abajo hacia arriba y una segunda salida, configurar la flecha (campo, condición), ver "no enrutado", poner un break, editar la salida en la ventana de revisión, re-ejecutar con corrección, duplicar y reutilizar desde "Mis steps" |
+| `12-multi-tab` | Spec 19: revisiones y 409 al guardar sobre una versión vieja, propuestas del chat / ctx.setVar / reset suben la revisión, difusión entre pestañas (guardar, crear, renombrar, borrar), merge de 3 vías (unidad), y en el navegador: dos pestañas con flujos distintos (URL, título, recarga) y el mismo flujo editado a la vez en dos pestañas sin pisarse |
 
 Cómo se simula cada origen en `07-integrations`:
 

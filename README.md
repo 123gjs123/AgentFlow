@@ -31,6 +31,7 @@ Runs use your Claude Code login: your subscription, skills, agents and MCP conne
    - [Context box](#context-box)
    - [Reusable boxes](#reusable-boxes)
    - [Pinned outputs](#pinned-outputs)
+   - [Several tabs](#several-tabs)
    - [Schedules](#schedules)
 6. [Running flows from outside](#running-flows-from-outside)
    - [External HTTP API](#external-http-api)
@@ -311,6 +312,14 @@ Freeze a step's output (from its last run, or typed by hand) to test the steps a
 - UI runs use pins.
 - External runs **ignore** them unless they pass `usePins: true`.
 
+### Several tabs
+
+Each browser tab keeps its own flow: it is in the URL (`?flow=<id>`), the tab title shows its name, and **⧉** opens the current flow in a new tab. The same flow can be open in several tabs:
+
+- Every save carries the revision it was based on. If another tab, an applied chat proposal or a hook (`ctx.setVar`) changed the flow meanwhile, the server answers 409 and the tab **merges field by field**: changes to different steps, fields or arrows are combined.
+- If both changed the same field, your version wins and a notice says so.
+- Other tabs see each save live. Creating, renaming or deleting a flow updates every tab's list.
+
 ### Schedules
 
 **Flujo → Programación**: run the flow every N minutes with a fixed input. A scheduled run does not start while the previous one is still running.
@@ -527,7 +536,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **138 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **146 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.
