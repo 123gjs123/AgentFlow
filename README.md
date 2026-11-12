@@ -109,7 +109,7 @@ Runs use your Claude Code login: your subscription, skills, agents and MCP conne
 
 | | |
 |---|---|
-| Node.js | 20 or newer (tested with 24) |
+| Node.js | 20 or newer; **22.15 or newer** behind a corporate TLS-intercepting proxy, so the server can trust the Windows/macOS certificate store (tested with 24) |
 | Claude Code CLI | installed and logged in (`claude` on `PATH`, or set `CLAUDE_BIN`) |
 | OS | Windows 10/11 (primary target), Linux, macOS |
 | Optional | Git Bash (bash steps on Windows), Python 3 (generated CI clients), Chromium via `playwright-core` (browser tests) |

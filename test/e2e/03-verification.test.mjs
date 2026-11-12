@@ -2,6 +2,7 @@
 // command, AI judge with nonce), severities, strict success (PERMISSION_DENIED / EMPTY_OUTPUT + opt-outs) and hooks.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { startServer, role, cmd } from './helpers/harness.mjs';
 
 let s;
@@ -44,11 +45,17 @@ test('corrección que sigue sin cumplir → INVALID_JSON; schema no cumplido →
   assert.match(run.steps[b.id].error, /pattern|minItems|must/);
 });
 
-test('schema inválido: la UI falla el step con INVALID_SCHEMA y la API externa responde 422 antes de empezar', async () => {
+test('schema inválido: la UI, un step suelto y la API externa responden 422 antes de lanzar Claude', async () => {
   const a = role('MalSchema', '[[mock:json {}]]', { output: { format: 'json', schema: '{"type":"objeto"' } });
   const f = await s.flow('SchemaRoto', [a]);
-  const run = await s.runUi(f.id);
-  assert.equal(run.steps[a.id].code, 'INVALID_SCHEMA');
+  const before = fs.existsSync(s.mockLog) ? fs.readFileSync(s.mockLog, 'utf8').length : 0;
+  for (const url of [`/api/flows/${f.id}/run`, `/api/flows/${f.id}/steps/${a.id}/run`]) {
+    const u = await s.ui('POST', url, { input: '' });
+    assert.equal(u.status, 422, url);
+    assert.equal(u.body.code, 'INVALID_SCHEMA');
+    assert.match(u.body.error, /MalSchema/);
+  }
+  assert.equal(fs.existsSync(s.mockLog) ? fs.readFileSync(s.mockLog, 'utf8').length : 0, before, 'no se llamó a Claude');
   const r = await s.runExt(f.id, {});
   assert.equal(r.status, 422);
   assert.equal(r.body.code, 'INVALID_SCHEMA');

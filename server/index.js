@@ -18,6 +18,7 @@ import { previewStep, definitionFile } from './context.js';
 import * as integ from './integrations.js';
 import { SOURCE_TYPES, checkSource } from './sources.js';
 import { exportFlow, importBundle, quarantineProblem, slug } from './bundle.js';
+import { parseSchema } from './schema.js';
 import { REQ_TYPES, preflight, preflightMessage, suggestRequirements, createFromTemplate, clearPreflightCache } from './preflight.js';
 import os from 'node:os';
 
@@ -278,9 +279,15 @@ function cleanRequirements(list) {
   });
 }
 /** Blocks the start of a run when a required requirement is missing: 412 + what is missing and how to fix it. */
-async function gate(flow, res) {
+async function gate(flow, res, only = null) {
   const qp = quarantineProblem(flow);
   if (qp) { res.status(qp.status); return { error: qp.error, code: qp.code, reasons: flow.quarantine.reasons }; }
+  // An invalid JSON schema would only fail after Claude ran (and spent tokens): reject it before starting, like the external API.
+  for (const s of (flow.steps || []).filter((x) => !only || x.id === only)) {
+    if (s.kind === 'command' || s.output?.format !== 'json' || !String(s.output.schema || '').trim()) continue;
+    const { error } = parseSchema(s.output.schema);
+    if (error) { res.status(422); return { error: `Step "${s.name}": el schema JSON de la salida no es válido (${error}). Corrígelo en el step → Salida.`, code: 'INVALID_SCHEMA', step: s.id }; }
+  }
   if (!(flow.requirements || []).length) return null;
   const pf = await preflight(flow);
   if (pf.ok) return null;
@@ -407,7 +414,7 @@ app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); eng
 // UI runs honour breaks unless {breakpoints:false}.
 const uiInput = (v) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v, null, 2));
 app.post('/api/flows/:id/run', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
-app.post('/api/flows/:id/steps/:stepId/run', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+app.post('/api/flows/:id/steps/:stepId/run', wrap(async (req, res) => (await gate(need(req.params.id), res, req.params.stepId)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
 app.post('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.pinStep(req.params.id, req.params.stepId, req.body || {})));
 app.delete('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.unpinStep(req.params.id, req.params.stepId)));
 app.post('/api/flows/:id/stop', wrap((req) => ({ stopped: engine.stopRuns(req.params.id) })));

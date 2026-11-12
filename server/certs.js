@@ -12,4 +12,7 @@ export function trustSystemCertificates() {
     return system.length;
   } catch { return 0; }
 }
-trustSystemCertificates();
+const trusted = trustSystemCertificates();
+if (!trusted && typeof tls.getCACertificates !== 'function') {
+  console.warn(`⚠ Node ${process.versions.node}: no puede usar los certificados del sistema. Detrás de un proxy corporativo las comprobaciones HTTPS (requisitos, páginas de contexto) fallarán con SELF_SIGNED_CERT_IN_CHAIN. Usa Node 22.15 o superior.`);
+}
