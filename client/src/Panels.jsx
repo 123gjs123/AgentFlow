@@ -87,7 +87,7 @@ function Field({ label, hint, children, div }) {
   return <Tag className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</Tag>;
 }
 
-export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep }) {
+export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
   const [runInput, setRunInput] = useState('');
   const [runEvents, setRunEvents] = useState(null);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
@@ -107,6 +107,8 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
     <div className="panel">
       <div className="panel-head">
         <input className="title-input" value={step.name} onChange={set('name')} />
+        <button className="ghost small" onClick={onDuplicate} title="Crea una copia de esta caja con la misma configuración">Duplicar</button>
+        <button className="ghost small" onClick={onSaveLib} title="Guárdala en “Mis steps” para insertarla en cualquier flujo">📚 Guardar</button>
         <button className="ghost danger small" onClick={() => confirm(`¿Eliminar "${step.name}"?`) && onDelete()}>Eliminar</button>
       </div>
       <div className="tabs">
@@ -125,6 +127,14 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
                 <button key={k} className={step.kind === k ? 'active' : ''} onClick={() => onChange({ kind: k })}>{l}</button>
               ))}
             </div>
+          </Field>
+          <Field label="Break" hint="pausa la ejecución aquí para validar (solo ejecuciones desde la app, o externas con breakpoints:true)">
+            <select value={step.breakpoint || ''} onChange={(e) => onChange({ breakpoint: e.target.value })}>
+              <option value="">Sin break</option>
+              <option value="after">⏸ Después: revisar su salida antes de seguir</option>
+              <option value="before">⏸ Antes: revisar lo que va a recibir</option>
+              <option value="both">⏸ Antes y después</option>
+            </select>
           </Field>
           {step.kind === 'agent' && (
             <Field label="Agente" hint="de ~/.claude/agents, plugins o el proyecto">
@@ -345,6 +355,52 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------- arrow (edge) settings: spec 18 ----------------
+const WHEN_OPTS = [['always', 'Siempre'], ['route', '🧭 Lo decide el step de origen'], ['json', 'Si un campo del JSON…'], ['contains', 'Si la salida contiene…'], ['notContains', 'Si la salida NO contiene…'], ['regex', 'Si la salida cumple una regex…']];
+const JSON_OPS = [['equals', '='], ['notEquals', '≠'], ['gte', '≥'], ['lte', '≤'], ['exists', 'existe'], ['matches', 'cumple regex'], ['lengthGte', 'largo ≥'], ['lengthLte', 'largo ≤']];
+export function EdgePanel({ flow, edge, onChange, onDelete, onClose }) {
+  const from = flow.steps.find((s) => s.id === edge.source);
+  const to = flow.steps.find((s) => s.id === edge.target);
+  const w = edge.when || { type: 'always' };
+  // Changing the type starts from that type's defaults (the select shows "=": it must also be what is saved).
+  const setWhen = (p) => {
+    let n = p.type && p.type !== w.type ? { type: p.type, ...(p.type === 'json' ? { op: 'equals' } : {}) } : { ...w, ...p };
+    if (n.type === 'json' && !n.op) n = { ...n, op: 'equals' };
+    if (n.op === 'exists') delete n.value;
+    onChange({ when: n.type === 'always' ? undefined : n });
+  };
+  const siblings = flow.edges.filter((e) => e.source === edge.source && e.id !== edge.id).length;
+  return (
+    <div className="panel edge-panel">
+      <div className="panel-head"><b>Flecha: {from?.name} → {to?.name}</b><button className="ghost small" onClick={onClose}>Cerrar</button></div>
+      <div className="panel-body pad">
+        <p className="muted small">Cada flecha decide <b>qué</b> pasa y <b>cuándo</b>. Así una misma caja reparte su salida entre varios destinos{siblings ? ` (esta caja tiene ${siblings + 1} salidas)` : ''}. Arrastra el extremo de la flecha a otro punto de la caja para cambiar el lado.</p>
+        <Field label="Etiqueta" hint="se ve sobre la flecha y el destino la recibe como título">
+          <input value={edge.label || ''} onChange={(e) => onChange({ label: e.target.value || undefined })} placeholder="Ej: casos de riesgo alto" />
+        </Field>
+        <Field label="Qué pasa" hint="vacío = toda la salida (texto + JSON). Con un campo, pasa solo esa parte del JSON">
+          <input className="mono" value={edge.pick || ''} onChange={(e) => onChange({ pick: e.target.value || undefined })} placeholder="Ej: casos  ·  riesgos.alto  ·  items.0" />
+        </Field>
+        <Field label="Cuándo pasa">
+          <select value={w.type} onChange={(e) => setWhen({ type: e.target.value })}>{WHEN_OPTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+          {w.type === 'route' && <div className="muted small">El step “{from?.name}” verá en sus instrucciones la lista de destinos y elegirá con &lt;route to="{to?.name}"/&gt; (toda su salida) o &lt;route to="{to?.name}"&gt;contenido&lt;/route&gt; (solo ese contenido para este destino).</div>}
+          {w.type === 'json' && (
+            <div className="row wrap">
+              <input className="mono" value={w.path || ''} onChange={(e) => setWhen({ path: e.target.value })} placeholder="campo (riesgo)" />
+              <select value={w.op || 'equals'} onChange={(e) => setWhen({ op: e.target.value })}>{JSON_OPS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+              {w.op !== 'exists' && <input className="mono" value={w.value ?? ''} onChange={(e) => setWhen({ value: e.target.value })} placeholder="valor (alto)" />}
+            </div>
+          )}
+          {(w.type === 'contains' || w.type === 'notContains') && <input value={w.value || ''} onChange={(e) => setWhen({ value: e.target.value })} placeholder="texto" />}
+          {w.type === 'regex' && <input className="mono" value={w.pattern || ''} onChange={(e) => setWhen({ pattern: e.target.value })} placeholder="^APROBADO" />}
+          {w.type !== 'always' && <div className="muted small">Si no se cumple, “{to?.name}” no recibe nada por esta flecha; si ninguna de sus flechas pasa, queda “no enrutado” (no es un error) y tampoco corre lo que depende de él.</div>}
+        </Field>
+        <div className="row"><button className="ghost danger small" onClick={onDelete}>Eliminar flecha</button></div>
+      </div>
     </div>
   );
 }

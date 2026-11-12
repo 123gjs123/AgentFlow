@@ -161,7 +161,9 @@ test('registro de llamadas recibidas: método, ruta, origen, estado, runId, dryR
   const since = Date.now() - 1;
   await s.ext('POST', `/flows/${flow.id}/run`, { input: 'log', source: 'github', dryRun: true });
   await s.ext('GET', '/ping', undefined, { Authorization: 'Bearer malo' }, { auth: false });
-  const log = await s.uiOk('GET', `/api/integrations/inbound?since=${since}`);
+  // The entry is written when the response finishes (res 'finish'), which can land just after the client has it.
+  let log = [];
+  for (let i = 0; i < 40; i++) { log = await s.uiOk('GET', `/api/integrations/inbound?since=${since}`); if (log.some((e) => e.source === 'github') && log.some((e) => e.status === 401)) break; await sleep(100); }
   const run = log.find((e) => e.source === 'github');
   assert.equal(run.dryRun, true);
   assert.equal(run.status, 200);

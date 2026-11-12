@@ -20,9 +20,29 @@ export function Modal({ title, onClose, children, wide }) {
 export function StepPicker({ catalog, onPick, onClose }) {
   const groups = [...new Set(PRESETS.map((p) => p.group))];
   const hasSkill = (n) => catalog.skills.some((s) => s.name === n);
+  // Reusable boxes saved with “📚 Guardar” (spec 18)
+  const [lib, setLib] = useState([]);
+  useEffect(() => { api.get('/api/library').then(setLib).catch(() => {}); }, []);
+  const KIND_ICON = { role: '🎭', agent: '🤖', skill: '🧩', command: '⌨️' };
   return (
     <Modal title="Agregar step" onClose={onClose} wide>
       <p className="muted small">Elige una plantilla: queda configurada (tipo, tarea, accesos) y luego ajustas lo que quieras. Si tienes un step seleccionado, el nuevo se conecta después de él.</p>
+      {lib.length > 0 && (
+        <div className="preset-group">
+          <div className="preset-title">📚 Mis steps</div>
+          <div className="preset-grid">
+            {lib.map((it) => (
+              <div key={it.id} className="lib-item">
+                <button className="preset" onClick={() => onPick({ group: 'Mis steps', name: it.name, step: { ...it.step, name: it.name } })}>
+                  <span className="preset-icon">{KIND_ICON[it.kind] || '•'}</span>
+                  <span><b>{it.name}</b><span className="muted small">{it.step.skillRef || it.step.agentRef || (it.step.task || it.step.command || '').slice(0, 80)}</span></span>
+                </button>
+                <button className="ghost small danger" title="Quitar de Mis steps" onClick={async () => { await api.del(`/api/library/${it.id}`); setLib((l) => l.filter((x) => x.id !== it.id)); }}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {groups.map((g) => (
         <div key={g} className="preset-group">
           <div className="preset-title">{g}</div>
@@ -154,7 +174,7 @@ export function ExternalInvoke({ flow }) {
 
 // ---------------- help menu + guide ----------------
 const SECTIONS = [
-  ['start', 'Primeros pasos'], ['concepts', 'Conceptos'], ['config', 'Configurar un step'], ['vars', 'Variables y plantillas'],
+  ['start', 'Primeros pasos'], ['concepts', 'Conceptos'], ['config', 'Configurar un step'], ['vars', 'Variables y plantillas'], ['arrows', 'Flechas, ramas y breaks'],
   ['access', 'Accesos y permisos'], ['chats', 'Chats y memoria'], ['hooks', 'Hooks (código)'], ['external', 'Invocar desde fuera'], ['faq', 'Problemas comunes'],
 ];
 
@@ -225,6 +245,24 @@ export function HelpModal({ section, setSection, onClose, flow, flows, onTour })
               <li><b>Avanzado</b> (opcional): contexto fijo, modelo (Haiku = rápido/barato, Opus = más capaz), effort y tools exactas.</li>
             </ol>
             <p className="muted">Truco: abre el <b>Chat</b> del step y pídele “mejora tu tarea para que…”. Te propone el cambio y lo aplicas con un botón.</p>
+          </>)}
+          {section === 'arrows' && (<>
+            <h3>Flechas, ramas y breaks</h3>
+            <p><b>Conectar desde cualquier lado.</b> Cada caja tiene puntos en sus 4 lados: los <b>rellenos</b> son salidas y los <b>huecos</b> entradas. Arrastra de una salida a una entrada. Para cambiar el lado de una flecha ya hecha, arrastra su extremo a otro punto.</p>
+            <p><b>Una caja, muchas flechas.</b> Una caja puede recibir de varias y enviar a varias. Haz click en una flecha para decidir:</p>
+            <ul>
+              <li><b>Qué pasa</b>: toda la salida, o solo un campo del JSON (p. ej. <code>casos</code> a una caja y <code>riesgos</code> a otra).</li>
+              <li><b>Cuándo pasa</b>: siempre, si un campo del JSON cumple algo (<code>riesgo = alto</code>), si la salida contiene un texto o cumple una regex, o <b>🧭 lo decide el step de origen</b>: el agente o rol ve la lista de destinos y elige con <code>&lt;route to="Destino"/&gt;</code>, o le manda a cada uno algo distinto con <code>&lt;route to="Destino"&gt;contenido&lt;/route&gt;</code>.</li>
+              <li><b>Etiqueta</b>: se ve sobre la flecha y el destino la recibe como título.</li>
+            </ul>
+            <p>Si ninguna flecha de entrada de una caja pasa, esa caja queda <b>no enrutada</b>: no corre, no es un error, y tampoco corre lo que depende solo de ella. Las flechas con condición se ven punteadas.</p>
+            <p><b>Reutilizar cajas.</b> <i>Duplicar</i> copia la caja en el mismo flujo. <i>📚 Guardar</i> la deja en <b>Mis steps</b>; desde <b>＋ Step</b> la insertas configurada en cualquier flujo. Se copia la configuración, no la memoria ni las ejecuciones.</p>
+            <p><b>Breaks (⏸).</b> En <i>Config → Break</i> eliges pausar <b>antes</b> o <b>después</b> de la caja. Al ejecutar, el flujo se detiene y se abre <b>Revisar</b>:</p>
+            <ul>
+              <li><b>Después</b>: ves la salida (texto y JSON) y eliges entre <i>Aprobar y seguir</i>, <i>Editar salida</i> (los siguientes reciben tu versión), <i>Re-ejecutar con corrección</i> (vuelve a correr con tu indicación y se pausa otra vez) o <i>Detener</i>.</li>
+              <li><b>Antes</b>: ves lo que va a recibir y eliges entre <i>Ejecutar y seguir</i>, <i>Omitir este step</i> o <i>Detener</i>.</li>
+            </ul>
+            <p>Mientras está en pausa no corre el tiempo máximo de la ejecución. Las ejecuciones externas ignoran los breaks salvo que pidan <code>breakpoints: true</code> (API), <code>--breaks</code> (afs) o <code>breakpoints</code> (MCP). Después siguen con <code>/resume</code>, <code>afs resume</code> o <code>resume_run</code>.</p>
           </>)}
           {section === 'vars' && (<>
             <h3>Variables y plantillas</h3>

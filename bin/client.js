@@ -64,7 +64,7 @@ export async function runAndWait(flow, body, { timeoutSec = 900, onStep = () => 
     }
     const s = await call('GET', `${flowPath(flow)}/runs/${runId}`);
     for (const st of s.steps || []) if (seen[st.step] !== st.status) { seen[st.step] = st.status; onStep(st); }
-    if (s.status !== 'running') {
+    if (s.status !== 'running') { // finished, or paused at a break
       if (onEvent) { try { const ev = await call('GET', `${flowPath(flow)}/runs/${runId}/events?after=${after}`); for (const e of ev.events) onEvent(e); } catch {} }
       return { ...s, idempotentReplay: start.idempotentReplay };
     }

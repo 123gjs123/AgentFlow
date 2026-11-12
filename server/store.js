@@ -162,3 +162,15 @@ export function listRuns(flowId) {
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, 50);
 }
+
+// ---------- step library (spec 18: reusable boxes across flows) ----------
+const LIB = () => path.join(dir(), 'library.json');
+/** Run/session state never travels with a saved box. */
+const portable = ({ id, lastRun, memory, pinned, chatSessionId, chatContextHash, position, ...s }) => s;
+export const listLibrary = () => readJson(LIB(), []);
+export function saveToLibrary(step, name) {
+  const item = { id: uid('l_'), name: String(name || step.name || 'Step').slice(0, 120), kind: step.kind, savedAt: Date.now(), step: portable(step) };
+  writeJson(LIB(), [...listLibrary(), item]);
+  return item;
+}
+export function deleteFromLibrary(id) { writeJson(LIB(), listLibrary().filter((x) => x.id !== id)); }

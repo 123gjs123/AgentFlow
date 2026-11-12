@@ -107,7 +107,7 @@ test('MCP: initialize, tools/list, list_flows, run_flow (ok / error / wait:false
     assert.equal(init.result.serverInfo.name, 'agent-flow-studio');
     m.notify('notifications/initialized', {});
     const tools = (await m.request('tools/list', {})).result.tools.map((t) => t.name);
-    assert.deepEqual(tools.sort(), ['ask_flow', 'cancel_run', 'get_run', 'list_flows', 'run_flow']);
+    assert.deepEqual(tools.sort(), ['ask_flow', 'cancel_run', 'get_run', 'list_flows', 'resume_run', 'run_flow']);
     const call = async (name, args) => (await m.request('tools/call', { name, arguments: args })).result;
     const list = await call('list_flows', {});
     assert.match(list.content[0].text, /Flujo OK/);
@@ -135,5 +135,41 @@ test('MCP: initialize, tools/list, list_flows, run_flow (ok / error / wait:false
     assert.equal(nf.isError, true); assert.match(nf.content[0].text, /FLOW_NOT_FOUND/);
     const unknown = await m.request('foo/bar', {});
     assert.equal(unknown.error.code, -32601);
+  } finally { m.close(); }
+});
+
+test('afs --breaks: vuelve en pausa (exit 4) con la salida a validar; afs resume decide (edit) y termina', async () => {
+  const f = await s.flow('Flujo Break CLI', [role('Revisar', '[[mock:say borrador]]', { breakpoint: 'after' }), role('Usar', '[[mock:echo]]')]);
+  const g = await s.uiOk('PUT', `/api/flows/${f.id}`, { ...f, edges: [{ id: 'e', source: f.steps[0].id, target: f.steps[1].id }] });
+  const plain = await s.afs(['run', 'Flujo Break CLI', '-i', 'x']);
+  assert.equal(plain.code, 0, 'sin --breaks los breaks no frenan');
+  const r = await s.afs(['run', 'Flujo Break CLI', '-i', 'x', '--breaks']);
+  assert.equal(r.code, 4);
+  assert.equal(r.stdout.trim(), 'borrador');
+  const m = r.stderr.match(/afs resume "Flujo Break CLI" (r_\w+) --step "Revisar" --action continue\|edit\|retry\|stop/);
+  assert.ok(m, r.stderr);
+  const res = await s.afs(['resume', 'Flujo Break CLI', m[1], '--step', 'Revisar', '--action', 'edit', '--output', 'aprobado por CLI']);
+  assert.equal(res.code, 0, res.stderr);
+  const run = await s.waitRun(g.id, m[1]);
+  assert.equal(run.status, 'success');
+  assert.match(run.steps[g.steps[1].id].output, /aprobado por CLI/);
+  const bad = await s.afs(['resume', 'Flujo Break CLI', m[1]]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /RUN_NOT_FOUND/);
+});
+
+test('MCP: run_flow con breakpoints vuelve en pausa (no es error) y resume_run continúa hasta el final', async () => {
+  const f = await s.flow('Flujo Break MCP', [role('Paso', '[[mock:say para validar]]', { breakpoint: 'after' })]);
+  const m = s.mcp();
+  try {
+    await m.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
+    const call = async (name, args) => (await m.request('tools/call', { name, arguments: args })).result;
+    const r = await call('run_flow', { flow: f.id, breakpoints: true });
+    assert.equal(r.isError, false);
+    assert.equal(r.structuredContent.status, 'paused');
+    assert.match(r.content[0].text, /⏸ En pausa en "Paso"[\s\S]*Salida a validar:\npara validar/);
+    const done = await call('resume_run', { flow: f.id, runId: r.structuredContent.runId, action: 'continue' });
+    assert.equal(done.structuredContent.status, 'success');
+    assert.equal(done.isError, false);
   } finally { m.close(); }
 });

@@ -24,6 +24,7 @@ const TOOLS = [
         usePins: { type: 'boolean', description: 'Usar salidas fijadas (📌) en vez de ejecutar esos steps (default false)' },
         deadlineSec: { type: 'number', description: 'Tiempo máximo de la ejecución en el servidor (default el del flujo, 3600)' },
         idempotencyKey: { type: 'string', description: 'Si repites la llamada con la misma clave no se lanza otra ejecución' },
+        breakpoints: { type: 'boolean', description: 'Respetar los breaks (⏸) de los steps: la ejecución vuelve en estado paused con la salida a validar; sigue con resume_run (default false)' },
       },
       required: ['flow'],
       additionalProperties: false,
@@ -40,6 +41,11 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { flow: { type: 'string' }, runId: { type: 'string' } }, required: ['flow', 'runId'], additionalProperties: false },
   },
   {
+    name: 'resume_run',
+    description: 'Decide en un break de una ejecución en pausa: continue (aprobar), edit (reemplazar la salida), retry (re-ejecutar con feedback), skip (omitir, solo antes) o stop.',
+    inputSchema: { type: 'object', properties: { flow: { type: 'string' }, runId: { type: 'string' }, step: { type: 'string', description: 'Step en pausa (si hay varios)' }, action: { type: 'string', enum: ['continue', 'edit', 'retry', 'skip', 'stop'] }, output: { type: 'string', description: 'Salida corregida (edit)' }, feedback: { type: 'string', description: 'Qué corregir (retry)' }, wait: { type: 'boolean', description: 'Esperar a que termine o vuelva a pausar (default true)' } }, required: ['flow', 'runId', 'action'], additionalProperties: false },
+  },
+  {
     name: 'ask_flow',
     description: 'Pregunta en lenguaje natural a un flujo: el enrutador elige el step/agente/skill que responde (o usa "step" para uno específico).',
     inputSchema: { type: 'object', properties: { flow: { type: 'string' }, message: { type: 'string' }, step: { type: 'string' } }, required: ['flow', 'message'], additionalProperties: false },
@@ -51,6 +57,7 @@ function fmtRun(r) {
   const lines = [`Flujo: ${r.flow} · ejecución ${r.runId} · estado: ${r.status}${r.timedOut ? ' (sigue corriendo; usa get_run o cancel_run)' : ''}`];
   for (const s of r.steps || []) lines.push(`- ${s.step}: ${s.status}${s.code ? ` [${s.code}]` : ''}${s.error ? ` — ${s.error.slice(0, 300)}` : ''}${s.pinned ? ' (📌 salida fijada)' : ''}`);
   if (r.usedPins?.length) lines.push(`Usó salidas fijadas: ${r.usedPins.join(', ')}`);
+  for (const p of r.pauses || []) lines.push('', `⏸ En pausa en "${p.step}" (${p.when === 'before' ? 'antes de ejecutarse' : 'después'}). Acciones: ${p.actions.join(', ')} → usa resume_run.`, p.when === 'after' ? `Salida a validar:\n${String(p.output || '').slice(0, 4000)}` : `Recibirá:\n${(p.inputs || []).map((i) => `### ${i.step}\n${String(i.output || '').slice(0, 2000)}`).join('\n') || '(nada)'}`);
   if (r.result) lines.push('', 'Resultado final:', r.result);
   if (r.json !== undefined) lines.push('', 'Resultado estructurado:', FENCE + 'json', JSON.stringify(r.json, null, 2), FENCE);
   const others = (r.steps || []).filter((s) => s.output && !(r.result || '').includes(s.output));
@@ -58,7 +65,7 @@ function fmtRun(r) {
   return lines.join('\n');
 }
 /** Tool result for a run: isError unless it succeeded; full summary as structuredContent. */
-const runResult = (r) => ({ content: [{ type: 'text', text: fmtRun(r) }], structuredContent: r, isError: r.status !== 'success' || !!r.timedOut });
+const runResult = (r) => ({ content: [{ type: 'text', text: fmtRun(r) }], structuredContent: r, isError: !['success', 'paused'].includes(r.status) || !!r.timedOut });
 
 async function callTool(name, a = {}) {
   await ensureServer();
@@ -68,7 +75,7 @@ async function callTool(name, a = {}) {
       return flows.map((f) => `• ${f.name} (${f.id})${f.description ? ` — ${f.description}` : ''}\n  steps: ${f.steps.map((s) => s.name).join(' → ') || '—'}${(f.vars || []).length ? `\n  variables: ${f.vars.join(', ')}` : ''}`).join('\n') || 'No hay flujos.';
     }
     case 'run_flow': {
-      const body = { input: a.input || '', step: a.step, vars: a.vars, source: 'mcp', usePins: !!a.usePins, deadlineSec: a.deadlineSec };
+      const body = { input: a.input || '', step: a.step, vars: a.vars, source: 'mcp', usePins: !!a.usePins, deadlineSec: a.deadlineSec, breakpoints: !!a.breakpoints };
       const headers = a.idempotencyKey ? { 'Idempotency-Key': String(a.idempotencyKey) } : {};
       if (a.wait === false) { const r = await call('POST', `${flowPath(a.flow)}/run`, { ...body, wait: false }, headers); return { content: [{ type: 'text', text: `Ejecución iniciada: ${r.runId}. Consulta con get_run o cancela con cancel_run.` }], structuredContent: r }; }
       return runResult(await runAndWait(a.flow, body, { timeoutSec: a.timeoutSec || 600, idempotencyKey: a.idempotencyKey }));
@@ -80,6 +87,16 @@ async function callTool(name, a = {}) {
     case 'cancel_run': {
       const r = await call('POST', `${flowPath(a.flow)}/runs/${a.runId}/cancel`, {});
       return { content: [{ type: 'text', text: `Ejecución ${r.runId}: ${r.status}` }], structuredContent: r };
+    }
+    case 'resume_run': {
+      const r = await call('POST', `${flowPath(a.flow)}/runs/${a.runId}/resume`, { step: a.step, action: a.action, output: a.output, feedback: a.feedback });
+      if (a.wait === false) return { content: [{ type: 'text', text: `${r.stepId}: ${r.action}` }], structuredContent: r };
+      for (let i = 0; i < 1200; i++) {
+        const s = await call('GET', `${flowPath(a.flow)}/runs/${a.runId}`);
+        if (s.status !== 'running') return runResult(s);
+        await new Promise((res) => setTimeout(res, 1500));
+      }
+      return runResult(await call('GET', `${flowPath(a.flow)}/runs/${a.runId}`));
     }
     case 'ask_flow': {
       const r = await call('POST', `${flowPath(a.flow)}/ask`, { message: a.message, step: a.step });

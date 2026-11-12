@@ -275,3 +275,21 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .inbound.ok { border-color: #238636; color: #7ee787; } .inbound.warn { border-color: #d29922; }
 .ok-text { color: #7ee787; }
 .caller { white-space: normal; line-height: 1.25; min-height: 40px; }
+
+/* ---- spec 18: arrows on any side, routing, breaks ---- */
+.react-flow__handle.h-in { background: var(--bg); border: 2px solid var(--accent); }
+.react-flow__handle.h-out { background: var(--accent); }
+.node .react-flow__handle { opacity: .35; transition: opacity .15s; }
+.node:hover .react-flow__handle, .react-flow.connecting .react-flow__handle { opacity: 1; }
+.node.not-routed { opacity: .55; border-left: 4px dashed var(--warn); }
+.node.st-paused { border-color: #d29922; box-shadow: 0 0 0 2px #d2992255, 0 2px 10px #0006; }
+.node.has-break { outline: 2px dashed #d2992266; outline-offset: 3px; }
+.node-badges .brk { color: #d29922; font-weight: 600; }
+.review-bar { position: fixed; left: 50%; top: 56px; transform: translateX(-50%); z-index: 90; background: #3a2f12; color: #f0c674; border: 1px solid #d29922; padding: 8px 14px; border-radius: 8px; display: flex; gap: 10px; align-items: center; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+.review-out { max-height: 260px; overflow: auto; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.review-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 10px; }
+.edge-panel .field { margin-bottom: 12px; }
+.lib-item { display: flex; align-items: stretch; gap: 4px; }
+.lib-item .preset { flex: 1; }
+.pause-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
+.pause-card textarea { width: 100%; }

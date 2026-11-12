@@ -8,7 +8,7 @@ import * as P from './prompt.js';
 import { parseSchema } from './schema.js';
 import { findAgent, findSkill } from './catalog.js';
 import { buildArgs, lastInit } from './claude.js';
-import { cliOptions, ancestorsOf } from './engine.js';
+import { cliOptions, ancestorsOf, evalAssertion } from './engine.js';
 
 const est = (n) => Math.ceil(n / 4);
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + `\n… [${s.length - n} chars más]` : s || '');
@@ -78,9 +78,11 @@ export function previewStep(flowId, stepId, { draft = null, target = 'run', samp
   const data = new Map();
   if (run) for (const [id, rs] of Object.entries(run.steps || {})) if (rs.status === 'success' || (rs.status === 'skipped' && rs.skipReason === 'hook')) data.set(id, { output: rs.output, json: rs.json, files: rs.files || [], actions: rs.actions || [], source: rs.pinned ? 'pinned' : 'run', fromRunId: run.id });
 
-  const ups = flow.edges.filter((e) => e.target === stepId).map((e) => e.source);
+  const inEdges = flow.edges.filter((e) => e.target === stepId);
   const max = Number(step.input?.maxChars) || 12000;
-  const upstream = ups.map((u) => {
+  // Same arrow rules as the engine (spec 18): inactive arrows carry nothing; pick/route payloads replace the output.
+  const upstream = inEdges.map((edge) => {
+    const u = edge.source;
     const s = flow.steps.find((x) => x.id === u);
     let d; let note;
     if (data.has(u)) d = { ...data.get(u), source: data.get(u).source };
@@ -95,8 +97,12 @@ export function previewStep(flowId, stepId, { draft = null, target = 'run', samp
     // In a full run, an upstream that is not pinned runs fresh: its data comes from 'run'. The preview uses its last output as a SAMPLE
     // but labels the prompt as the engine would (no '(de una ejecución anterior)' header that a real run never has).
     const willRun = !data.has(u) && d.source !== 'pinned';
-    return { id: u, name: s?.name || u, output: d.output || '', json: d.json, source: willRun ? 'run' : d.source, origin: d.source, sample: willRun, fromRunId: d.fromRunId || null, at: d.at || null, note, summaryState };
-  });
+    const routes = run ? run.steps?.[u]?.routes : s?.lastRun?.routes;
+    const ep = P.edgePayload(edge, { ...d, routes }, step, evalAssertion);
+    if (!ep.active) { warn('EDGE_INACTIVE', `Con los datos de ejemplo la flecha desde "${s?.name || u}" no pasa: ${ep.reason}. En una ejecución real se decide con la salida de ese momento.`, 'upstream'); return null; }
+    if (ep.warning) warn('EDGE_PICK_MISSING', `Flecha desde "${s?.name || u}": ${ep.warning}.`, 'upstream');
+    return { id: u, name: s?.name || u, output: ep.output || '', json: ep.json, source: willRun ? 'run' : d.source, origin: d.source, sample: willRun, fromRunId: d.fromRunId || null, at: d.at || null, note, summaryState, via: P.edgeVia(edge) || (ep.routed ? 'elegido por el step' : ''), edgeId: edge.id };
+  }).filter(Boolean);
   if (upstream.some((u) => u.summaryState === 'pending')) warn('SUMMARY_PENDING', 'Modo resumen: las salidas largas se resumirán con Haiku al ejecutar; aquí se ve el texto original recortado.', 'upstream');
 
   const refs = [];

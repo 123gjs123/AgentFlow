@@ -12,6 +12,8 @@ before(async () => { s = await startServer({ name: 'rel' }); await s.start(); })
 after(async () => { await s?.stop(); });
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** taskkill runs asynchronously: under load the tree can take a few seconds to disappear. */
+const dead = async (pid, ms = 10000) => { for (let t = 0; t < ms; t += 250) { if (!alive(pid)) return true; await sleep(250); } return false; };
 
 test('error transitorio (API 500) → reintento automático y éxito; siempre transitorio → 3 intentos y CLI_ERROR', async () => {
   const a = role('Una vez', '[[mock:transient-once t1]] [[mock:say recuperado]]');
@@ -67,8 +69,7 @@ test('timeout del step (TIMEOUT) y deadline de la ejecución (DEADLINE) matan el
   assert.equal(r2.status, 'timeout');
   assert.equal(r2.steps[ai.id].code, 'DEADLINE');
   assert.equal(r2.steps[next.id].skipReason, 'deadline');
-  await sleep(1500);
-  for (const pid of [...(r1.steps[slow.id].pids || []), ...(r2.steps[ai.id].pids || [])]) assert.ok(!alive(pid), `proceso ${pid} sigue vivo`);
+  for (const pid of [...(r1.steps[slow.id].pids || []), ...(r2.steps[ai.id].pids || [])]) assert.ok(await dead(pid), `proceso ${pid} sigue vivo`);
 });
 
 test('cancelar una ejecución (UI) y detener todo el flujo; la otra ejecución sigue', async () => {
@@ -90,8 +91,7 @@ test('cancelar una ejecución (UI) y detener todo el flujo; la otra ejecución s
   const stop = await s.uiOk('POST', `/api/flows/${f.id}/stop`, {});
   assert.ok(stop.stopped >= 1);
   assert.equal((await s.waitRun(f.id, r2)).status, 'stopped');
-  await sleep(1500);
-  for (const pid of run1.steps[a.id].pids) assert.ok(!alive(pid), 'el proceso de claude se mató');
+  for (const pid of run1.steps[a.id].pids) assert.ok(await dead(pid), 'el proceso de claude se mató');
 });
 
 test('cancelar durante la espera de un reintento de comando no lo vuelve a ejecutar', async () => {
@@ -195,7 +195,6 @@ test('caída del servidor durante una ejecución → al reiniciar queda "interru
     assert.equal(run.status, 'interrupted');
     assert.equal(run.steps[a.id].code, 'INTERRUPTED');
     assert.equal((await c.getFlow(f.id)).steps[0].lastRun.status, 'interrupted');
-    await sleep(1500);
-    for (const pid of live.steps[a.id].pids) assert.ok(!alive(pid), `huérfano ${pid} sigue vivo`);
+    for (const pid of live.steps[a.id].pids) assert.ok(await dead(pid), `huérfano ${pid} sigue vivo`);
   } finally { await c.stop(); }
 });

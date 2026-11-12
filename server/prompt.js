@@ -134,6 +134,17 @@ export function systemSections(flow, step, rctx = {}) {
     const sc = step.output.schema?.trim();
     out.push(S('outputFormat', 'Formato de salida: JSON' + (sc ? ' + schema' : ''), 'step.output', '## Formato de salida: JSON\nAdemás de una explicación breve, TERMINA tu respuesta con UN único bloque ```json con los datos estructurados (JSON válido, sin comentarios). Los steps siguientes consumen ese JSON campo por campo.' + (sc ? '\nEl JSON debe cumplir este JSON Schema:\n```json\n' + sc + '\n```' : '')));
   }
+  // Outgoing arrows where this step decides the destination (spec 18).
+  const routed = (flow.edges || []).filter((e) => e.source === step.id && e.when?.type === 'route').map((e) => ({ e, t: flow.steps.find((s) => s.id === e.target) })).filter((x) => x.t);
+  if (routed.length) {
+    out.push(S('routes', `Destinos que decide este step (${routed.length})`, 'flechas de salida "lo decide el step"', `## Destinos
+Tu salida puede ir a estos steps; TÚ decides a cuáles. Al final de tu respuesta agrega una línea por destino elegido:
+- <route to="Nombre"/> → le llega tu salida completa
+- <route to="Nombre">contenido</route> → le llega SOLO ese contenido (texto o JSON), distinto para cada destino si hace falta
+Los destinos que no nombres no se ejecutan en esta ejecución (no es un error).
+Destinos posibles:
+${routed.map(({ e, t }) => `- ${t.name}${e.label ? `: ${e.label}` : ''}`).join('\n')}`));
+  }
   out.push(S('rules', 'Reglas de salida (fijas)', 'app', `## Reglas de salida
 - Tu respuesta final ES la salida de este step y se pasa a los steps siguientes: concreta y accionable.
 - Si descubres un hecho duradero útil para futuras ejecuciones de este step, agrégalo al final como <remember>hecho</remember> (uno por línea).
@@ -153,6 +164,48 @@ const jsonBlock = (v, max) => {
   if (s.length > max) return `(JSON de ${s.length} chars: supera el límite de ${max}. Usa referencias {{steps.<nombre>.json.<campo>}} en la tarea o sube "máx. caracteres".)`;
   return '```json\n' + s + '\n```';
 };
+// ---------- edges: what passes through each arrow and when (spec 18) ----------
+/** `<route to="Destino"/>` or `<route to="Destino">contenido solo para ese destino</route>`. */
+const ROUTE_RE = /<route\s+to\s*=\s*"([^"]+)"\s*(?:\/>|>([\s\S]*?)<\/route>)/g;
+export function extractRoutes(text) {
+  const routes = [...String(text || '').matchAll(ROUTE_RE)].map((m) => ({ to: m[1].trim(), payload: m[2] === undefined ? null : m[2].trim() }));
+  return { routes, clean: String(text || '').replace(ROUTE_RE, '').trim() };
+}
+export const EDGE_WHEN_TYPES = ['always', 'route', 'contains', 'notContains', 'regex', 'json'];
+const routeFor = (routes, target) => (routes || []).find((r) => r.to.toLowerCase() === String(target.name).toLowerCase() || r.to === target.id);
+/** Edge label shown in prompts and on the canvas: "campo casos", "si json.riesgo equals alto"… */
+export function edgeVia(edge) {
+  const parts = [];
+  if (edge.label) parts.push(edge.label);
+  if (edge.pick) parts.push(`campo ${edge.pick}`);
+  return parts.join(' · ');
+}
+/**
+ * Whether an arrow carries data in this run and what it carries.
+ * d = source data {output, json, routes}; evalCond(when, output, json) -> {pass, message} (assertion evaluator).
+ * Returns {active, reason, output, json, routed}.
+ */
+export function edgePayload(edge, d, target, evalCond) {
+  const when = edge.when && edge.when.type && edge.when.type !== 'always' ? edge.when : null;
+  let output = d.output || ''; let json = d.json; let routed = false;
+  if (when?.type === 'route') {
+    const r = routeFor(d.routes, target);
+    if (!r) return { active: false, reason: `el step no lo eligió como destino (<route to="${target.name}"/>)` };
+    routed = true;
+    if (r.payload !== null && r.payload !== '') { output = r.payload; try { json = JSON.parse(r.payload); } catch { json = undefined; } }
+  } else if (when) {
+    let res;
+    try { res = evalCond(when, d.output, d.json); } catch (e) { res = { pass: false, message: `condición inválida: ${e.message}` }; }
+    if (!res.pass) return { active: false, reason: `no se cumple: ${res.message}` };
+  }
+  if (edge.pick) {
+    const v = getPath(json, edge.pick);
+    if (v === undefined) return { active: true, output: '', json: undefined, routed, warning: `"${edge.pick}" no existe en el JSON de la salida` };
+    json = v; output = show(v);
+  }
+  return { active: true, output, json, routed };
+}
+
 /** Upstream section according to the step's input mode: full | json | summary | refs. */
 export function upstreamSection(step, upstream) {
   const mode = step.input?.mode || 'full';
@@ -166,7 +219,7 @@ export function upstreamSection(step, upstream) {
     else if (mode === 'summary') body = u.summary || clip(u.output, max);
     else body = [clip(u.output, max), hasJson ? 'Datos (JSON):\n' + jsonBlock(u.json, max) : ''].filter(Boolean).join('\n\n');
     const src = u.source && u.source !== 'run' ? ` (${u.source === 'pinned' ? 'salida fijada' : u.source === 'lastRun' ? 'de una ejecución anterior' : 'sin datos'})` : '';
-    parts.push(`### ${u.name}${src}\n${body || '(sin salida)'}`);
+    parts.push(`### ${u.name}${u.via ? ` → ${u.via}` : ''}${src}\n${body || '(sin salida)'}`);
   }
   return parts.join('\n\n');
 }
@@ -178,6 +231,7 @@ export function userSections(flow, step, input, upstream, data, rctx = {}) {
   const up = upstreamSection(step, upstream);
   if (up) out.push(U('upstream', `Lo que recibe de steps anteriores (${({ full: 'todo', json: 'solo JSON', summary: 'resumen', refs: 'referencias' })[step.input?.mode || 'full']}, ${upstream.length})`, `upstream: ${upstream.map((u) => u.name).join(', ')}`, up));
   if (input) out.push(U('input', 'Input del flujo', 'run input', `## Input del flujo\n${clip(input, 8000)}`));
+  if (rctx.reviewFeedback) out.push(U('review', 'Corrección pedida en el break', 'revisor (break)', `## Corrección pedida por el revisor\nTu salida anterior fue revisada y hay que rehacerla con esta indicación:\n${rctx.reviewFeedback}${rctx.previousOutput ? `\n\nSalida anterior:\n${clip(rctx.previousOutput, 6000)}` : ''}`));
   if (Object.keys(flow.vars || {}).length) out.push(U('vars', `Variables (${Object.keys(flow.vars).length})`, 'flow.vars + vars de la ejecución', `## Variables\n${JSON.stringify(flow.vars, null, 2)}`));
   return out;
 }

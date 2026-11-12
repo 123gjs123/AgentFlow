@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { api, onWs, onConn } from './api.js';
 import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
-import { StepPanel, FlowPanel } from './Panels.jsx';
+import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
+import ReviewModal from './Review.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -30,7 +31,11 @@ export default function App() {
   const [flow, setFlow] = useState(null);
   const [catalog, setCatalog] = useState({ skills: [], agents: [], tools: [], mcpServers: [] });
   const [live, setLive] = useState({});
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedId, setSelectedIdRaw] = useState(null);
+  const [selectedEdge, setSelectedEdge] = useState(null);
+  const setSelectedId = (id) => { setSelectedIdRaw(id); if (id) setSelectedEdge(null); };
+  const [paused, setPaused] = useState(null); // {runId, step, when} of a run waiting at a break (spec 18)
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [stepTab, setStepTab] = useState('config');
   const [flowTab, setFlowTab] = useState('chat');
   const [rate, setRate] = useState(null);
@@ -88,7 +93,9 @@ export default function App() {
     let f;
     try { f = await api.get(`/api/flows/${id}`); } catch (e) { notify(`No se pudo abrir el flujo: ${e.message}`); return; }
     if (f.steps.length && f.steps.every((s) => !s.position?.x && !s.position?.y)) { f = { ...f, steps: autoLayout(f.steps, f.edges) }; api.put(`/api/flows/${f.id}`, f); }
-    setFlow(f); setSelectedId(null); setLive({}); ls.set('afs.flow', id);
+    setFlow(f); setSelectedId(null); setSelectedEdge(null); setLive({}); setPaused(null); setReviewOpen(false); ls.set('afs.flow', id);
+    // A run of this flow may be waiting at a break (e.g. after reloading the page).
+    api.get(`/api/flows/${id}/runs`).then((runs) => { const p = (runs || []).find((r) => r.status === 'paused'); if (p) setPaused({ runId: p.id }); }).catch(() => {});
   }
 
   // ---- persistence (debounced) ----
@@ -150,6 +157,19 @@ export default function App() {
         break;
       case 'run.finished':
         notify(`Ejecución ${m.status}${m.error ? `: ${m.error}` : ''}`);
+        setPaused((p) => (p?.runId === m.runId ? null : p));
+        break;
+      case 'run.paused':
+        setPaused({ runId: m.runId, step: m.step, when: m.when });
+        setReviewOpen(true);
+        notify(`⏸ Break en “${m.step}”: valida para seguir`);
+        break;
+      case 'run.resumed':
+        // Other branches may still be paused: keep the bar only while something waits.
+        api.get(`/api/flows/${m.flowId}/runs/${m.runId}`).then((r) => {
+          if (r?.pauses?.length) setPaused((p) => (p?.runId === m.runId ? { ...p, step: r.pauses[0].step, nonce: Date.now() } : p));
+          else { setPaused((p) => (p?.runId === m.runId ? null : p)); setReviewOpen(false); }
+        }).catch(() => {});
         break;
       default:
     }
@@ -183,11 +203,35 @@ export default function App() {
     }, { layout: true });
     setSelectedId(s.id); setStepTab('config');
   }
-  const onConnect = (source, target) => {
-    if (flow.edges.some((e) => e.source === source && e.target === target)) return;
+  const onConnect = (source, target, sourceHandle, targetHandle) => {
+    if (flow.edges.some((e) => e.source === source && e.target === target)) return notify('Esas cajas ya están unidas: selecciona la flecha para cambiar qué pasa o el lado.');
     if (wouldCycle(flow.edges, source, target)) return notify('Esa relación crearía un ciclo.');
-    mutate((f) => { f.edges.push({ id: rid('e_'), source, target }); return f; }, { layout: true });
+    const sides = { ...(sourceHandle ? { sourceHandle } : {}), ...(targetHandle ? { targetHandle } : {}) };
+    // Arrows drawn on a chosen side keep the manual layout; plain left→right ones re-order if "auto" is on.
+    const manual = (sourceHandle && sourceHandle !== 'out-right') || (targetHandle && targetHandle !== 'in-left');
+    mutate((f) => { f.edges.push({ id: rid('e_'), source, target, ...sides }); return f; }, { layout: !manual });
   };
+  const onReconnect = (edgeId, c2) => {
+    const others = flow.edges.filter((e) => e.id !== edgeId);
+    if (others.some((e) => e.source === c2.source && e.target === c2.target)) return notify('Esas cajas ya están unidas.');
+    if (wouldCycle(others, c2.source, c2.target)) return notify('Esa relación crearía un ciclo.');
+    mutate((f) => { const e = f.edges.find((x) => x.id === edgeId); if (e) Object.assign(e, { source: c2.source, target: c2.target, sourceHandle: c2.sourceHandle || undefined, targetHandle: c2.targetHandle || undefined }); return f; });
+  };
+  const patchEdge = (id, patch) => mutate((f) => { const e = f.edges.find((x) => x.id === id); if (e) { Object.assign(e, patch); for (const k of Object.keys(patch)) if (patch[k] === undefined) delete e[k]; } return f; });
+  function duplicateStep(id) {
+    const src = flow.steps.find((s) => s.id === id);
+    if (!src) return;
+    const { lastRun, memory, pinned, chatSessionId, chatContextHash, ...rest } = structuredClone(src);
+    const copy = { ...rest, id: rid('s_'), name: `${src.name} (copia)`, memory: [], lastRun: null, position: { x: src.position.x + 40, y: src.position.y + 130 } };
+    mutate((f) => { f.steps.push(copy); return f; });
+    setSelectedId(copy.id);
+    notify('Caja duplicada: conéctala donde la necesites');
+  }
+  async function saveToLibrary(id) {
+    const name = prompt('Nombre en “Mis steps”', flow.steps.find((s) => s.id === id)?.name || '');
+    if (!name) return;
+    try { await flushSave(); await api.post('/api/library', { flow: flow.id, step: id, name }); notify(`Guardado en “Mis steps”: ＋ Step para insertarlo en cualquier flujo`); } catch (e) { notify(e.message); }
+  }
   const onDeleteSteps = (ids) => { mutate((f) => { f.steps = f.steps.filter((s) => !ids.includes(s.id)); f.edges = f.edges.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)); return f; }, { layout: true }); setSelectedId(null); };
   const onDeleteEdges = (ids) => mutate((f) => { f.edges = f.edges.filter((e) => !ids.includes(e.id)); return f; }, { layout: true });
   const onMove = (id, pos) => mutate((f) => { const s = f.steps.find((x) => x.id === id); if (s) s.position = pos; return f; });
@@ -228,7 +272,8 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
   }
 
   const step = flow?.steps.find((s) => s.id === selectedId);
-  const anyRunning = Object.values(live).some((l) => l.status === 'running');
+  const anyRunning = Object.values(live).some((l) => l.status === 'running' || l.status === 'paused') || !!paused;
+  const edgeObj = flow?.edges.find((e) => e.id === selectedEdge);
   const win = rate?.unifiedWindows;
 
   return (
@@ -279,7 +324,8 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         <main className="main">
           <section className="canvas" data-tour="canvas">
             <ReactFlowProvider>
-              <Canvas flow={flow} live={live} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect}
+              <Canvas flow={flow} live={live} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect} onReconnect={onReconnect}
+                selectedEdge={selectedEdge} onSelectEdge={setSelectedEdge}
                 onDeleteSteps={onDeleteSteps} onDeleteEdges={onDeleteEdges} onMove={onMove} />
             </ReactFlowProvider>
             {!flow.steps.length && (
@@ -301,8 +347,10 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
             <div className="hint-bar small muted">Arrastra entre puntos para relacionar · Supr borra lo seleccionado · Click en el fondo = chat general</div>
           </section>
           <aside className="side" data-tour="side">
-            {step ? (
-              <StepPanel key={step.id} flow={flow} step={step} catalog={catalog} live={live[step.id]} tab={stepTab} setTab={setStepTab}
+            {edgeObj ? (
+              <EdgePanel key={edgeObj.id} flow={flow} edge={edgeObj} onChange={(p) => patchEdge(edgeObj.id, p)} onDelete={() => { onDeleteEdges([edgeObj.id]); setSelectedEdge(null); }} onClose={() => setSelectedEdge(null)} />
+            ) : step ? (
+              <StepPanel key={step.id} onDuplicate={() => duplicateStep(step.id)} onSaveLib={() => saveToLibrary(step.id)} flow={flow} step={step} catalog={catalog} live={live[step.id]} tab={stepTab} setTab={setStepTab}
                 onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onProbe={probe}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             ) : (
@@ -319,6 +367,8 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           <p className="muted small">¿Primera vez? <a onClick={() => setTourStep(0)}>Haz el recorrido guiado</a> o abre <a onClick={() => setModal({ help: 'start' })}>Ayuda</a>.</p>
         </div>
       )}
+      {paused && flow && <div className="review-bar">⏸ Ejecución en pausa{paused.step ? ` en “${paused.step}”` : ''}: valida la salida para seguir <button className="primary small" onClick={() => setReviewOpen(true)}>Revisar</button></div>}
+      {paused && reviewOpen && flow && <ReviewModal key={`${paused.runId}:${paused.nonce || 0}`} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}
       {!online && <div className="offline-bar">⚠️ El servidor de Agent Flow Studio no responde. Arráncalo con <code>npm start</code> en la carpeta del proyecto (o con cualquier comando <code>afs</code>); esta página se reconecta sola.</div>}
       {toast && <div className="toast">{toast}</div>}
       {modal === 'picker' && <StepPicker catalog={catalog} onPick={addStep} onClose={() => setModal(null)} />}

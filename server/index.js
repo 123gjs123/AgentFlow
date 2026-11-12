@@ -74,7 +74,7 @@ const inputOf = (body) => {
   if (typeof body === 'string') return body;
   if (body && typeof body.input === 'string') return body.input;
   if (body && body.input !== undefined) return JSON.stringify(body.input, null, 2);
-  const rest = { ...(body || {}) }; for (const k of ['step', 'wait', 'timeoutSec', 'source', 'vars', 'usePins', 'deadlineSec', 'dryRun']) delete rest[k];
+  const rest = { ...(body || {}) }; for (const k of ['step', 'wait', 'timeoutSec', 'source', 'vars', 'usePins', 'deadlineSec', 'dryRun', 'breakpoints']) delete rest[k];
   return Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''; // raw webhook payloads (Bitbucket, Jenkins…)
 };
 const stableJson = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((key) => [key, x[key]])) : x));
@@ -115,12 +115,12 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
     const warnings = [];
     if (!input) warnings.push('input vacío');
     for (const k of Object.keys(body.vars || {})) if (!(k in (flow.vars || {}))) warnings.push(`la variable "${k}" no existe en el flujo`);
-    return { dryRun: true, ok: true, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, warnings };
+    return { dryRun: true, ok: true, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, warnings };
   }
   let bodyHash = null;
   if (key) {
     if (key.length > 200) throw fail(400, 'Idempotency-Key: máximo 200 caracteres', 'BAD_IDEMPOTENCY_KEY');
-    bodyHash = crypto.createHash('sha256').update(stableJson({ input, only, vars: body.vars || null, usePins: truthy(body.usePins) })).digest('hex');
+    bodyHash = crypto.createHash('sha256').update(stableJson({ input, only, vars: body.vars || null, usePins: truthy(body.usePins), breakpoints: truthy(body.breakpoints) })).digest('hex');
     const prev = store.getIdem(`${flow.id}:${key}`);
     if (prev) {
       if (prev.bodyHash !== bodyHash) throw fail(409, 'Esa Idempotency-Key ya se usó con otro contenido', 'IDEMPOTENCY_CONFLICT');
@@ -132,7 +132,7 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
   const problem = engine.externalRunProblem(flow, { only, vars: body.vars });
   if (problem) throw fail(problem.status, problem.error, problem.code);
   const trigger = String(body.source || req.query.source || 'api').slice(0, 20);
-  const runId = engine.startRun(flow.id, { input, only, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null });
+  const runId = engine.startRun(flow.id, { input, only, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null, breakpoints: truthy(body.breakpoints) });
   if (key) store.setIdem(`${flow.id}:${key}`, { runId, bodyHash, flowId: flow.id });
   res.locals.runId = runId;
   return respond(runId);
@@ -146,6 +146,14 @@ ext.post('/flows/:flow/runs/:runId/cancel', wrap((req) => {
   const run = extRun(flow, req.params.runId);
   if (run.status !== 'running' || !engine.stopRun(flow.id, run.id)) throw fail(409, `La ejecución ya terminó (${run.status})`, 'RUN_FINISHED');
   return { runId: run.id, status: 'stopped' };
+}));
+// Breaks (spec 18): decision on a paused step. body {action: continue|edit|retry|skip|stop, step?, output?, json?, feedback?}
+ext.post('/flows/:flow/runs/:runId/resume', wrap((req) => {
+  const flow = extFlow(req.params.flow);
+  const b = typeof req.body === 'object' && req.body ? req.body : {};
+  const s = b.step ? flow.steps.find((x) => x.id === b.step || x.name.toLowerCase() === String(b.step).toLowerCase()) : null;
+  if (b.step && !s) throw fail(404, `Step no encontrado: ${b.step}`, 'STEP_NOT_FOUND');
+  return engine.resumeRun(flow.id, req.params.runId, s?.id, b);
 }));
 ext.get('/flows/:flow/runs/:runId/events', wrap((req) => {
   const flow = extFlow(req.params.flow);
@@ -179,6 +187,20 @@ app.use('/api', (req, res, next) => {
 });
 
 // ----- flows -----
+// Arrows keep only known fields (spec 18): sides on the boxes, label, condition and the JSON field they carry.
+const EDGE_WHEN = ['always', 'route', 'contains', 'notContains', 'regex', 'json'];
+function cleanEdge(e) {
+  const out = { id: String(e.id || store.uid('e_')), source: e.source, target: e.target };
+  for (const k of ['sourceHandle', 'targetHandle']) if (typeof e[k] === 'string' && /^(in|out)-(top|right|bottom|left)$/.test(e[k])) out[k] = e[k];
+  if (typeof e.label === 'string' && e.label.trim()) out.label = e.label.trim().slice(0, 80);
+  if (typeof e.pick === 'string' && e.pick.trim()) out.pick = e.pick.trim().slice(0, 200);
+  if (e.when && typeof e.when === 'object' && EDGE_WHEN.includes(e.when.type) && e.when.type !== 'always') {
+    const w = { type: e.when.type };
+    for (const k of ['value', 'pattern', 'flags', 'path', 'op']) if (e.when[k] !== undefined && e.when[k] !== '') w[k] = e.when[k];
+    out.when = w;
+  }
+  return out;
+}
 app.get('/api/flows', wrap(() => store.listFlows()));
 app.post('/api/flows', wrap((req) => {
   const f = store.newFlow(req.body?.name);
@@ -208,7 +230,7 @@ app.put('/api/flows/:id', wrap((req) => {
   });
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
-  const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target);
+  const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
   const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, steps, edges };
   engine.topoLevels(next); // throws on cycles
   const saved = store.saveFlow(next);
@@ -241,8 +263,9 @@ app.post('/api/flows/:id/reset', wrap((req) => {
 app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); store.deleteFlow(req.params.id); }));
 
 // ----- runs -----
-app.post('/api/flows/:id/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', trigger: 'manual' }) })));
-app.post('/api/flows/:id/steps/:stepId/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', only: req.params.stepId, trigger: 'manual' }) })));
+// UI runs honour breaks unless {breakpoints:false}.
+app.post('/api/flows/:id/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+app.post('/api/flows/:id/steps/:stepId/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
 app.post('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.pinStep(req.params.id, req.params.stepId, req.body || {})));
 app.delete('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.unpinStep(req.params.id, req.params.stepId)));
 app.post('/api/flows/:id/stop', wrap((req) => ({ stopped: engine.stopRuns(req.params.id) })));
@@ -252,6 +275,7 @@ app.post('/api/flows/:id/runs/:runId/cancel', wrap((req) => {
   if (!engine.stopRun(req.params.id, req.params.runId)) throw fail(409, 'La ejecución no está en curso', 'RUN_FINISHED');
   return { runId: req.params.runId, status: 'stopped' };
 }));
+app.post('/api/flows/:id/runs/:runId/resume', wrap((req) => { need(req.params.id); return engine.resumeRun(req.params.id, req.params.runId, req.body?.step || null, req.body || {}); }));
 app.get('/api/flows/:id/runs', wrap((req) => store.listRuns(req.params.id)));
 app.get('/api/flows/:id/runs/:runId', wrap((req) => engine.getRunLive(req.params.id, req.params.runId)));
 
@@ -282,6 +306,16 @@ app.delete('/api/flows/:id/chat/:key', wrap((req) => {
   return f;
 }));
 app.post('/api/flows/:id/chat/:key/apply', wrap((req) => engine.applyProposal(req.params.id, req.params.key, req.body.messageId, req.body.proposalId)));
+
+// ----- step library (spec 18) -----
+app.get('/api/library', wrap(() => store.listLibrary()));
+app.post('/api/library', wrap((req) => {
+  const f = need(req.body?.flow);
+  const s = f.steps.find((x) => x.id === req.body?.step);
+  if (!s) throw fail(404, 'Step no encontrado', 'STEP_NOT_FOUND');
+  return store.saveToLibrary(s, req.body?.name);
+}));
+app.delete('/api/library/:id', wrap((req) => store.deleteFromLibrary(req.params.id)));
 
 // ----- catalog / info -----
 app.get('/api/catalog', wrap((req) => ({

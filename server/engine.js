@@ -348,7 +348,9 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   // Provenance of every upstream edge (OBS-1); {{steps.X}} references are added as they resolve.
   const refs = [];
   const notePin = (name) => { if (!run.usedPins.includes(name)) run.usedPins.push(name); };
-  const rctx = { runId: run.id, refs, allowed: opts.ancestors && !step.input?.allowNonUpstream ? opts.ancestors : null, usePins: run.usePins, onPinned: notePin };
+  const rctx = { runId: run.id, refs, allowed: opts.ancestors && !step.input?.allowNonUpstream ? opts.ancestors : null, usePins: run.usePins, onPinned: notePin, reviewFeedback: opts.feedback || null, previousOutput: opts.previousOutput || null };
+  // <route to="X"> tags (spec 18): the step chooses destinations; removed from the output that flows on.
+  const takeRoutes = (txt) => { const x = P.extractRoutes(txt); rs.routes = x.routes; return x.clean; };
   rs.inputs = upstream.map((u) => ({ step: u.name, stepId: u.id, source: u.source || 'run', fromRunId: u.fromRunId || null, at: u.at || null, viaRef: false }));
   const addRefInputs = () => {
     for (const r of refs) {
@@ -410,7 +412,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         if (sig.aborted) break;
         const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid });
         log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 20000), isError: r.code !== 0 });
-        output = r.stdout.trim();
+        output = takeRoutes(r.stdout.trim());
         rs.exitCode = r.code;
         error = r.code !== 0 ? `exit ${r.code}: ${r.stderr.slice(0, 2000)}` : null;
         Object.assign(at, { endedAt: now(), status: error ? 'error' : 'success', error: error ? clipS(error, 500) : undefined });
@@ -448,7 +450,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       else {
         let tags = P.extractTags(r.text);
         for (const m of tags.remember) addMemory(flow.id, step.id, m, 'run');
-        output = tags.clean;
+        output = takeRoutes(tags.clean);
         if (wantsJson) {
           let c = checkJson(output);
           if (c.error && c.fixable && sessionId && !sig.aborted) {
@@ -459,7 +461,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
               sessionId = r2.sessionId || sessionId;
               tags = P.extractTags(r2.text);
               for (const m of tags.remember) addMemory(flow.id, step.id, m, 'run');
-              c = checkJson(tags.clean);
+              c = checkJson(takeRoutes(tags.clean));
               if (!c.error || c.json !== undefined) output = c.output;
             }
           }
@@ -481,7 +483,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         log({ kind: 'hook', text: 'onSuccess' });
         const r = await hooks.onSuccess(ctx);
         if (typeof r === 'string') output = r;
-        else if (r && typeof r === 'object') { if (typeof r.output === 'string') output = r.output; if ('json' in r) json = r.json; }
+        else if (r && typeof r === 'object') { if (typeof r.output === 'string') output = r.output; if ('json' in r) json = r.json; if (Array.isArray(r.routes)) rs.routes = r.routes.map((x) => (typeof x === 'string' ? { to: x, payload: null } : { to: String(x.to), payload: x.payload == null ? null : typeof x.payload === 'string' ? x.payload : JSON.stringify(x.payload) })); }
       }
       // Assertions on the final handoff (VER-5/6)
       const list = Array.isArray(step.assertions) ? step.assertions.filter((a) => a && a.type && !a.disabled) : [];
@@ -550,7 +552,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     const jsonFits = rs.json === undefined || JSON.stringify(rs.json).length < 300000;
     setStepRun(flow.id, step.id, {
       status: rs.status, endedAt: rs.endedAt, output: rs.output, json: jsonFits ? rs.json : undefined, files: rs.files, actions: rs.actions,
-      pinned: !!rs.pinned, error: rs.error || null, code: rs.code || null, sessionId: rs.sessionId || null, runId: run.id,
+      pinned: !!rs.pinned, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, sessionId: rs.sessionId || null, runId: run.id,
       assertions: rs.assertions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: rs.attempts.length,
     });
     emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
@@ -609,44 +611,90 @@ export function externalRunProblem(flow, { only = null, vars = null } = {}) {
   return null;
 }
 
+/** Paused runs waiting for a review decision: `${runId}:${stepId}` -> {when, resolve} (spec 18 breaks). */
+const pendingReviews = new Map();
+const REVIEW_ACTIONS = { before: ['continue', 'skip', 'stop'], after: ['continue', 'edit', 'retry', 'stop'] };
+const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed']);
+
 /**
  * Run the whole flow (or a single step with `only`). Returns runId immediately.
  * - vars: per-run variables merged over the flow's; never written to the flow (REL-3).
  * - usePins: UI runs true; external runs false unless asked (EXT-10).
- * - deadlineSec: whole-run deadline (default flow.runTimeoutSec or 3600, max 14400) (REL-7).
+ * - deadlineSec: whole-run deadline (default flow.runTimeoutSec or 3600, max 14400) (REL-7). Paused time does not count.
+ * - breakpoints: honour step.breakpoint (before|after|both): the run pauses until resumeRun() (spec 18). UI runs: on.
+ * Arrows (spec 18): each edge may carry a condition (`when`) and a JSON field (`pick`); a step whose incoming
+ * arrows are all inactive is skipped as 'not_routed' (not a failure) and its own arrows stay inactive.
  * The flow is snapshotted at start: edits made while it runs don't change this run (REL-4).
  */
-export function startRun(flowId, { input = '', only = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null } = {}) {
+export function startRun(flowId, { input = '', only = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null, breakpoints = false } = {}) {
   const flow = store.getFlow(flowId);
   if (!flow) throw new Error('Flujo no encontrado');
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
   const levels = only ? [[only]] : topoLevels(flow);
   const runVars = { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) };
   const rflow = { ...structuredClone(flow), vars: runVars };
-  const snap = { steps: flow.steps.map(({ lastRun, memory, chatSessionId, chatContextHash, position, ...s }) => s), edges: flow.edges.map(({ source, target }) => ({ source, target })), vars: runVars, cwd: flow.cwd };
+  const snap = { steps: flow.steps.map(({ lastRun, memory, chatSessionId, chatContextHash, position, ...s }) => s), edges: flow.edges.map(({ source, target, when, pick }) => ({ source, target, when, pick })), vars: runVars, cwd: flow.cwd };
   const limit = clampInt(deadlineSec, 10, 14400, clampInt(flow.runTimeoutSec, 10, 14400, 3600));
   const t0 = now();
   const run = {
     id: store.uid('r_'), flowId, input, only, trigger, vars: runVars, usePins: !!usePins, idempotencyKey: idempotencyKey || null,
     flowSnapshotHash: crypto.createHash('sha256').update(JSON.stringify(snap)).digest('hex'), flowUpdatedAt: flow.updatedAt,
-    deadlineAt: t0 + limit * 1000, eventSeq: 0, status: 'running', startedAt: t0, steps: {}, usedPins: [],
+    deadlineAt: t0 + limit * 1000, eventSeq: 0, status: 'running', startedAt: t0, steps: {}, usedPins: [], breakpoints: !!breakpoints, pauses: [],
   };
   const controller = new AbortController();
   activeRuns.set(run.id, { controller, flowId, run });
   store.saveRun(run);
   emit({ type: 'run.started', flowId, runId: run.id, only, trigger });
-  const deadline = setTimeout(() => { run.timedOut = true; controller.abort(); }, limit * 1000);
+  const onDeadline = () => { run.timedOut = true; controller.abort(); };
+  let deadline = setTimeout(onDeadline, limit * 1000);
   const flusher = setInterval(() => { if (run.dirty) { run.dirty = false; try { store.saveRun(run); } catch {} } }, 5000);
 
+  // ---- breaks: the deadline clock stops while someone reviews ----
+  let pausedAt = null;
+  const pauseClock = () => { if (pausedAt) return; pausedAt = now(); clearTimeout(deadline); };
+  const resumeClock = () => {
+    if (!pausedAt || run.pauses.length) return;
+    const d = now() - pausedAt; pausedAt = null;
+    run.deadlineAt += d; run.pausedMs = (run.pausedMs || 0) + d;
+    deadline = setTimeout(onDeadline, Math.max(0, run.deadlineAt - now()));
+  };
+  const pauseAt = (step, when, info) => new Promise((resolve) => {
+    const key = `${run.id}:${step.id}`;
+    const p = { stepId: step.id, step: step.name, when, at: now(), actions: REVIEW_ACTIONS[when], ...info };
+    run.pauses.push(p); run.status = 'paused'; pauseClock();
+    if (when === 'before') run.steps[step.id] = { status: 'paused', pausedWhen: 'before', output: '', events: [], startedAt: now() };
+    else run.steps[step.id].status = 'paused';
+    setStepRun(flowId, step.id, { status: 'paused', runId: run.id });
+    emit({ type: 'step.status', flowId, runId: run.id, stepId: step.id, status: 'paused' });
+    store.saveRun(run);
+    emit({ type: 'run.paused', flowId, runId: run.id, stepId: step.id, step: step.name, when });
+    const onAbort = () => done({ action: 'stop' });
+    function done(d) {
+      if (!pendingReviews.has(key)) return;
+      pendingReviews.delete(key);
+      controller.signal.removeEventListener('abort', onAbort);
+      run.pauses = run.pauses.filter((x) => x !== p);
+      if (!run.pauses.length && !controller.signal.aborted) run.status = 'running';
+      resumeClock();
+      emit({ type: 'run.resumed', flowId, runId: run.id, stepId: step.id, action: d.action });
+      resolve(d);
+    }
+    pendingReviews.set(key, { when, resolve: done });
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+  });
+
   (async () => {
-    const data = new Map(); // stepId -> { output, json, files, actions } produced in this run
+    const data = new Map(); // stepId -> { output, json, files, actions, routes } produced in this run
     const summaries = new Map();
     const failed = new Set();
+    const notRouted = new Set();
     const skip = (id, reason, text) => {
-      run.steps[id] = { status: 'skipped', skipReason: reason, output: '', events: [{ kind: 'error', text, t: now(), seq: ++run.eventSeq }] };
-      setStepRun(flowId, id, { status: 'skipped', endedAt: now(), runId: run.id, error: text, code: null });
+      const benign = reason === 'not_routed' || reason === 'review';
+      run.steps[id] = { status: 'skipped', skipReason: reason, output: '', events: [{ kind: benign ? 'hook_log' : 'error', text, t: now(), seq: ++run.eventSeq }] };
+      setStepRun(flowId, id, { status: 'skipped', endedAt: now(), runId: run.id, error: benign ? null : text, skipReason: reason, code: null });
       emit({ type: 'step.status', flowId, runId: run.id, stepId: id, status: 'skipped' });
     };
+    const evalCond = (when, output, json) => evalAssertion(when, output, json);
     try {
       for (const level of levels) {
         const queue = [...level];
@@ -655,30 +703,76 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
             const id = queue.shift();
             const step = rflow.steps.find((s) => s.id === id);
             if (!step) continue;
-            const ups = rflow.edges.filter((e) => e.target === id).map((e) => e.source);
-            const bad = !only && ups.find((u) => failed.has(u));
+            const inEdges = rflow.edges.filter((e) => e.target === id);
+            const bad = !only && inEdges.map((e) => e.source).find((u) => failed.has(u));
             if (bad) {
               failed.add(id);
               skip(id, 'upstream_failed', `Omitido: falló o se omitió "${rflow.steps.find((s) => s.id === bad)?.name || bad}".`);
               continue;
             }
-            const upstream = ups.map((u) => {
-              const s = rflow.steps.find((x) => x.id === u);
-              if (data.has(u)) { const d = data.get(u); return { id: u, name: s?.name || u, output: d.output || '', json: d.json, source: d.pinned ? 'pinned' : 'run', fromRunId: run.id }; }
-              const d = s ? P.stepData(s, null, null, { usePins: run.usePins }) : { output: '', source: 'none' };
-              if (d.source === 'pinned' && s && !run.usedPins.includes(s.name)) run.usedPins.push(s.name);
-              return { id: u, name: s?.name || u, output: d.output || '', json: d.json, source: d.source, fromRunId: d.fromRunId, at: d.at };
-            });
-            const r = await executeStep(rflow, step, input, run, controller.signal, upstream, { data, summaries, force: !!only, ancestors: only ? null : ancestorsOf(rflow, id) });
-            data.set(id, { output: r.output, json: r.json, files: r.files || [], actions: r.actions || [], pinned: !!r.pinned });
-            if (FAILED.has(r.status) && !(r.status === 'skipped' && r.skipReason === 'hook')) failed.add(id);
+            // Which arrows carry data in this run, and what each one carries.
+            const upstream = []; const inactive = [];
+            for (const e of inEdges) {
+              const u = e.source; const s = rflow.steps.find((x) => x.id === u);
+              if (!only && notRouted.has(u)) { inactive.push(`"${s?.name || u}" no se ejecutó`); continue; }
+              let d; let src; let fromRunId = run.id; let at;
+              if (data.has(u)) { d = data.get(u); src = d.pinned ? 'pinned' : 'run'; }
+              else {
+                d = s ? { ...P.stepData(s, null, null, { usePins: run.usePins }), routes: s.lastRun?.routes } : { output: '', source: 'none' };
+                if (d.source === 'pinned' && s && !run.usedPins.includes(s.name)) run.usedPins.push(s.name);
+                src = d.source; fromRunId = d.fromRunId; at = d.at;
+              }
+              // A single-step run tests the step: conditions are not evaluated, the field selection is.
+              const ep = P.edgePayload(only ? { ...e, when: null } : e, d, step, evalCond);
+              if (!ep.active) { inactive.push(`"${s?.name || u}": ${ep.reason}`); continue; }
+              upstream.push({ id: u, name: s?.name || u, output: ep.output, json: ep.json, source: src, fromRunId, at, via: P.edgeVia(e) || (ep.routed ? 'elegido por el step' : ''), edgeId: e.id, warning: ep.warning });
+            }
+            if (!only && inEdges.length && !upstream.length) {
+              notRouted.add(id);
+              skip(id, 'not_routed', `No se ejecuta: ninguna flecha de entrada pasa datos en esta ejecución (${inactive.join('; ')}).`);
+              continue;
+            }
+            const brk = run.breakpoints ? step.breakpoint || '' : '';
+            if (brk === 'before' || brk === 'both') {
+              const d = await pauseAt(step, 'before', { inputs: upstream.map((u) => ({ step: u.name, via: u.via || undefined, output: clipS(u.output, 4000), json: u.json })), input: clipS(input, 4000) });
+              if (d.action === 'stop') { controller.abort(); break; }
+              if (d.action === 'skip') { skip(id, 'review', 'Omitido en el break (antes) por el revisor.'); data.set(id, { output: '', json: undefined, files: [], actions: [], routes: [] }); continue; }
+            }
+            const opts = { data, summaries, force: !!only, ancestors: only ? null : ancestorsOf(rflow, id) };
+            let r = await executeStep(rflow, step, input, run, controller.signal, upstream, opts);
+            for (const u of upstream) if (u.warning) r.warnings?.push(`Flecha desde "${u.name}": ${u.warning}.`);
+            let rounds = 0;
+            while ((brk === 'after' || brk === 'both') && r.status === 'success' && !controller.signal.aborted) {
+              const d = await pauseAt(step, 'after', { output: clipS(r.output, 20000), json: r.json, routes: r.routes, round: rounds });
+              if (d.action === 'retry') {
+                rounds++;
+                r = await executeStep(rflow, step, input, run, controller.signal, upstream, { ...opts, force: true, feedback: String(d.feedback || 'Rehaz la salida corrigiendo lo necesario.').slice(0, 4000), previousOutput: r.output });
+                r.reviewRounds = rounds;
+                continue;
+              }
+              if (d.action === 'stop') { Object.assign(r, { status: 'stopped', code: 'STOPPED', error: 'Detenido en el break por el revisor' }); controller.abort(); }
+              else {
+                if (d.action === 'edit') {
+                  if (d.output !== undefined) r.output = String(d.output);
+                  if (d.json !== undefined) r.json = d.json;
+                  r.reviewed = { action: 'edit', at: now() };
+                } else r.reviewed = { action: 'continue', at: now() };
+                r.status = 'success';
+              }
+              setStepRun(flowId, id, { status: r.status, output: r.output, json: r.json, reviewed: r.reviewed || null, code: r.code || null, error: r.error || null });
+              emit({ type: 'step.status', flowId, runId: run.id, stepId: id, status: r.status });
+              store.saveRun(run);
+              break;
+            }
+            data.set(id, { output: r.output, json: r.json, files: r.files || [], actions: r.actions || [], pinned: !!r.pinned, routes: r.routes || [] });
+            if (FAILED.has(r.status) && !(r.status === 'skipped' && NOT_A_FAILURE.has(r.skipReason))) failed.add(id);
           }
         };
         await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL, queue.length) }, worker));
         if (controller.signal.aborted) break;
       }
       if (controller.signal.aborted) {
-        for (const id of levels.flat()) if (!run.steps[id]) skip(id, run.timedOut ? 'deadline' : 'cancelled', run.timedOut ? 'Omitido: se agotó el tiempo máximo de la ejecución.' : 'Omitido: la ejecución se detuvo.');
+        for (const id of levels.flat()) if (!run.steps[id] || run.steps[id].status === 'paused') skip(id, run.timedOut ? 'deadline' : 'cancelled', run.timedOut ? 'Omitido: se agotó el tiempo máximo de la ejecución.' : 'Omitido: la ejecución se detuvo.');
       }
       const anyTimeout = Object.values(run.steps).some((x) => x.status === 'timeout');
       run.status = controller.signal.aborted ? (run.timedOut ? 'timeout' : 'stopped') : failed.size ? (anyTimeout ? 'timeout' : 'error') : 'success';
@@ -687,6 +781,8 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
       run.status = 'error'; run.error = e.message;
     }
     clearTimeout(deadline); clearInterval(flusher);
+    for (const k of [...pendingReviews.keys()]) if (k.startsWith(`${run.id}:`)) pendingReviews.get(k).resolve({ action: 'stop' });
+    run.pauses = [];
     run.endedAt = now();
     run.totals = runTotals(run);
     delete run.dirty;
@@ -695,6 +791,21 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     emit({ type: 'run.finished', flowId, runId: run.id, status: run.status, error: run.error });
   })();
   return run.id;
+}
+
+/** Decision on a paused step (spec 18). body: {action, output?, json?, feedback?}. stepId optional when only one step is paused. */
+export function resumeRun(flowId, runId, stepId, body = {}) {
+  const a = activeRuns.get(runId);
+  if (!a || a.flowId !== flowId) throw Object.assign(new Error('Ejecución no encontrada o ya terminada'), { status: 404, code: 'RUN_NOT_FOUND' });
+  const sid = stepId || (a.run.pauses.length === 1 ? a.run.pauses[0].stepId : null);
+  if (!sid) throw Object.assign(new Error(a.run.pauses.length ? 'Hay varios steps en pausa: indica "step"' : 'La ejecución no está en pausa'), { status: 409, code: a.run.pauses.length ? 'STEP_REQUIRED' : 'NOT_PAUSED' });
+  const p = pendingReviews.get(`${runId}:${sid}`);
+  if (!p) throw Object.assign(new Error('Ese step no está en pausa'), { status: 409, code: 'NOT_PAUSED' });
+  const action = body.action || 'continue';
+  if (!REVIEW_ACTIONS[p.when].includes(action)) throw Object.assign(new Error(`Acción inválida en un break "${p.when}": usa ${REVIEW_ACTIONS[p.when].join(', ')}`), { status: 400, code: 'BAD_ACTION' });
+  if (action === 'edit' && body.output === undefined && body.json === undefined) throw Object.assign(new Error('Para "edit" envía "output" y/o "json"'), { status: 400, code: 'BAD_ACTION' });
+  p.resolve({ action, output: body.output, json: body.json, feedback: body.feedback });
+  return { runId, stepId: sid, action };
 }
 
 function runTotals(run) {
@@ -739,10 +850,10 @@ export function recoverStaleRuns() {
   const at = now();
   for (const f of store.listFlows()) {
     for (const r of store.rawRuns(f.id)) {
-      if (r.status !== 'running' || activeRuns.has(r.id)) continue;
+      if (!['running', 'paused'].includes(r.status) || activeRuns.has(r.id)) continue;
       Object.assign(r, { status: 'interrupted', error: msg, endedAt: at });
       for (const s of Object.values(r.steps || {})) {
-        if (s.status !== 'running' && s.status !== 'queued') continue;
+        if (!['running', 'queued', 'paused'].includes(s.status)) continue;
         Object.assign(s, { status: 'interrupted', error: msg, code: 'INTERRUPTED', endedAt: at });
         // Processes the dead server started (claude, shells) may still be running: kill their trees.
         for (const pid of s.pids || []) killPid(pid);
@@ -752,7 +863,8 @@ export function recoverStaleRuns() {
       store.saveRun(r); n++;
     }
     const full = store.getFlow(f.id);
-    if (full?.steps.some((s) => s.lastRun?.status === 'running' || s.lastRun?.status === 'queued')) store.updateFlow(f.id, (fl) => { for (const s of fl.steps) if (s.lastRun?.status === 'running' || s.lastRun?.status === 'queued') Object.assign(s.lastRun, { status: 'interrupted', error: msg, code: 'INTERRUPTED', endedAt: at }); });
+    const stale = (s) => ['running', 'queued', 'paused'].includes(s.lastRun?.status);
+    if (full?.steps.some(stale)) store.updateFlow(f.id, (fl) => { for (const s of fl.steps) if (stale(s)) Object.assign(s.lastRun, { status: 'interrupted', error: msg, code: 'INTERRUPTED', endedAt: at }); });
   }
   return n;
 }
@@ -950,7 +1062,8 @@ export function waitRun(flowId, runId, timeoutMs = 15 * 60000) {
     const finished = () => { const r = store.getRun(flowId, runId); return r && r.status !== 'running' ? r : null; };
     const already = finished();
     if (already) return resolve(already);
-    const onMsg = (m) => { if (m.type === 'run.finished' && m.runId === runId) { cleanup(); resolve(store.getRun(flowId, runId)); } };
+    // A paused run (break) also ends the wait: the caller gets status 'paused' and decides with /resume.
+    const onMsg = (m) => { if ((m.type === 'run.finished' || m.type === 'run.paused') && m.runId === runId) { cleanup(); resolve(m.type === 'run.paused' ? getRunLive(flowId, runId) : store.getRun(flowId, runId)); } };
     const timer = setTimeout(() => { cleanup(); resolve({ ...getRunLive(flowId, runId), waitTimedOut: true }); }, timeoutMs);
     const cleanup = () => { clearTimeout(timer); bus.off('msg', onMsg); };
     bus.on('msg', onMsg);
@@ -964,7 +1077,7 @@ export function runSummary(flow, run) {
   const nz = (a) => (a?.length ? a : undefined);
   const steps = Object.entries(run.steps || {}).map(([id, s]) => ({
     step: name(id), stepId: id, status: s.status, code: s.code || undefined, output: s.output || '', json: s.json,
-    files: nz(s.files), actions: nz(s.actions), pinned: s.pinned || undefined, error: s.error || undefined, skipReason: s.skipReason || undefined,
+    files: nz(s.files), actions: nz(s.actions), routes: nz(s.routes), reviewed: s.reviewed || undefined, pinned: s.pinned || undefined, error: s.error || undefined, skipReason: s.skipReason || undefined,
     exitCode: s.exitCode, durationMs: s.durationMs, usage: s.usage, attempts: nz(s.attempts), inputs: nz(s.inputs), assertions: nz(s.assertions), warnings: nz(s.warnings),
   }));
   const sinks = run.only ? [run.only] : flow.steps.filter((s) => !flow.edges.some((e) => e.source === s.id)).map((s) => s.id);
@@ -973,7 +1086,7 @@ export function runSummary(flow, run) {
   return {
     flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, startedAt: run.startedAt, endedAt: run.endedAt, deadlineAt: run.deadlineAt,
     error: run.error, result, json: sinkJson.length === 1 ? sinkJson[0] : sinkJson.length ? sinkJson : undefined,
-    vars: run.vars, usedPins: run.usedPins || [], totals: run.totals || runTotals(run), flowSnapshotHash: run.flowSnapshotHash, steps,
+    vars: run.vars, usedPins: run.usedPins || [], pauses: nz(run.pauses), breakpoints: run.breakpoints || undefined, totals: run.totals || runTotals(run), flowSnapshotHash: run.flowSnapshotHash, steps,
   };
 }
 
