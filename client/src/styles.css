@@ -331,3 +331,8 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .req-help { margin: 4px 0; white-space: pre-wrap; }
 .req-sugg { border: 1px dashed var(--line); border-radius: 6px; padding: 8px; margin-top: 6px; }
 .warn-chip { color: var(--warn); border-color: var(--warn); }
+
+/* ---- spec 09: import quarantine ---- */
+.quarantine-bar { background: #3a1d1d; color: #ffd0d0; border-bottom: 1px solid var(--err); padding: 8px 14px; }
+.quarantine-bar ul { margin: 6px 0 0 18px; }
+.col { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }

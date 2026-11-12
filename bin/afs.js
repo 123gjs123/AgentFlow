@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // afs — run Agent Flow Studio flows from a terminal, script or CI.
 import fs from 'node:fs';
-import { call, ensureServer, flowPath, runAndWait, BASE } from './client.js';
+import { call, callUi, ensureServer, flowPath, runAndWait, BASE } from './client.js';
 
 const HELP = `afs — invoca flujos de Agent Flow Studio
 
@@ -12,6 +12,8 @@ Uso:
   afs status <flujo> <runId>                 Estado/salidas de una ejecución
   afs cancel <flujo> <runId>                 Cancela una ejecución en curso
   afs ui [--print]                           Abre la interfaz con su clave (o solo imprime el enlace)
+  afs export <flujo> [-o archivo] [--chats] [--runs] [--no-memory]   Exporta a <nombre>.afsflow.json
+  afs import <archivo.afsflow.json>          Importa un flujo (si trae comandos queda en revisión)
   afs resume <flujo> <runId> [opciones]      Decide en un break: --action continue|edit|retry|skip|stop
                                              (--step S, --output "texto", --feedback "corrección")
 
@@ -52,6 +54,10 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--follow') opts.follow = true;
   else if (a === '--dry-run') opts.dryRun = true;
   else if (a === '--breaks') opts.breaks = true;
+  else if (a === '-o' || a === '--out') opts.out = argv[++i];
+  else if (a === '--chats') opts.chats = true;
+  else if (a === '--runs') opts.runs = true;
+  else if (a === '--no-memory') opts.noMemory = true;
   else if (a === '--action') opts.action = argv[++i];
   else if (a === '--output') opts.output = argv[++i];
   else if (a === '--feedback') opts.feedback = argv[++i];
@@ -134,6 +140,28 @@ async function main() {
     if (opts.json) console.log(JSON.stringify(r, null, 2));
     else { console.log(`${r.status}`); for (const s of r.steps) console.log(`${ICON[s.status] || '·'} ${s.step}${s.code ? ` (${s.code})` : ''}`); if (r.result) console.log('\n' + r.result); }
     return r.status === 'running' ? 0 : exitOf(r);
+  }
+  if (cmd === 'export') {
+    if (!pos[0]) { err('Uso: afs export <flujo> [-o archivo] [--chats] [--runs] [--no-memory]'); return 2; }
+    const flows = await call('GET', '/flows');
+    const f = flows.find((x) => x.id === pos[0] || x.name.toLowerCase() === pos[0].toLowerCase());
+    if (!f) { err(`Flujo no encontrado: ${pos[0]}`); return 2; }
+    const b = await callUi('GET', `/api/flows/${f.id}/export?chats=${opts.chats ? 1 : 0}&runs=${opts.runs ? 1 : 0}&memory=${opts.noMemory ? 0 : 1}`);
+    const out = opts.out || `${f.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'flujo'}.afsflow.json`;
+    fs.writeFileSync(out, JSON.stringify(b, null, 2));
+    console.log(out);
+    for (const r of b.removed || []) err(`(no incluido: ${r})`);
+    return 0;
+  }
+  if (cmd === 'import') {
+    if (!pos[0]) { err('Uso: afs import <archivo.afsflow.json>'); return 2; }
+    let bundle;
+    try { bundle = JSON.parse(fs.readFileSync(pos[0], 'utf8')); } catch (e) { err(`No se pudo leer ${pos[0]}: ${e.message}`); return 2; }
+    const r = await callUi('POST', '/api/flows/import', { bundle });
+    console.log(opts.json ? JSON.stringify({ id: r.flow.id, name: r.flow.name, quarantine: r.quarantine, warnings: r.warnings }) : `${r.flow.name}  (${r.flow.id})`);
+    if (r.quarantine) err(`🔒 En revisión: ${r.quarantine.reasons.join(' · ')}\nRevísalo en la app y pulsa "Revisé este flujo, habilitar" antes de ejecutarlo.`);
+    for (const w of r.warnings) err(`⚠ ${w}`);
+    return 0;
   }
   if (cmd === 'resume') {
     if (pos.length < 2) { err('Uso: afs resume <flujo> <runId> --action continue|edit|retry|skip|stop [--step S] [--output T] [--feedback T]'); return 2; }

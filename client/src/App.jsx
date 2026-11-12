@@ -7,6 +7,7 @@ import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
 import { PreflightModal } from './Requirements.jsx';
+import { ExportModal, importFile, QuarantineBanner } from './ExportImport.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -44,6 +45,19 @@ export default function App() {
   const [reviewOpen, setReviewOpen] = useState(false);
   const [preflight, setPreflight] = useState(null); // {missing: n} for the header chip (spec 23)
   const [pfModal, setPfModal] = useState(null); // {retry: fn}
+  const [exportOpen, setExportOpen] = useState(false);
+  const importInput = useRef(null);
+  /** Import a .afsflow.json (spec 09): opens the new flow; quarantined ones show the review banner. */
+  async function onImport(files) {
+    for (const file of files) {
+      try {
+        const r = await importFile(file);
+        await loadFlows();
+        await openFlow(r.flow.id);
+        notify(`Importado “${r.flow.name}”${r.quarantine ? ' — en revisión: revisa lo que ejecuta antes de habilitarlo' : ''}${r.warnings.length ? ` · ${r.warnings.join(' · ')}` : ''}`);
+      } catch (e) { notify(`No se pudo importar ${file.name}: ${e.message}`); }
+    }
+  }
   const [stepTab, setStepTab] = useState('config');
   const [flowTab, setFlowTab] = useState('chat');
   const [rate, setRate] = useState(null);
@@ -414,6 +428,9 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           <button className="ghost" onClick={() => setModal('ai')} title="Describe el flujo y la IA lo arma con tus skills">✨ Con IA</button>
           <button className="ghost" onClick={() => createFlow('demo')} title="Crea un flujo de ejemplo con tus skills de QA">Demo</button>
         </span>
+        <button className="ghost" onClick={() => importInput.current?.click()} title="Importar un flujo (.afsflow.json)">⬆ Importar</button>
+        <input ref={importInput} type="file" accept=".json,application/json" multiple style={{ display: 'none' }} onChange={(e) => { onImport([...e.target.files]); e.target.value = ''; }} />
+        {flow && <button className="ghost" onClick={() => setExportOpen(true)} title="Exportar este flujo para compartirlo (.afsflow.json)">⬇ Exportar</button>}
         {flow && <button className="ghost" onClick={() => window.open(`?flow=${encodeURIComponent(flow.id)}`, '_blank')} title="Abrir este flujo en otra pestaña (cada pestaña puede tener su flujo; si dos editan el mismo, los cambios se combinan)">⧉</button>}
         {flow && <button className="ghost danger" onClick={deleteFlow} title="Eliminar flujo">🗑</button>}
         <div className="sep" />
@@ -435,7 +452,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
             <span className="muted small save">{saveState}</span>
             {preflight?.missing > 0 && <button className="ghost small warn-chip" onClick={() => setPfModal({})} title="Este flujo necesita cosas que faltan en esta máquina">⚠ Faltan {preflight.missing} requisito{preflight.missing > 1 ? 's' : ''}</button>}
             <div className="run-wrap" data-tour="run">
-              <button className="primary" onClick={() => setShowRun(!showRun)} disabled={!flow.steps.length}>▶ Ejecutar flujo</button>
+              <button className="primary" onClick={() => setShowRun(!showRun)} disabled={!flow.steps.length || !!flow.quarantine} title={flow.quarantine ? 'Flujo importado en revisión: habilítalo primero' : undefined}>▶ Ejecutar flujo</button>
               {showRun && (
                 <div className="popover">
                   <textarea rows={5} autoFocus value={runInput} onChange={(e) => setRunInput(e.target.value)} placeholder="Input del flujo (requerimiento, ticket, URL, JSON…)" />
@@ -450,6 +467,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         <HelpMenu onTour={() => setTourStep(0)} onGuide={(sec) => setModal({ help: sec })} />
       </header>
 
+      {flow?.quarantine && <QuarantineBanner flow={flow} onTrusted={(f) => { baseRef.current = f; flowRef.current = f; setFlow(f); notify('Flujo habilitado'); }} />}
       {flow ? (
         <main className="main">
           <section className="canvas" data-tour="canvas">
@@ -493,10 +511,11 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         <div className="welcome">
           <h2>Crea tu primer flujo</h2>
           <p className="muted">Cada step es un rol, agente, skill o comando. Corre con tu Claude Code (tu suscripción, skills y MCPs).</p>
-          <div className="row"><button className="primary" onClick={() => setModal('ai')}>✨ Describirlo y que la IA lo arme</button><button onClick={() => createFlow('demo')}>Flujo demo QA</button><button className="ghost" onClick={() => createFlow()}>+ Flujo vacío</button></div>
+          <div className="row"><button className="primary" onClick={() => setModal('ai')}>✨ Describirlo y que la IA lo arme</button><button onClick={() => createFlow('demo')}>Flujo demo QA</button><button className="ghost" onClick={() => createFlow()}>+ Flujo vacío</button><button className="ghost" onClick={() => importInput.current?.click()}>⬆ Importar flujo</button></div>
           <p className="muted small">¿Primera vez? <a onClick={() => setTourStep(0)}>Haz el recorrido guiado</a> o abre <a onClick={() => setModal({ help: 'start' })}>Ayuda</a>.</p>
         </div>
       )}
+      {exportOpen && flow && <ExportModal flow={flow} onClose={() => setExportOpen(false)} />}
       {pfModal && flow && <PreflightModal flow={flow} onClose={() => setPfModal(null)} onReady={pfModal.retry} />}
       {paused && flow && <div className="review-bar">⏸ Ejecución en pausa{paused.step ? ` en “${paused.step}”` : ''}: valida la salida para seguir <button className="primary small" onClick={() => setReviewOpen(true)}>Revisar</button></div>}
       {paused && reviewOpen && flow && <ReviewModal key={paused.runId} refresh={paused.nonce || 0} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}

@@ -12,6 +12,19 @@ export function token() {
   try { return JSON.parse(fs.readFileSync(path.join(process.env.AFS_DATA || path.join(ROOT, 'data'), 'config.json'), 'utf8')).token; } catch { return ''; }
 }
 
+/** UI access key of this installation (local commands like export/import use the UI API). */
+export function uiKey() {
+  if (process.env.AFS_UI_KEY) return process.env.AFS_UI_KEY;
+  try { return JSON.parse(fs.readFileSync(path.join(process.env.AFS_DATA || path.join(ROOT, 'data'), 'config.json'), 'utf8')).uiKey; } catch { return ''; }
+}
+/** Calls the local UI API (only works on this machine, with the UI key). */
+export async function callUi(method, url, body) {
+  const r = await fetch(BASE + url, { method, headers: { 'X-AFS-UI': uiKey(), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { status: r.status, code: j.code });
+  return j;
+}
+
 /** Calls /api/ext. Errors carry {status, code} from the server. */
 export async function call(method, url, body, headers = {}) {
   const r = await fetch(BASE + '/api/ext' + url, {

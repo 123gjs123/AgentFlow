@@ -1,6 +1,29 @@
 # 09 — Flow workspaces, export and import
 
-**Status:** Proposed
+**Status:** Export & import implemented (2026-11-12): WS-3, WS-4, WS-5, WS-6, WS-7 and WS-12, verified by `test/e2e/17-export-import.test.mjs`. The folder-per-flow storage and linked folders (WS-1, WS-2, WS-8 to WS-11) are still proposed.
+
+## Implementation notes (2026-11-12)
+
+**Bundle format.** `<slug>.afsflow.json` = `{format: "agent-flow-studio/flow", version: 1, exportedAt, app, flow, removed[], chats?, runs?}`.
+
+**What travels and what doesn't.**
+- Requirements (spec 23), context sources (spec 21), "Al terminar" (spec 22), assertions and breaks are part of `flow`, so the recipient sees what the flow needs before running it.
+- Never exported: Claude sessions, last runs and pins (pins unless asked), the API token and the UI key.
+- Secret-looking variable values are blanked unless asked.
+- The schedule is exported disabled.
+
+**Import.**
+- An import always creates a new flow. If the name already exists it gets " (importado)".
+- The flow is sanitized exactly like a UI save, and its machine state is cleared.
+- An initial version "Importado" is saved.
+- Chats and runs come along when present.
+
+**Quarantine (WS-7).** Any imported flow with something that would run on the importer's machine is quarantined: command steps, hooks, "Al terminar", command assertions, steps with Bash/Edit/Write, `bypassPermissions`, or requirement check commands.
+- Blocked while quarantined: runs (UI, single step, API, dry run, chat-triggered, schedule), step and general chats, and `/ask`, all with **423 `QUARANTINED`** and the reasons.
+- A save cannot remove the quarantine. Only **"Revisé este flujo, habilitar"** (`POST /api/flows/:id/trust`) lifts it.
+
+**CLI.** `afs export <flujo> [-o file] [--chats] [--runs] [--no-memory]` and `afs import <file>`. Both are local only and use the UI key.
+
 
 ## Summary
 

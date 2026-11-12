@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import * as store from './store.js';
 import { runClaude, killTree, isTransient } from './claude.js';
 import { resolveContext, contextAccess } from './sources.js';
+import { quarantineProblem } from './bundle.js';
 import { findAgent, findSkill } from './catalog.js';
 import * as P from './prompt.js';
 import { validate, parseSchema } from './schema.js';
@@ -632,6 +633,7 @@ export function ancestorsOf(flow, id) {
 export function externalRunProblem(flow, { only = null, vars = null } = {}) {
   const steps = only ? flow.steps.filter((s) => s.id === only) : flow.steps;
   const reqVars = new Set(Object.keys(vars || {}));
+  const qp = quarantineProblem(flow); if (qp) return qp;
   const cp = cwdProblem(flow); if (cp) return cp;
   if (!only && hasFinally(flow)) {
     for (const k of P.rawPlaceholders(flow.finally.command)) {
@@ -693,6 +695,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
   const flow = store.getFlow(flowId);
   if (!flow) throw new Error('Flujo no encontrado');
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
+  { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   { const cp = cwdProblem(flow); if (cp) throw Object.assign(new Error(cp.error), { status: cp.status, code: cp.code }); }
   const levels = only ? [[only]] : topoLevels(flow);
   const runVars = { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) };
@@ -983,6 +986,7 @@ export function runEvents(flow, run, after = 0, max = 500) {
 // ---------- chats ----------
 async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null }) {
   const flow = store.getFlow(flowId);
+  { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   const isFlow = key === '_flow';
   const step = isFlow ? null : flow.steps.find((s) => s.id === key);
   if (!isFlow && !step) throw new Error('Step no encontrado');
@@ -1091,6 +1095,7 @@ export async function applyProposal(flowId, key, messageId, proposalId) {
 export async function globalChat(flowId, message) {
   const key = '_global';
   const flow = store.getFlow(flowId);
+  { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   const history = store.getChat(flowId, key);
   const userMsg = store.appendChat(flowId, key, { id: store.uid('c_'), role: 'user', text: message, at: now() });
   emit({ type: 'chat.message', flowId, key, message: userMsg });

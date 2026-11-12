@@ -148,6 +148,8 @@ export function updateChatMsg(flowId, key, id, fn) {
   if (m) { fn(m); writeJson(chatFile(flowId, key), list); }
   return m;
 }
+/** Replaces a whole chat (import). */
+export const saveChat = (flowId, key, list) => writeJson(chatFile(flowId, key), (Array.isArray(list) ? list : []).slice(-300));
 export const clearChat = (flowId, key) => fs.rmSync(at('chats', safe(flowId), `${safe(key)}.json`), { force: true });
 export const clearAllChats = (flowId) => fs.rmSync(path.join(DATA, 'chats', safe(flowId)), { recursive: true, force: true });
 

@@ -36,6 +36,7 @@ Runs use your Claude Code login: your subscription, skills, agents and MCP conne
    - [Several tabs](#several-tabs)
    - [Simple and complex flows](#simple-and-complex-flows)
    - [Requirements: what a flow needs on the machine](#requirements-what-a-flow-needs-on-the-machine)
+   - [Sharing flows: export and import](#sharing-flows-export-and-import)
    - [Schedules](#schedules)
 6. [Running flows from outside](#running-flows-from-outside)
    - [External HTTP API](#external-http-api)
@@ -388,6 +389,22 @@ Flujo → **✅ Requisitos para usar este flujo** lists what a person needs befo
 
 They are checked before every run. If something required is missing, the run does not start: the UI shows **"Antes de ejecutar este flujo…"** with the instructions, and the API, `afs` and MCP answer `PREFLIGHT_FAILED` with the list. A header chip warns when the open flow is missing something. Recommended items never block.
 
+### Sharing flows: export and import
+
+**⬇ Exportar** downloads `<name>.afsflow.json`. It contains:
+- steps, arrows, variables, context, requirements, "Al terminar", assertions and breaks;
+- memory, chats, run history and pins only if you choose to include them.
+
+It never contains your sessions, your token or your UI key. Secret-looking variables are exported empty, and the schedule is exported disabled.
+
+**⬆ Importar** (in the toolbar, or on the welcome screen) creates a new flow; it never overwrites one. If the flow contains anything that would execute on your machine (commands, hooks, terminal or file-writing access, "Al terminar"), it opens **under review**:
+- a banner lists those things;
+- runs and chats stay blocked until you click **"Revisé este flujo, habilitar"**.
+
+Its requirements tell you what to install first.
+
+From a terminal: `afs export <flow> -o file.afsflow.json` and `afs import file.afsflow.json`.
+
 ### Schedules
 
 **Flujo → Programación**: run the flow every N minutes with a fixed input. A scheduled run does not start while the previous one is still running.
@@ -447,6 +464,8 @@ afs cancel <flow> <runId>
 afs resume <flow> <runId> --action continue|edit|retry|skip|stop [--step S] [--output T] [--feedback T]
 afs ask <flow> "question" [--step S]
 afs ui [--print]          # open the UI with its access key (or just print the link)
+afs export <flow> [-o file] [--chats] [--runs] [--no-memory]
+afs import <file.afsflow.json>
 ```
 
 - Exit codes: `0` success, `1` the run failed or was stopped, `2` usage error or the call itself failed (HTTP error, unreachable server, bad token), `3` timeout, `4` paused at a break.
@@ -604,7 +623,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **172 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **178 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

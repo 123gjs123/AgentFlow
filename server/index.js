@@ -17,6 +17,7 @@ import { lastInit, lastRateLimit, probeInit, claudeBin } from './claude.js';
 import { previewStep, definitionFile } from './context.js';
 import * as integ from './integrations.js';
 import { SOURCE_TYPES, checkSource } from './sources.js';
+import { exportFlow, importBundle, quarantineProblem, slug } from './bundle.js';
 import { REQ_TYPES, preflight, preflightMessage, suggestRequirements, createFromTemplate, clearPreflightCache } from './preflight.js';
 import os from 'node:os';
 
@@ -24,7 +25,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT || 4317);
 const HOST = process.env.HOST || '127.0.0.1';
 const app = express();
-app.use(express.json({ limit: '5mb' }));
+// Imports may carry chats and run history: bigger limit for that route only.
+const json5mb = express.json({ limit: '5mb' }); const json50mb = express.json({ limit: '50mb' });
+app.use((req, res, next) => (req.path === '/api/flows/import' ? json50mb : json5mb)(req, res, next));
 app.use(express.text({ type: ['text/*'], limit: '5mb' }));
 // Body parse errors (malformed JSON, too large): JSON error without stack traces or local paths.
 app.use((err, req, res, next) => {
@@ -276,6 +279,8 @@ function cleanRequirements(list) {
 }
 /** Blocks the start of a run when a required requirement is missing: 412 + what is missing and how to fix it. */
 async function gate(flow, res) {
+  const qp = quarantineProblem(flow);
+  if (qp) { res.status(qp.status); return { error: qp.error, code: qp.code, reasons: flow.quarantine.reasons }; }
   if (!(flow.requirements || []).length) return null;
   const pf = await preflight(flow);
   if (pf.ok) return null;
@@ -427,6 +432,7 @@ app.post('/api/flows/:id/chat/:key', wrap((req) => {
   need(id);
   const message = String(req.body?.message || '').trim();
   if (!message) throw new Error('Mensaje vacío');
+  { const qp = quarantineProblem(store.getFlow(id)); if (qp) throw fail(qp.status, qp.error, qp.code); }
   const p = key === '_global' ? engine.globalChat(id, message) : engine.stepChat(id, key, message, { improve: !!req.body?.improve });
   p.catch((e) => console.error('chat error', e));
   return { accepted: true };
@@ -443,6 +449,35 @@ app.delete('/api/flows/:id/chat/:key', wrap((req) => {
   return f;
 }));
 app.post('/api/flows/:id/chat/:key/apply', wrap((req) => engine.applyProposal(req.params.id, req.params.key, req.body.messageId, req.body.proposalId)));
+
+// ----- export / import (spec 09) -----
+app.get('/api/flows/:id/export', wrap((req, res) => {
+  const flow = need(req.params.id);
+  const b = exportFlow(flow, { chats: req.query.chats === '1', runs: req.query.runs === '1', memory: req.query.memory !== '0', pins: req.query.pins === '1', secrets: req.query.secrets === '1' });
+  res.setHeader('Content-Disposition', `attachment; filename="${slug(flow.name)}.afsflow.json"`);
+  return b;
+}));
+app.post('/api/flows/import', wrap((req) => {
+  const body = req.body || {};
+  const { flow, warnings, chats, runs } = importBundle(body.bundle, { edge: cleanEdge, sources: (x) => cleanSources(x), finally: (x) => cleanFinally(x), requirements: (x) => cleanRequirements(x) }, { name: typeof body.name === 'string' ? body.name : undefined });
+  engine.topoLevels(flow); // rejects cycles
+  const saved = store.saveFlow(flow);
+  if (chats) for (const [key, list] of Object.entries(chats)) {
+    const k = key === '_global' || key === '_flow' ? key : saved.steps.some((s) => s.id === key) ? key : null;
+    if (k && Array.isArray(list)) store.saveChat(saved.id, k, list.filter((m) => m && typeof m === 'object').map((m) => ({ ...m, status: m.status === 'running' ? 'done' : m.status })));
+  }
+  if (runs) for (const r of runs.slice(0, 50)) if (r && typeof r.id === 'string') store.saveRun({ ...r, flowId: saved.id, imported: true, status: ['running', 'paused'].includes(r.status) ? 'interrupted' : r.status, pauses: [] });
+  store.saveVersion(saved, { label: 'Importado' });
+  engine.bus.emit('msg', { type: 'flows.changed' });
+  return { flow: saved, quarantine: saved.quarantine || null, warnings };
+}));
+/** "Revisé este flujo, habilitar": lifts the import quarantine. */
+app.post('/api/flows/:id/trust', wrap((req) => {
+  need(req.params.id);
+  const f = store.updateFlow(req.params.id, (fl) => { delete fl.quarantine; engine.bumpRev(fl); });
+  engine.flowChanged(f);
+  return f;
+}));
 
 // ----- requirements / preflight (spec 23) -----
 app.get('/api/flows/:id/preflight', wrap(async (req) => preflight(need(req.params.id), { fresh: req.query.fresh === '1', probe: req.query.probe === '1' })));
