@@ -29,6 +29,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 19 | [Several browser tabs (different flows, or the same flow)](19-multi-tab.md) | Implemented (2026-11-12; e2e: `test/e2e/12-*`) |
 | 20 | [Undo/redo, versions, moving arrow ends, chat keys](20-history-versions-chat-keys.md) | Implemented (2026-11-12; e2e: `test/e2e/13-*`) |
 | 21 | [📎 Context: consultation sources](21-context-sources.md) | Implemented (2026-11-12; e2e: `test/e2e/14-*`) |
+| 22 | [Flows that build things: working directory, "Al terminar", run ids, restricted terminal](22-workspace-finally-access.md) | Implemented (2026-11-12; e2e: `test/e2e/15-*`) |
 
 **Status meanings**
 - **Implemented:** in `main` and verified end to end.

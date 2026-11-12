@@ -26,7 +26,7 @@ export function sourcesOf(flow, step) {
 }
 
 /** {{vars.x}} / {{input}} in paths, URLs and keys ("the ticket that arrives as input"). */
-const renderRef = (v, flow, input) => P.render(String(v || ''), { flow, vars: flow.vars, input }).trim();
+const renderRef = (v, flow, input, runId) => P.render(String(v || ''), { flow, vars: flow.vars, input, runId }).trim();
 const absPath = (p, flow) => (path.isAbsolute(p) ? p : path.resolve(flow.cwd && fs.existsSync(flow.cwd) ? flow.cwd : process.cwd(), p));
 const isKeys = (s) => /^[A-Z][A-Z0-9_]+-\d+(\s*[,\s]\s*[A-Z][A-Z0-9_]+-\d+)*$/.test(s);
 
@@ -45,7 +45,7 @@ function countFiles(dir, max = 5000, depth = 6) {
  * One source → its index line + the access it needs. Only checks that local paths exist (no reading, no fetching).
  * {label, type, scope, ref, line, tools[], addDirs[], warnings[], ok}
  */
-export function resolveSource(src, { flow, input = '' } = {}) {
+export function resolveSource(src, { flow, input = '', runId } = {}) {
   const out = { label: sourceLabel(src), type: src.type, scope: src.scope || 'step', ref: '', line: '', tools: [], addDirs: [], warnings: [], ok: true };
   // Without a name, the label is the reference AFTER templates ({{input}} → the real path/key).
   const L = () => src.label || out.ref || refOf(src) || src.type;
@@ -54,7 +54,7 @@ export function resolveSource(src, { flow, input = '' } = {}) {
   switch (src.type) {
     case 'file':
     case 'folder': {
-      const p = renderRef(src.path, flow, input);
+      const p = renderRef(src.path, flow, input, runId);
       out.ref = p;
       if (!p) { out.ok = false; warn('falta la ruta'); break; }
       const abs = absPath(p, flow); out.ref = abs;
@@ -70,7 +70,7 @@ export function resolveSource(src, { flow, input = '' } = {}) {
       break;
     }
     case 'url': {
-      const u = renderRef(src.url, flow, input);
+      const u = renderRef(src.url, flow, input, runId);
       out.ref = u; out.tools.push('WebFetch');
       if (!/^https?:\/\//i.test(u)) { out.ok = false; warn('la URL debe empezar con http:// o https://'); }
       if (/atlassian\.net\/(wiki|browse|jira)|\/confluence\//i.test(u)) warn('parece Confluence o Jira: usa ese tipo de fuente (con WebFetch la página pide login; el MCP de Atlassian sí la lee)');
@@ -78,7 +78,7 @@ export function resolveSource(src, { flow, input = '' } = {}) {
       break;
     }
     case 'jira': {
-      const r = renderRef(src.ref, flow, input);
+      const r = renderRef(src.ref, flow, input, runId);
       out.ref = r; out.tools.push(...JIRA_TOOLS);
       if (!r) { out.ok = false; warn('falta el ticket, la iniciativa o la consulta JQL'); break; }
       const keys = isKeys(r) ? r.split(/[\s,]+/).filter(Boolean) : null;
@@ -88,7 +88,7 @@ export function resolveSource(src, { flow, input = '' } = {}) {
       break;
     }
     case 'confluence': {
-      const r = renderRef(src.ref, flow, input);
+      const r = renderRef(src.ref, flow, input, runId);
       out.ref = r; out.tools.push(...CONFLUENCE_TOOLS);
       if (!r) { out.ok = false; warn('falta la página (URL, id o título)'); break; }
       out.line = `📘 ${L()}: Confluence ${/^https?:/i.test(r) ? r : /^\d+$/.test(r) ? `página id ${r}` : `página "${r}" (búscala con searchConfluenceUsingCql)`}${src.children ? ' y sus páginas hijas' : ''} — consúltala con getConfluencePage${src.children ? ' / getConfluencePageDescendants' : ''}${note}`;
@@ -105,12 +105,12 @@ export function resolveSource(src, { flow, input = '' } = {}) {
  * The section only says what is available and how to reach it; the content is consulted by the model if its
  * skill/agent/role needs it.
  */
-export function resolveContext(flow, step, { input = '' } = {}) {
+export function resolveContext(flow, step, { input = '', runId } = {}) {
   const res = { sections: [], tools: [], addDirs: [], warnings: [], sources: [], lines: [] };
   const sources = sourcesOf(flow, step);
   if (!sources.length) return res;
   for (const s of sources) {
-    const r = resolveSource(s, { flow, input });
+    const r = resolveSource(s, { flow, input, runId });
     res.lines.push(`- ${r.line}${r.scope === 'flow' ? ' (del flujo)' : ''}`);
     res.tools.push(...r.tools); res.addDirs.push(...r.addDirs); res.warnings.push(...r.warnings);
     res.sources.push({ label: r.label, type: r.type, scope: r.scope, ref: r.ref, ok: r.ok });

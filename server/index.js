@@ -249,7 +249,7 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   const d = v.flow;
   const steps = (d.steps || []).map((s) => { const p = prev.get(s.id); return p ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId, chatContextHash: p.chatContextHash } : { ...s, memory: [], lastRun: null }; });
   for (const s of cur.steps) if (!steps.some((x) => x.id === s.id)) store.clearChat(cur.id, s.id);
-  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, contextSources: d.contextSources, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
+  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, contextSources: d.contextSources, finally: d.finally, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
   engine.topoLevels(next);
   const saved = store.saveFlow(next);
   engine.syncSchedule(saved);
@@ -257,6 +257,13 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
   return saved;
 }));
+
+/** "Al terminar" (spec 22): one command run after every full run. */
+function cleanFinally(f) {
+  if (f === null) return null;
+  if (!f || typeof f !== 'object') return undefined;
+  return { command: String(f.command || '').slice(0, 20000), shell: ['powershell', 'bash', 'cmd'].includes(f.shell) ? f.shell : 'powershell', timeoutSec: Math.min(3600, Math.max(5, Number(f.timeoutSec) || 300)), ...(f.disabled ? { disabled: true } : {}) };
+}
 
 // Context sources (spec 21): only known types and fields, bounded sizes.
 function cleanSources(list) {
@@ -326,7 +333,7 @@ app.put('/api/flows/:id', wrap((req, res) => {
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
-  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, steps, edges };
+  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, steps, edges };
   engine.topoLevels(next); // throws on cycles
   next.rev = (cur.rev || 0) + 1;
   delete next.baseRev;

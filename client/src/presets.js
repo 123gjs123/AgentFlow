@@ -8,6 +8,9 @@ export const ACCESS = [
   { id: 'atlassian', label: 'Leer y escribir en Jira / Confluence', desc: 'Puede comentar, crear issues/páginas y transicionar. Úsalo en steps de publicación.', tools: `${READ} ${RA}`, perm: '' },
   { id: 'edit', label: 'Editar archivos', desc: 'Lectura + crear/editar archivos en el directorio del flujo (sin terminal).', tools: `${READ} Edit Write`, perm: 'acceptEdits' },
   { id: 'dev', label: 'Editar + terminal', desc: 'Lectura, edición y comandos (Bash). Para automatizar y correr tests.', tools: `${READ} Edit Write Bash`, perm: 'acceptEdits' },
+  // Spec 22: terminal limited to git (no push) and docker; no web. Good for repos and containers (also Argo/kubectl via "Personalizado").
+  { id: 'dev-restricted', label: 'Editar + terminal restringida (git sin push, docker)', desc: 'Edita archivos y solo puede ejecutar git (status/diff/log/add/commit/switch/fetch…, sin push) y docker / docker compose. Sin web. Para repos y contenedores.', tools: `Read Grep Glob Skill Edit Write ${['git status', 'git diff', 'git log', 'git show', 'git add', 'git commit', 'git switch', 'git checkout', 'git fetch', 'git branch', 'git rev-parse', 'docker', 'docker compose'].map((c) => `Bash(${c}:*)`).join(' ')}`, perm: 'acceptEdits' },
+  { id: 'read-local', label: 'Solo lectura local (sin web)', desc: 'Lee archivos del proyecto y usa skills; sin acceso a internet.', tools: 'Read Grep Glob Skill', perm: '' },
   { id: 'none', label: 'Sin herramientas', desc: 'Solo razona con el input que recibe. Lo más rápido y barato.', tools: '', perm: '' },
 ];
 const norm = (s) => String(s || '').split(/[\s,]+/).filter(Boolean).sort().join(' ');

@@ -28,6 +28,14 @@ const activeChats = new Map(); // `${flowId}:${key}` -> controller
 
 const now = () => Date.now();
 const flowCwd = (flow) => (flow.cwd && fs.existsSync(flow.cwd) ? flow.cwd : os.homedir());
+/** Spec 22 (B1): a configured working directory that does not exist is an error, never a silent fallback to home. */
+export function cwdProblem(flow) {
+  if (flow.cwd && !fs.existsSync(flow.cwd)) return { status: 422, code: 'CWD_MISSING', error: `El directorio de trabajo del flujo no existe: ${flow.cwd}. Créalo o corrige "Directorio de trabajo" (los steps no se ejecutan en tu carpeta de usuario por error).` };
+  return null;
+}
+/** Steps that can change files or run commands. */
+export const stepWrites = (step) => step.kind === 'command' || /(^|[\s,])(Edit|Write|Bash|NotebookEdit)\b/.test(String(step.allowedTools || '')) || step.permissionMode === 'acceptEdits' || step.permissionMode === 'bypassPermissions';
+export const cwdWarning = (flow, step) => (!flow.cwd && stepWrites(step) ? `El flujo no tiene directorio de trabajo: este step puede editar o ejecutar comandos y lo hará en tu carpeta de usuario (${os.homedir()}). Define "Directorio de trabajo" en la pestaña Flujo.` : null);
 
 // ---------- graph ----------
 export function topoLevels(flow) {
@@ -397,6 +405,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   let output = ''; let json; let error = null; let sessionId = null;
   try {
     if (hookCompileError) throw hookCompileError;
+    { const cp = cwdProblem(flow); if (cp) throw Object.assign(new Error(cp.error), { code: cp.code }); const cw = cwdWarning(flow, step); if (cw) rs.warnings.push(cw); }
     if (hooks.onStart) {
       log({ kind: 'hook', text: 'onStart' });
       const r = await hooks.onStart(ctx);
@@ -455,7 +464,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         }
       }
       // Attached context (documents, folders, pages, Jira, Confluence) — spec 21
-      const cx = await resolveContext(flow, step, { input: ctx.input });
+      const cx = await resolveContext(flow, step, { input: ctx.input, runId: run.id });
       rctx.contextSources = cx.sections;
       for (const w of cx.warnings) rs.warnings.push(w);
       if (cx.sources.length) log({ kind: 'hook_log', text: `📎 Fuentes de consulta disponibles: ${cx.sources.map((x) => `${x.label}${x.ok ? '' : ' (⚠)'}`).join(' · ')} — el modelo las consulta si las necesita` });
@@ -623,6 +632,12 @@ export function ancestorsOf(flow, id) {
 export function externalRunProblem(flow, { only = null, vars = null } = {}) {
   const steps = only ? flow.steps.filter((s) => s.id === only) : flow.steps;
   const reqVars = new Set(Object.keys(vars || {}));
+  const cp = cwdProblem(flow); if (cp) return cp;
+  if (!only && hasFinally(flow)) {
+    for (const k of P.rawPlaceholders(flow.finally.command)) {
+      if (k === 'input' || k.startsWith('steps.') || (k.startsWith('vars.') && reqVars.has(k.slice(5).split('.')[0]))) return { status: 422, code: 'RAW_TEMPLATE_EXTERNAL', error: `"Al terminar" inserta {{{${k}}}} sin protección: no se permite con datos que vienen de fuera. Usa {{${k}}}.` };
+    }
+  }
   for (const s of steps) {
     if (s.kind === 'command') {
       for (const k of P.rawPlaceholders(s.command)) {
@@ -636,6 +651,27 @@ export function externalRunProblem(flow, { only = null, vars = null } = {}) {
     }
   }
   return null;
+}
+
+// ---------- "Al terminar" (spec 22, B2) ----------
+const hasFinally = (flow) => !!(flow.finally && !flow.finally.disabled && String(flow.finally.command || '').trim());
+/** Runs the flow's final command. Env: AFS_RUN_ID, AFS_RUN_STATUS, AFS_RUN_STEPS_JSON ({step: status}), FLOW_INPUT, AFS_FLOW. */
+export async function runFinally(flow, run, { input = '', data = new Map(), status = run.status } = {}) {
+  const f = flow.finally;
+  const shell = f.shell || 'powershell';
+  const q = P.shellQuoter(shell, f.command);
+  const cmd = P.render(f.command, { flow, vars: flow.vars, input, data, runId: run.id, quote: q.quote });
+  const steps = Object.fromEntries(Object.entries(run.steps || {}).filter(([id]) => !id.includes('~')).map(([id, s]) => [flow.steps.find((x) => x.id === id)?.name || id, s.status]));
+  const ctl = new AbortController();
+  const limit = clampInt(f.timeoutSec, 5, 3600, 300);
+  const t = setTimeout(() => ctl.abort(), limit * 1000);
+  const startedAt = now();
+  emit({ type: 'run.finally', flowId: flow.id, runId: run.id, status: 'running' });
+  const r = await sh(cmd, { cwd: flowCwd(flow), shell, input: '', env: { ...q.env, AFS_RUN_ID: run.id, AFS_RUN_STATUS: status, AFS_RUN_STEPS_JSON: JSON.stringify(steps), FLOW_INPUT: input || '', AFS_FLOW: flow.name }, signal: ctl.signal, delayed: q.values.length > 0 });
+  clearTimeout(t);
+  const res = { status: ctl.signal.aborted ? 'timeout' : r.code === 0 ? 'success' : 'error', exitCode: r.code, output: clipS(r.stdout.trim(), 4000), error: r.code === 0 ? undefined : clipS((r.stderr || r.stdout).trim(), 2000), startedAt, endedAt: now(), runStatus: status };
+  emit({ type: 'run.finally', flowId: flow.id, runId: run.id, status: res.status });
+  return res;
 }
 
 /** Paused runs waiting for a review decision: `${runId}:${stepId}` -> {when, resolve} (spec 18 breaks). */
@@ -657,6 +693,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
   const flow = store.getFlow(flowId);
   if (!flow) throw new Error('Flujo no encontrado');
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
+  { const cp = cwdProblem(flow); if (cp) throw Object.assign(new Error(cp.error), { status: cp.status, code: cp.code }); }
   const levels = only ? [[only]] : topoLevels(flow);
   const runVars = { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) };
   const rflow = { ...structuredClone(flow), vars: runVars };
@@ -816,7 +853,16 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     } catch (e) {
       run.status = 'error'; run.error = e.message;
     }
-    clearTimeout(deadline); clearInterval(flusher);
+    clearTimeout(deadline);
+    // Spec 22 (B2): "Al terminar" runs after every full run, whatever its status (cleanup, notifications).
+    if (!only && hasFinally(rflow)) {
+      // The run stays "running" until its cleanup ends, so pollers (UI, afs, API wait) don't see it finished too early.
+      const finalStatus = run.status;
+      run.status = 'running';
+      try { run.finally = await runFinally(rflow, run, { input, data, status: finalStatus }); } catch (e) { run.finally = { status: 'error', error: e.message }; }
+      run.status = finalStatus;
+    }
+    clearInterval(flusher);
     for (const k of [...pendingReviews.keys()]) if (k.startsWith(`${run.id}:`)) pendingReviews.get(k).resolve({ action: 'stop' });
     run.pauses = [];
     run.endedAt = now();
@@ -905,6 +951,10 @@ export function recoverStaleRuns() {
       r.totals = runTotals(r);
       delete r.dirty;
       store.saveRun(r); n++;
+      const fl = store.getFlow(f.id);
+      if (fl && hasFinally(fl) && !r.only && !r.finally) {
+        runFinally({ ...fl, vars: r.vars || fl.vars }, r, { input: r.input, status: 'interrupted' }).then((res) => { const cur = store.getRun(f.id, r.id); if (cur) { cur.finally = res; store.saveRun(cur); } }).catch(() => {});
+      }
     }
     const full = store.getFlow(f.id);
     const stale = (s) => ['running', 'queued', 'paused'].includes(s.lastRun?.status);
@@ -1132,7 +1182,7 @@ export function runSummary(flow, run) {
   return {
     flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, startedAt: run.startedAt, endedAt: run.endedAt, deadlineAt: run.deadlineAt,
     error: run.error, result, json: sinkJson.length === 1 ? sinkJson[0] : sinkJson.length ? sinkJson : undefined,
-    vars: run.vars, usedPins: run.usedPins || [], pauses: nz(run.pauses), breakpoints: run.breakpoints || undefined, totals: run.totals || runTotals(run), flowSnapshotHash: run.flowSnapshotHash, steps,
+    vars: run.vars, usedPins: run.usedPins || [], finally: run.finally || undefined, pauses: nz(run.pauses), breakpoints: run.breakpoints || undefined, totals: run.totals || runTotals(run), flowSnapshotHash: run.flowSnapshotHash, steps,
   };
 }
 
@@ -1140,12 +1190,13 @@ export function runSummary(flow, run) {
 export async function generateFlow(description, catalog) {
   const sys = `Diseñas flujos de agentes de IA. Devuelve SOLO JSON válido (sin texto, sin bloques de código) con esta forma:
 {"name":"...","description":"...","vars":{"clave":"valor de ejemplo"},
- "steps":[{"key":"a","name":"Nombre corto","kind":"role|skill|agent|command","skillRef":"","agentRef":"","role":"quién es y cómo trabaja","task":"qué hace en cada ejecución; puede usar {{input}} y {{vars.x}}","command":"","shell":"powershell","access":"read|atlassian-read|atlassian|edit|dev|none"}],
+ "steps":[{"key":"a","name":"Nombre corto","kind":"role|skill|agent|command","skillRef":"","agentRef":"","role":"quién es y cómo trabaja","task":"qué hace en cada ejecución; puede usar {{input}} y {{vars.x}}","command":"","shell":"powershell","access":"read|read-local|atlassian-read|atlassian|edit|dev|dev-restricted|none"}],
  "edges":[["a","b"]]}
 Reglas:
 - Usa kind "skill" con skillRef EXACTO del catálogo cuando una skill encaje; "agent" con agentRef exacto si un agente encaja; si no, "role".
 - "command" solo para comandos de shell concretos (tests, git, scripts).
-- access: read (por defecto), atlassian-read (leer Jira/Confluence), atlassian (escribir en Jira/Confluence), edit (editar archivos), dev (editar + Bash), none.
+- access: read (por defecto), read-local (leer archivos sin web), atlassian-read (leer Jira/Confluence), atlassian (escribir en Jira/Confluence), edit (editar archivos), dev (editar + Bash libre), dev-restricted (editar + solo git sin push y docker: preferido para trabajar en repos/contenedores), none.
+- Si el flujo clona repos, construye imágenes o crea archivos, usa steps "command" para lo determinista (clonar, construir, medir) y deja a la IA lo que requiere criterio.
 - 2 a 7 steps, nombres cortos en español, edges sin ciclos; steps independientes pueden ir en paralelo.`;
   const cat = `Skills disponibles:\n${catalog.skills.map((s) => `- ${s.name}: ${s.description.slice(0, 140)}`).join('\n')}\n\nAgentes disponibles:\n${catalog.agents.map((a) => `- ${a.name}: ${a.description.slice(0, 140)}`).join('\n') || '(ninguno)'}`;
   const r = await runClaude({ systemPrompt: sys, prompt: `${cat}\n\nFlujo que quiere el usuario:\n${description}`, model: 'sonnet', tools: '', strictMcp: true, noPersist: true, cwd: os.homedir() });
@@ -1171,6 +1222,7 @@ Reglas:
 }
 
 const READ = 'Read Grep Glob WebFetch WebSearch Skill';
+export const RESTRICTED_BASH = ['git status', 'git diff', 'git log', 'git show', 'git add', 'git commit', 'git switch', 'git checkout', 'git fetch', 'git branch', 'git rev-parse', 'docker', 'docker compose'].map((c) => `Bash(${c}:*)`).join(' ');
 const RA = 'mcp__claude_ai_Atlassian_Rovo';
 export const ACCESS = {
   read: { tools: READ, perm: '' },
@@ -1178,6 +1230,9 @@ export const ACCESS = {
   atlassian: { tools: `${READ} ${RA}`, perm: '' },
   edit: { tools: `${READ} Edit Write`, perm: 'acceptEdits' },
   dev: { tools: `${READ} Edit Write Bash`, perm: 'acceptEdits' },
+  // Spec 22 (B4): terminal limited to git (no push) and docker; no web (prompt injection through pages)
+  'dev-restricted': { tools: `Read Grep Glob Skill Edit Write ${RESTRICTED_BASH}`, perm: 'acceptEdits' },
+  'read-local': { tools: 'Read Grep Glob Skill', perm: '' },
   none: { tools: '', perm: '' },
 };
 

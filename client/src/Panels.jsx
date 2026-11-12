@@ -6,7 +6,7 @@ import { ACCESS, accessOf } from './presets.js';
 import { ExternalInvoke } from './Help.jsx';
 import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
 import ContextBox from './Context.jsx';
-import ContextSources from './Sources.jsx';
+import ContextSources, { FsPicker } from './Sources.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -268,6 +268,7 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
   const [varsErr, setVarsErr] = useState('');
   const [runs, setRuns] = useState([]);
   const [runDetail, setRunDetail] = useState(null);
+  const [cwdPicker, setCwdPicker] = useState(false);
   const [varsFocus, setVarsFocus] = useState(false);
   // Follow server-side changes (e.g. a hook's ctx.setVar) unless the user is editing the JSON or it holds an invalid draft.
   useEffect(() => { if (!varsFocus && !varsErr) setVarsText(JSON.stringify(flow.vars || {}, null, 2)); }, [flow.id, JSON.stringify(flow.vars || {})]);
@@ -294,9 +295,23 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
             <div className="ctx-title">📎 Contexto del flujo{(flow.contextSources || []).length ? ` (${flow.contextSources.length})` : ''} <span className="muted small">— lo pueden consultar todos los steps</span></div>
             <ContextSources flow={flow} scope="flow" value={flow.contextSources} onChange={(v) => onChange({ contextSources: v })} />
           </div>
-          <Field label="Directorio de trabajo" hint="cwd de Claude y comandos (repo, proyecto). Vacío = tu home">
-            <input className="mono" value={flow.cwd} onChange={set('cwd')} placeholder="C:\Users\...\mi-repo" />
+          <Field label="Directorio de trabajo" hint="dónde trabajan Claude y los comandos (repo, proyecto). Si no existe, la ejecución no arranca">
+            <div className="row">
+              <input className="mono" style={{ flex: 1 }} value={flow.cwd || ''} onChange={set('cwd')} placeholder="C:\Users\...\mi-repo" />
+              <button className="small" onClick={() => setCwdPicker(true)}>Explorar…</button>
+            </div>
+            {!flow.cwd && flow.steps.some((s) => s.kind === 'command' || /(^|\s)(Edit|Write|Bash)/.test(s.allowedTools || '') || s.permissionMode === 'acceptEdits') && <div className="warn-text small">⚠ Sin directorio: los steps que editan o ejecutan comandos trabajarán en tu carpeta de usuario.</div>}
+            {cwdPicker && <FsPicker flow={flow} want="folder" start={flow.cwd} onClose={() => setCwdPicker(false)} onPick={(p) => { onChange({ cwd: p }); setCwdPicker(false); }} />}
           </Field>
+          <div className="ctx-block" data-testid="flow-finally">
+            <div className="ctx-title">🧹 Al terminar (siempre) <span className="muted small">— opcional</span></div>
+            <p className="muted small">Un comando que corre al final de cada ejecución completa, salga bien, mal, se cancele o se agote el tiempo (y también si el servidor se reinició a mitad). Útil para limpiar contenedores, datos de prueba o archivos temporales, o para avisar. Recibe <code>$env:AFS_RUN_ID</code>, <code>$env:AFS_RUN_STATUS</code> (success, error, stopped, timeout, interrupted), <code>$env:AFS_RUN_STEPS_JSON</code> y admite <code>{'{{vars.x}}'}</code>, <code>{'{{run.id}}'}</code>, <code>{'{{steps.X.json.y}}'}</code>.</p>
+            <textarea className="mono" rows={3} value={flow.finally?.command || ''} onChange={(e) => onChange({ finally: { shell: 'powershell', timeoutSec: 300, ...(flow.finally || {}), command: e.target.value } })} placeholder={'docker compose -p afs-$env:AFS_RUN_ID down -v --remove-orphans'} />
+            <div className="row">
+              <select value={flow.finally?.shell || 'powershell'} onChange={(e) => onChange({ finally: { timeoutSec: 300, ...(flow.finally || {}), shell: e.target.value } })}><option value="powershell">PowerShell</option><option value="bash">bash</option><option value="cmd">cmd</option></select>
+              <label className="small">máx. <input type="number" min={5} max={3600} style={{ width: 80 }} value={flow.finally?.timeoutSec || 300} onChange={(e) => onChange({ finally: { shell: 'powershell', ...(flow.finally || {}), timeoutSec: Number(e.target.value) || 300 } })} /> s</label>
+            </div>
+          </div>
           <Field label="Variables (JSON)" hint="{{vars.x}} en tareas/comandos, ctx.vars en hooks">
             <textarea className="mono" rows={5} value={varsText} onFocus={() => setVarsFocus(true)} onBlur={() => setVarsFocus(false)} onChange={(e) => { setVarsText(e.target.value); try { onChange({ vars: JSON.parse(e.target.value || '{}') }); setVarsErr(''); } catch (er) { setVarsErr(er.message); } }} />
             {varsErr && <div className="warn-text small">{varsErr}</div>}
@@ -339,6 +354,7 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
                 {runDetail.totals ? ` · ${Math.round((runDetail.totals.durationMs || 0) / 1000)} s · tokens ${runDetail.totals.inputTokens}/${runDetail.totals.outputTokens}${runDetail.totals.costUsd ? ` · ≈ US$${runDetail.totals.costUsd.toFixed(4)} equiv. API` : ''}` : ''}
                 {runDetail.error ? ` · ${runDetail.error}` : ''}
               </div>
+              {runDetail.finally && <div className={`small ${runDetail.finally.status === 'success' ? 'ok-text' : 'warn-text'}`}>🧹 Al terminar: {runDetail.finally.status}{runDetail.finally.exitCode != null ? ` (exit ${runDetail.finally.exitCode})` : ''}{runDetail.finally.error ? ` — ${runDetail.finally.error}` : ''}</div>}
               {runDetail.input && <details><summary>Input</summary><pre>{runDetail.input}</pre></details>}
               {runDetail.vars && Object.keys(runDetail.vars).length > 0 && <details><summary>Variables de esta ejecución</summary><pre className="mono small">{JSON.stringify(runDetail.vars, null, 2)}</pre></details>}
               {Object.entries(runDetail.steps).map(([sid, s]) => (

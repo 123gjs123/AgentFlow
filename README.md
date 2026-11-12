@@ -34,6 +34,7 @@ Runs use your Claude Code login: your subscription, skills, agents and MCP conne
    - [Pinned outputs](#pinned-outputs)
    - [Undo, redo and versions](#undo-redo-and-versions)
    - [Several tabs](#several-tabs)
+   - [Simple and complex flows](#simple-and-complex-flows)
    - [Schedules](#schedules)
 6. [Running flows from outside](#running-flows-from-outside)
    - [External HTTP API](#external-http-api)
@@ -353,6 +354,25 @@ Each browser tab keeps its own flow: it is in the URL (`?flow=<id>`), the tab ti
 - If both changed the same field, your version wins and a notice says so.
 - Other tabs see each save live. Creating, renaming or deleting a flow updates every tab's list.
 
+### Simple and complex flows
+
+Most flows need nothing special: steps that read and reason, with no working directory and no cleanup.
+
+Flows that build things (clone a repo, build a Docker image, run Argo or kubectl from an image, write code) use these opt-in pieces:
+
+- **Working directory** (Flujo tab, with a folder browser). If it is set and does not exist, the run does not start (`CWD_MISSING`). If it is empty, steps that can write or run commands warn that they would work in your home folder.
+- **Al terminar (siempre)**. A command that runs after every full run, whatever the result: success, error, cancel, timeout, or a server restart. Use it for cleanup, for example `docker compose -p afs-{{run.short}} down -v`. It receives `AFS_RUN_ID` and `AFS_RUN_STATUS`.
+- **Run ids in templates**: `{{run.id}}`, `{{run.short}}`, `{{run.date}}`. Use them for branch names, compose projects and artifact folders.
+- **Restricted terminal access**: "Editar + terminal restringida (git sin push, docker)". Only those commands are pre-approved and there is no web access. For other tools, use custom `Bash(kubectl:*)` / `Bash(argo:*)` patterns.
+- **Recommended pattern**:
+  - command steps for deterministic work: clone, build, measure;
+  - AI steps that hand off a JSON contract, read by later steps with `{{steps.X.json.y}}`;
+  - command assertions that verify claims;
+  - breaks before expensive or risky steps;
+  - "Al terminar" for cleanup.
+
+  See [docs/specs/22](docs/specs/22-workspace-finally-access.md).
+
 ### Schedules
 
 **Flujo → Programación**: run the flow every N minutes with a fixed input. A scheduled run does not start while the previous one is still running.
@@ -569,7 +589,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **160 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **167 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

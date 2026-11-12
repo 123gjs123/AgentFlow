@@ -8,7 +8,7 @@ import * as P from './prompt.js';
 import { parseSchema } from './schema.js';
 import { findAgent, findSkill } from './catalog.js';
 import { buildArgs, lastInit } from './claude.js';
-import { cliOptions, ancestorsOf, evalAssertion } from './engine.js';
+import { cliOptions, ancestorsOf, evalAssertion, cwdProblem, cwdWarning } from './engine.js';
 import { resolveContext, contextAccess } from './sources.js';
 
 const est = (n) => Math.ceil(n / 4);
@@ -110,9 +110,10 @@ export async function previewStep(flowId, stepId, { draft = null, target = 'run'
   const pinsUsed = [];
   const ancestors = ancestorsOf(flow, stepId);
   // Attached context: resolved exactly as a run does (spec 21)
-  const cx = step.kind === 'command' ? { sections: [], tools: [], addDirs: [], warnings: [], sources: [] } : await resolveContext(rflow, step, { input });
+  const cx = step.kind === 'command' ? { sections: [], tools: [], addDirs: [], warnings: [], sources: [] } : await resolveContext(rflow, step, { input, runId: run?.id || 'r_ejemplo' });
+  { const cp = cwdProblem(flow); if (cp) warn('CWD_MISSING', cp.error, 'around'); const cw = cwdWarning(flow, step); if (cw) warn('CWD_EMPTY', cw, 'around'); }
   for (const w of cx.warnings) warn('CONTEXT_SOURCE', w, 'context');
-  const rctx = (strict) => ({ runId: run?.id, refs, allowed: strict && !step.input?.allowNonUpstream ? ancestors : null, usePins: mode !== 'external', onPinned: (n) => pinsUsed.push(n), contextSources: cx.sections });
+  const rctx = (strict) => ({ runId: run?.id || 'r_ejemplo', refs, allowed: strict && !step.input?.allowNonUpstream ? ancestors : null, usePins: mode !== 'external', onPinned: (n) => pinsUsed.push(n), contextSources: cx.sections });
 
   const result = { kind: step.kind, target, sample: { mode, runId: run?.id || null, input }, warnings, upstream: upstream.map(({ output, json, source, origin, sample, summaryState, ...u }) => ({ ...u, source: sample ? origin : source, sample, summary: summaryState, chars: (output || '').length, hasJson: json !== undefined && json !== null })), refs };
 

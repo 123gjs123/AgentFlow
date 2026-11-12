@@ -204,7 +204,7 @@ export function deleteFromLibrary(id) { writeJson(LIB(), listLibrary().filter((x
 // Only the definition travels (no run state, memory or chat sessions). Automatic ones are pruned; named ones are kept.
 const verDir = (flowId) => dir('versions', safe(flowId));
 const definitionOf = (f) => ({
-  name: f.name, description: f.description, cwd: f.cwd, vars: f.vars, schedule: f.schedule, runTimeoutSec: f.runTimeoutSec, versionEveryMin: f.versionEveryMin, contextSources: f.contextSources,
+  name: f.name, description: f.description, cwd: f.cwd, vars: f.vars, schedule: f.schedule, runTimeoutSec: f.runTimeoutSec, versionEveryMin: f.versionEveryMin, contextSources: f.contextSources, finally: f.finally,
   steps: (f.steps || []).map(({ lastRun, memory, pinned, chatSessionId, chatContextHash, ...s }) => s),
   edges: f.edges || [],
 });

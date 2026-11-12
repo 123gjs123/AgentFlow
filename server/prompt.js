@@ -47,6 +47,10 @@ export function resolveStepRef(flow, rest, data, ctx = {}) {
 
 function resolveKey(key, ctx) {
   if (key === 'input') return ctx.input ?? '';
+  // Run identity for names that must be unique per run (branch, compose project, labels, artifact folders) — spec 22
+  if (key === 'run.id') return ctx.runId ?? '';
+  if (key === 'run.short') return String(ctx.runId ?? '').replace(/^r_/, '');
+  if (key === 'run.date') return new Date().toISOString().slice(0, 10);
   if (key === 'upstream') return ctx.upstream ?? '';
   if (key.startsWith('vars.')) { const k = key.slice(5); return show(ctx.vars?.[k] ?? getPath(ctx.vars, k)); }
   if (key.startsWith('steps.') && ctx.flow) return resolveStepRef(ctx.flow, key.slice(6), ctx.data, ctx);
