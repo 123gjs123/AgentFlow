@@ -8,7 +8,26 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const DATA = process.env.AFS_DATA || path.join(ROOT, 'data');
 const dir = (...p) => { const d = path.join(DATA, ...p); fs.mkdirSync(d, { recursive: true }); return d; };
 const readJson = (f, def) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return def; } };
-const writeJson = (f, v) => { const tmp = f + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(v, null, 2)); fs.renameSync(tmp, f); };
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const BUSY = new Set(['EBUSY', 'EPERM', 'EACCES']);
+/** For files that must never be silently reset (token, idempotency): missing → def; locked → retry; corrupt → throw. */
+function readJsonStrict(f, def) {
+  for (let n = 0; ; n++) {
+    try { return JSON.parse(fs.readFileSync(f, 'utf8')); }
+    catch (e) {
+      if (e.code === 'ENOENT') return def;
+      if (BUSY.has(e.code) && n < 5) { sleepSync(100); continue; }
+      throw Object.assign(new Error(`No se pudo leer ${path.basename(f)}: ${e.message}. Revisa el archivo en ${path.dirname(f)} (no se sobrescribe).`), { status: 500, code: 'DATA_FILE_ERROR' });
+    }
+  }
+}
+/** Atomic write; retries the rename while Windows (antivirus, backup) holds the target. */
+const writeJson = (f, v) => {
+  const tmp = f + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(v, null, 2));
+  for (let n = 0; ; n++) { try { fs.renameSync(tmp, f); return; } catch (e) { if (!BUSY.has(e.code) || n >= 5) throw e; sleepSync(100); } }
+};
+/** Path under DATA without creating directories (reads must not leave folders behind). */
+const at = (...p) => path.join(DATA, ...p);
 export const uid = (p = '') => p + crypto.randomUUID().slice(0, 8);
 const safe = (s) => String(s).replace(/[^a-zA-Z0-9_-]/g, '_');
 
@@ -26,15 +45,18 @@ export function findFlow(idOrName) {
   const byId = getFlow(idOrName);
   if (byId) return byId;
   const n = String(idOrName).trim().toLowerCase();
-  const hit = listFlows().find((f) => f.name.trim().toLowerCase() === n);
+  const hit = listFlows().find((f) => String(f.name ?? '').trim().toLowerCase() === n);
   return hit ? getFlow(hit.id) : null;
 }
 
 // ---------- config (external API token) ----------
 export function getConfig() {
   const f = path.join(dir(), 'config.json');
-  let c = readJson(f, null);
-  if (!c?.token) { c = { ...(c || {}), token: crypto.randomBytes(24).toString('base64url') }; writeJson(f, c); }
+  let c = readJsonStrict(f, null); // a locked or corrupt file must not rotate the token everyone uses
+  if (!c?.token || !c?.uiKey) {
+    c = { ...(c || {}), token: c?.token || crypto.randomBytes(24).toString('base64url'), uiKey: c?.uiKey || crypto.randomBytes(24).toString('base64url') };
+    writeJson(f, c);
+  }
   return c;
 }
 export function setConfig(patch) {
@@ -96,7 +118,7 @@ export function newStep(partial = {}) {
 export function newFlow(name = 'Nuevo flujo') {
   return {
     id: uid('f_'),
-    name,
+    name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 200) : 'Nuevo flujo',
     description: '',
     cwd: '',
     vars: {},
@@ -112,7 +134,7 @@ export function newFlow(name = 'Nuevo flujo') {
 
 // ---------- chats ----------
 const chatFile = (flowId, key) => path.join(dir('chats', safe(flowId)), `${safe(key)}.json`);
-export const getChat = (flowId, key) => readJson(chatFile(flowId, key), []);
+export const getChat = (flowId, key) => readJson(at('chats', safe(flowId), `${safe(key)}.json`), []);
 export function appendChat(flowId, key, msg) {
   const list = getChat(flowId, key);
   list.push(msg);
@@ -125,7 +147,7 @@ export function updateChatMsg(flowId, key, id, fn) {
   if (m) { fn(m); writeJson(chatFile(flowId, key), list); }
   return m;
 }
-export const clearChat = (flowId, key) => fs.rmSync(chatFile(flowId, key), { force: true });
+export const clearChat = (flowId, key) => fs.rmSync(at('chats', safe(flowId), `${safe(key)}.json`), { force: true });
 export const clearAllChats = (flowId) => fs.rmSync(path.join(DATA, 'chats', safe(flowId)), { recursive: true, force: true });
 
 // ---------- runs ----------
@@ -134,7 +156,7 @@ export const saveRun = (run) => writeJson(runFile(run.flowId, run.id), run);
 export const clearRuns = (flowId) => fs.rmSync(path.join(DATA, 'runs', safe(flowId)), { recursive: true, force: true });
 export const countRuns = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'runs', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
 export const countChats = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'chats', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
-export const getRun = (flowId, runId) => readJson(runFile(flowId, runId), null);
+export const getRun = (flowId, runId) => readJson(at('runs', safe(flowId), `${safe(runId)}.json`), null);
 /** Full run records of a flow (for startup recovery). */
 export function rawRuns(flowId) {
   try { return fs.readdirSync(path.join(DATA, 'runs', safe(flowId))).filter((f) => f.endsWith('.json')).map((f) => readJson(path.join(DATA, 'runs', safe(flowId), f))).filter(Boolean); } catch { return []; }
@@ -143,22 +165,24 @@ export function rawRuns(flowId) {
 // ---------- idempotency keys (external runs, 24 h) ----------
 const idemFile = () => path.join(dir(), 'idempotency.json');
 export function getIdem(key) {
-  const all = readJson(idemFile(), {});
+  const all = readJsonStrict(idemFile(), {});
   const e = all[key];
   return e && e.at > Date.now() - 24 * 3600e3 ? e : null;
 }
 export function setIdem(key, entry) {
-  const all = readJson(idemFile(), {});
+  const all = readJsonStrict(idemFile(), {}); // a failed read must not erase every other key
   const cut = Date.now() - 24 * 3600e3;
   for (const k of Object.keys(all)) if (all[k].at < cut) delete all[k];
   all[key] = { ...entry, at: Date.now() };
   writeJson(idemFile(), all);
 }
 export function listRuns(flowId) {
-  return fs.readdirSync(dir('runs', safe(flowId))).filter((f) => f.endsWith('.json'))
+  let files = [];
+  try { files = fs.readdirSync(at('runs', safe(flowId))); } catch { return []; }
+  return files.filter((f) => f.endsWith('.json'))
     .map((f) => readJson(path.join(DATA, 'runs', safe(flowId), f)))
     .filter(Boolean)
-    .map((r) => ({ id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: (r.input || '').slice(0, 200), only: r.only, totals: r.totals }))
+    .map((r) => ({ id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: String(r.input ?? '').slice(0, 200), only: r.only, totals: r.totals }))
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, 50);
 }

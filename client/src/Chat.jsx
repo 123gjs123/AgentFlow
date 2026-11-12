@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { api, onWs } from './api.js';
+import { api, onWs, pendingSave } from './api.js';
 import Events from './Events.jsx';
 
-const md = (t) => ({ __html: DOMPurify.sanitize(marked.parse(t || '', { breaks: true })) });
+// Model output is untrusted: no images (silent requests can leak data), forms, inputs or inline styles; links open outside.
+const PURIFY = { FORBID_TAGS: ['img', 'form', 'input', 'button', 'textarea', 'select', 'option', 'style', 'iframe', 'object', 'embed', 'video', 'audio', 'source', 'svg', 'math'], FORBID_ATTR: ['style', 'srcset'] };
+DOMPurify.addHook('afterSanitizeAttributes', (n) => { if (n.tagName === 'A') { n.setAttribute('target', '_blank'); n.setAttribute('rel', 'noopener noreferrer'); } });
+const md = (t) => ({ __html: DOMPurify.sanitize(marked.parse(t || '', { breaks: true }), PURIFY) });
 
 /**
  * Chat bound to a key: a step id, '_flow' or '_global'.
@@ -50,7 +53,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     const t = text.trim();
     if (!t) return;
     setBusy(true); setErr('');
-    try { await api.post(`/api/flows/${flowId}/chat/${chatKey}`, { message: t, improve }); setText(''); }
+    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey}`, { message: t, improve }); setText(''); }
     catch (e) { setErr(e.message); }
     setBusy(false);
   }
@@ -59,7 +62,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     await api.del(`/api/flows/${flowId}/chat/${chatKey}`); setMsgs([]);
   }
   async function apply(msg, p) {
-    try { await api.post(`/api/flows/${flowId}/chat/${chatKey === '_global' ? msg.routedKey : chatKey}/apply`, { messageId: findOrigin(msg), proposalId: p.id }); setMsgs((l) => l.map((x) => (x.id === msg.id ? { ...x, proposals: x.proposals.map((q) => (q.id === p.id ? { ...q, applied: true } : q)) } : x))); }
+    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey === '_global' ? msg.routedKey : chatKey}/apply`, { messageId: findOrigin(msg), proposalId: p.id }); setMsgs((l) => l.map((x) => (x.id === msg.id ? { ...x, proposals: x.proposals.map((q) => (q.id === p.id ? { ...q, applied: true } : q)) } : x))); }
     catch (e) { setErr(e.message); }
   }
   // proposals shown in the global chat live in the target step's chat; find that message by proposal id

@@ -208,7 +208,7 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
           )}
           <div className="run-box">
             <textarea rows={2} value={runInput} onChange={(e) => setRunInput(e.target.value)} placeholder="Input para ejecutar solo este step (opcional)" />
-            <button className="primary" onClick={() => { onRun(runInput); setTab('activity'); }} disabled={status === 'running'}>▶ Ejecutar step</button>
+            <button className="primary" onClick={() => { onRun(runInput); setTab('activity'); }} disabled={status === 'running' || status === 'queued' || status === 'paused'}>▶ Ejecutar step</button>
           </div>
           {step.lastRun?.output && (
             <details className="last-out"><summary>Última salida ({step.lastRun.status})</summary><pre>{step.lastRun.output}</pre></details>
@@ -261,10 +261,11 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
   const [varsErr, setVarsErr] = useState('');
   const [runs, setRuns] = useState([]);
   const [runDetail, setRunDetail] = useState(null);
-  useEffect(() => { setVarsText(JSON.stringify(flow.vars || {}, null, 2)); }, [flow.id]);
+  const [varsFocus, setVarsFocus] = useState(false);
+  // Follow server-side changes (e.g. a hook's ctx.setVar) unless the user is editing the JSON or it holds an invalid draft.
+  useEffect(() => { if (!varsFocus && !varsErr) setVarsText(JSON.stringify(flow.vars || {}, null, 2)); }, [flow.id, JSON.stringify(flow.vars || {})]);
   useEffect(() => { if (tab === 'runs') api.get(`/api/flows/${flow.id}/runs`).then(setRuns); }, [tab, flow.id]);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
-  const hook = `${location.origin}/api/flows/${flow.id}/trigger`;
 
   return (
     <div className="panel">
@@ -286,7 +287,7 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
             <input className="mono" value={flow.cwd} onChange={set('cwd')} placeholder="C:\Users\...\mi-repo" />
           </Field>
           <Field label="Variables (JSON)" hint="{{vars.x}} en tareas/comandos, ctx.vars en hooks">
-            <textarea className="mono" rows={5} value={varsText} onChange={(e) => { setVarsText(e.target.value); try { onChange({ vars: JSON.parse(e.target.value || '{}') }); setVarsErr(''); } catch (er) { setVarsErr(er.message); } }} />
+            <textarea className="mono" rows={5} value={varsText} onFocus={() => setVarsFocus(true)} onBlur={() => setVarsFocus(false)} onChange={(e) => { setVarsText(e.target.value); try { onChange({ vars: JSON.parse(e.target.value || '{}') }); setVarsErr(''); } catch (er) { setVarsErr(er.message); } }} />
             {varsErr && <div className="warn-text small">{varsErr}</div>}
           </Field>
           <Field label="Programación">

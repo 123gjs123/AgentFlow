@@ -158,13 +158,15 @@ test('ask: pregunta al flujo (enrutador) o a un step concreto', async () => {
 });
 
 test('registro de llamadas recibidas: método, ruta, origen, estado, runId, dryRun', async () => {
-  const since = Date.now() - 1;
-  await s.ext('POST', `/flows/${flow.id}/run`, { input: 'log', source: 'github', dryRun: true });
+  const since = Date.now() - 1000; // the server stamps in another process: allow clock jitter (earlier entries are other calls, filtered by source below)
+  const dry = await s.ext('POST', `/flows/${flow.id}/run`, { input: 'log', source: 'github', dryRun: true });
+  assert.equal(dry.status, 200, JSON.stringify(dry.body));
   await s.ext('GET', '/ping', undefined, { Authorization: 'Bearer malo' }, { auth: false });
   // The entry is written when the response finishes (res 'finish'), which can land just after the client has it.
   let log = [];
   for (let i = 0; i < 40; i++) { log = await s.uiOk('GET', `/api/integrations/inbound?since=${since}`); if (log.some((e) => e.source === 'github') && log.some((e) => e.status === 401)) break; await sleep(100); }
   const run = log.find((e) => e.source === 'github');
+  if (!run) { const all = await s.uiOk('GET', '/api/integrations/inbound?since=0'); assert.fail(`sin entrada github; since=${since}; dry=${JSON.stringify(dry.body).slice(0, 200)}; all=${JSON.stringify(all.slice(-6).map((e) => [e.at, e.method, e.path, e.source, e.status, e.dryRun]))}`); }
   assert.equal(run.dryRun, true);
   assert.equal(run.status, 200);
   assert.ok(log.some((e) => e.status === 401 && e.path === '/ping'));
@@ -198,4 +200,42 @@ test('WebSocket: solo local; transmite run.started / step.status / run.event / r
   for (const t of ['run.started', 'step.status', 'run.event', 'run.finished']) assert.ok(types.has(t), t);
   assert.ok(w.msgs.some((m) => m.type === 'flow.updated' || m.type === 'flow.changed' || m.flowId === flow.id));
   w.close();
+});
+
+test('review: la interfaz exige su clave (link ?k= → cookie); sin ella /api, páginas y WebSocket se rechazan aunque parezcan locales', async () => {
+  const noKey = await fetch(s.base + '/api/info');
+  assert.equal(noKey.status, 401);
+  assert.equal((await noKey.json()).code, 'UI_KEY_REQUIRED');
+  const page = await fetch(s.base + '/');
+  assert.equal(page.status, 401);
+  assert.match(await page.text(), /enlace con la clave/);
+  assert.equal((await fetch(s.base + '/?k=mala', { redirect: 'manual' })).status, 401);
+  const ok = await fetch(s.base + `/?k=${s.uiKey}`, { redirect: 'manual' });
+  assert.equal(ok.status, 302);
+  const cookie = ok.headers.get('set-cookie');
+  assert.match(cookie, /afs_ui=.*HttpOnly; SameSite=Strict/);
+  const withCookie = await fetch(s.base + '/api/info', { headers: { Cookie: cookie.split(';')[0] } });
+  assert.equal(withCookie.status, 200);
+  const WebSocket = (await import('ws')).default;
+  await assert.rejects(new Promise((res, rej) => { const w = new WebSocket(s.base.replace('http', 'ws') + '/ws'); w.on('open', res); w.on('error', rej); w.on('unexpected-response', (_q, r) => rej(new Error(String(r.statusCode)))); }));
+  assert.equal((await s.ext('GET', '/ping')).status, 200, 'la API externa sigue con su token');
+});
+
+test('review: nombre con "%" por la API externa; dryRun avisa conflicto de Idempotency-Key; tipos inválidos no se guardan', async () => {
+  const f = await s.flow('Cobertura 100%', [cmd('E', 'Write-Output ok')]);
+  const r = await s.runExt('Cobertura 100%', {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  await s.runExt(f.id, { input: 'a' }, { 'Idempotency-Key': 'dry-conf' });
+  const d = await s.ext('POST', `/flows/${f.id}/run`, { input: 'b', dryRun: true }, { 'Idempotency-Key': 'dry-conf' });
+  assert.equal(d.status, 409);
+  const same = await s.ext('POST', `/flows/${f.id}/run`, { input: 'a', dryRun: true }, { 'Idempotency-Key': 'dry-conf' });
+  assert.ok(same.body.wouldReplay);
+  assert.equal((await s.ui('PUT', `/api/flows/${f.id}`, { ...f, steps: 'x' })).status, 400);
+  assert.equal((await s.ui('PUT', `/api/flows/${f.id}`, { ...f, name: 5 })).status, 400);
+  const n = await s.uiOk('POST', '/api/flows', { name: null });
+  assert.equal(n.name, 'Nuevo flujo');
+  const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: { objeto: 1 } });
+  await s.waitRun(f.id, runId);
+  assert.equal((await s.ui('GET', `/api/flows/${f.id}/runs`)).status, 200, 'la lista de ejecuciones no se rompe');
+  assert.equal((await s.ui('GET', '/api/flows/f_no_existe/runs')).status, 200);
 });

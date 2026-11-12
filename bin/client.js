@@ -33,7 +33,8 @@ export async function ensureServer(log = () => {}) {
     if (!/127\.0\.0\.1|localhost/.test(BASE)) throw new Error(`No responde ${BASE}: ${e.message}`);
   }
   log('Iniciando Agent Flow Studio en segundo plano…');
-  const child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], { cwd: ROOT, detached: true, stdio: 'ignore', windowsHide: true });
+  const port = new URL(BASE).port || '4317'; // the server must listen where this client looks for it
+  const child = spawn(process.execPath, [path.join(ROOT, 'server', 'index.js')], { cwd: ROOT, detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, PORT: port } });
   child.unref();
   for (let i = 0; i < 40; i++) {
     await sleep(500);

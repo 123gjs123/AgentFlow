@@ -23,6 +23,7 @@ export async function openUi(name) {
   const s = await startServer({ name, env: { NODE_ENV: 'development' } });
   await s.start();
   const ctx = await browser.newContext({ viewport: { width: 1500, height: 950 } });
+  await ctx.addCookies([{ name: 'afs_ui', value: s.uiKey, url: s.base }]); // UI access key
   await ctx.addInitScript(() => { try { localStorage.setItem('afs.tourDone', '1'); localStorage.setItem('afs.autoOrder', '0'); } catch {} });
   const page = await ctx.newPage();
   page.setDefaultTimeout(60000);

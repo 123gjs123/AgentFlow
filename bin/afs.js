@@ -11,6 +11,7 @@ Uso:
   afs ask  <flujo> "<pregunta>" [--step S]   Pregunta al chat general (o a un step)
   afs status <flujo> <runId>                 Estado/salidas de una ejecución
   afs cancel <flujo> <runId>                 Cancela una ejecución en curso
+  afs ui [--print]                           Abre la interfaz con su clave (o solo imprime el enlace)
   afs resume <flujo> <runId> [opciones]      Decide en un break: --action continue|edit|retry|skip|stop
                                              (--step S, --output "texto", --feedback "corrección")
 
@@ -31,18 +32,20 @@ Opciones de run:
 
 <flujo> puede ser el nombre (entre comillas) o el id.
 Entorno: AFS_URL (${BASE}), AFS_TOKEN (por defecto se lee de data/config.json)
-Código de salida: 0 ok · 1 falló/detenido/interrumpido · 2 uso incorrecto · 3 tiempo agotado · 4 en pausa (break).`;
+Código de salida: 0 ok · 1 falló/detenido/interrumpido · 2 uso incorrecto, error HTTP o de conexión · 3 tiempo agotado · 4 en pausa (break).`;
 
 const argv = process.argv.slice(2);
 const cmd = argv.shift();
 const opts = { vars: {} };
 const pos = [];
+const needs = (i, a) => { if (i + 1 >= argv.length || argv[i + 1].startsWith('--')) { console.error(`Falta el valor de ${a}`); process.exit(2); } };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
+  if (['-i', '--input', '-f', '--file', '-s', '--step', '--var', '--deadline', '--key', '--timeout', '--action', '--output', '--feedback'].includes(a)) needs(i, a);
   if (a === '-i' || a === '--input') opts.input = argv[++i];
-  else if (a === '-f' || a === '--file') opts.input = fs.readFileSync(argv[++i], 'utf8');
+  else if (a === '-f' || a === '--file') { try { opts.input = fs.readFileSync(argv[++i], 'utf8'); } catch (e) { console.error(`No se pudo leer ${argv[i]}: ${e.message}`); process.exit(2); } }
   else if (a === '-s' || a === '--step') opts.step = argv[++i];
-  else if (a === '--var') { const [k, ...v] = argv[++i].split('='); opts.vars[k] = v.join('='); }
+  else if (a === '--var') { const [k, ...v] = argv[++i].split('='); if (!k || !v.length) { console.error(`--var debe ser clave=valor: ${argv[i]}`); process.exit(2); } opts.vars[k] = v.join('='); }
   else if (a === '--pins') opts.pins = true;
   else if (a === '--deadline') opts.deadline = Number(argv[++i]);
   else if (a === '--key') opts.key = argv[++i];
@@ -76,6 +79,17 @@ function printEvent(e) {
 
 async function main() {
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help') { console.log(HELP); return 0; }
+  if (cmd === 'ui') {
+    const { getConfig } = await import('../server/store.js');
+    const url = `${BASE}/?k=${getConfig().uiKey}`;
+    if (argv.includes('--print')) { console.log(url); return 0; }
+    await ensureServer(err);
+    const { spawn } = await import('node:child_process');
+    const [file, args] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '""', url]] : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]];
+    spawn(file, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    console.log(url);
+    return 0;
+  }
   await ensureServer(err);
   if (cmd === 'list') {
     const flows = await call('GET', '/flows');
@@ -136,4 +150,4 @@ async function main() {
   err(`Comando desconocido: ${cmd}\n`); console.log(HELP); return 2;
 }
 
-main().then((c) => { process.exitCode = c; }).catch((e) => { err(`Error: ${e.message}${e.code ? ` (${e.code})` : ''}`); process.exitCode = 1; });
+main().then((c) => { process.exitCode = c; }).catch((e) => { err(`Error: ${e.message}${e.code ? ` (${e.code})` : ''}`); process.exitCode = 2; });

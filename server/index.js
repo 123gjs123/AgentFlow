@@ -68,7 +68,7 @@ ext.use((req, res, next) => {
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'Token inválido o ausente. Usa Authorization: Bearer <token> (lo ves en Ayuda → Invocar desde fuera).', code: 'UNAUTHORIZED' });
   next();
 });
-const extFlow = (x) => { const f = store.findFlow(decodeURIComponent(x)); if (!f) throw fail(404, `Flujo no encontrado: ${x}`, 'FLOW_NOT_FOUND'); return f; };
+const extFlow = (x) => { const f = store.findFlow(x); if (!f) throw fail(404, `Flujo no encontrado: ${x}`, 'FLOW_NOT_FOUND'); return f; };
 const extRun = (flow, id) => { const r = engine.getRunLive(flow.id, id); if (!r) throw fail(404, 'Ejecución no encontrada', 'RUN_NOT_FOUND'); return r; };
 const inputOf = (body) => {
   if (typeof body === 'string') return body;
@@ -105,9 +105,18 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
   const input = inputOf(req.body);
   const key = String(req.get('idempotency-key') || '').trim();
   if (key.length > 200) throw fail(400, 'Idempotency-Key: máximo 200 caracteres', 'BAD_IDEMPOTENCY_KEY');
+  const bodyHashOf = () => crypto.createHash('sha256').update(stableJson({ input, only, vars: body.vars || null, usePins: truthy(body.usePins), breakpoints: truthy(body.breakpoints) })).digest('hex');
+  // Replay what is still going (running, paused at a break) or went well: a retry after a failure must run again.
+  const REPLAYABLE = ['running', 'paused', 'queued', 'success'];
   if (truthy(body.dryRun ?? req.query.dryRun)) {
     const problem0 = engine.externalRunProblem(flow, { only, vars: body.vars });
     if (problem0) throw fail(problem0.status, problem0.error, problem0.code);
+    let wouldReplay = null;
+    if (key) {
+      const prev = store.getIdem(`${flow.id}:${key}`);
+      if (prev && prev.bodyHash !== bodyHashOf()) throw fail(409, 'Esa Idempotency-Key ya se usó con otro contenido', 'IDEMPOTENCY_CONFLICT');
+      if (prev && REPLAYABLE.includes(engine.getRunLive(flow.id, prev.runId)?.status)) wouldReplay = prev.runId;
+    }
     // Every pre-start check, nothing started, idempotency key not recorded (spec 17 INT-10).
     res.locals.dryRun = true;
     const usePins = truthy(body.usePins);
@@ -115,18 +124,17 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
     const warnings = [];
     if (!input) warnings.push('input vacío');
     for (const k of Object.keys(body.vars || {})) if (!(k in (flow.vars || {}))) warnings.push(`la variable "${k}" no existe en el flujo`);
-    return { dryRun: true, ok: true, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, warnings };
+    return { dryRun: true, ok: true, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, wouldReplay, warnings };
   }
   let bodyHash = null;
   if (key) {
     if (key.length > 200) throw fail(400, 'Idempotency-Key: máximo 200 caracteres', 'BAD_IDEMPOTENCY_KEY');
-    bodyHash = crypto.createHash('sha256').update(stableJson({ input, only, vars: body.vars || null, usePins: truthy(body.usePins), breakpoints: truthy(body.breakpoints) })).digest('hex');
+    bodyHash = bodyHashOf();
     const prev = store.getIdem(`${flow.id}:${key}`);
     if (prev) {
       if (prev.bodyHash !== bodyHash) throw fail(409, 'Esa Idempotency-Key ya se usó con otro contenido', 'IDEMPOTENCY_CONFLICT');
       const prevRun = engine.getRunLive(flow.id, prev.runId);
-      // Replay only runs that are going or went well: a retry after a failure must be able to run again.
-      if (prevRun && ['running', 'success'].includes(prevRun.status)) return respond(prev.runId, { idempotentReplay: true });
+      if (prevRun && REPLAYABLE.includes(prevRun.status)) return respond(prev.runId, { idempotentReplay: true });
     }
   }
   const problem = engine.externalRunProblem(flow, { only, vars: body.vars });
@@ -176,6 +184,29 @@ ext.post('/flows/:flow/ask', wrap(async (req) => {
 }));
 app.use('/api/ext', ext);
 
+// ============ UI access key ============
+// Loopback + Host + no forwarding headers is not enough: a TCP forwarder or a proxy that adds no X-Forwarded-For looks
+// local. The UI (pages, /api, /ws) also needs a per-installation key, given once via the link the server prints
+// (/?k=…, also start.cmd and `afs ui`) and then kept in an HttpOnly SameSite=Strict cookie. /api/ext keeps its token.
+const UI_COOKIE = 'afs_ui';
+const eqSecret = (a, b) => { const x = Buffer.from(String(a || '')); const y = Buffer.from(String(b || '')); return x.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y); };
+const cookieOf = (req) => { for (const c of String(req.headers.cookie || '').split(/;\s*/)) { const i = c.indexOf('='); if (c.slice(0, i) === UI_COOKIE) return c.slice(i + 1); } return ''; };
+const hasUiKey = (req) => { const k = store.getConfig().uiKey; return eqSecret(cookieOf(req), k) || eqSecret(req.headers['x-afs-ui'], k); };
+const uiUrl = () => `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}/?k=${store.getConfig().uiKey}`;
+const NEED_KEY_PAGE = `<!doctype html><meta charset="utf-8"><title>Agent Flow Studio</title><body style="font:15px system-ui;background:#0f1115;color:#e6e8ef;padding:40px;max-width:640px">
+<h2>Agent Flow Studio</h2><p>Para abrir la interfaz usa el enlace con la clave que muestra la consola al arrancar (<code>npm start</code>), o ábrela con <code>start.cmd</code> o <code>afs ui</code>.</p>
+<p style="color:#8b92a7">Después de abrirla una vez, este navegador recuerda la clave y la dirección normal funciona.</p></body>`;
+app.use((req, res, next) => {
+  if (!isLocalReq(req)) return res.status(403).json({ error: 'Solo accesible desde esta máquina', code: 'FORBIDDEN' });
+  if (req.method === 'GET' && typeof req.query.k === 'string' && eqSecret(req.query.k, store.getConfig().uiKey)) {
+    res.setHeader('Set-Cookie', `${UI_COOKIE}=${store.getConfig().uiKey}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000`);
+    return res.redirect(302, req.path);
+  }
+  if (hasUiKey(req)) return next();
+  if (req.path.startsWith('/api')) return res.status(401).json({ error: 'Falta la clave de la interfaz: abre el enlace que muestra la consola al arrancar (npm start), start.cmd o afs ui.', code: 'UI_KEY_REQUIRED' });
+  res.status(401).type('html').send(NEED_KEY_PAGE);
+});
+
 // ============ UI API guard ============
 app.use('/api', (req, res, next) => {
   if (!isLocalReq(req)) return res.status(403).json({ error: 'Solo accesible desde esta máquina', code: 'FORBIDDEN' });
@@ -203,7 +234,7 @@ function cleanEdge(e) {
 }
 app.get('/api/flows', wrap(() => store.listFlows()));
 app.post('/api/flows', wrap((req) => {
-  const f = store.newFlow(req.body?.name);
+  const f = store.newFlow(typeof req.body?.name === 'string' ? req.body.name : undefined);
   if (req.body?.template === 'demo') {
     const a = store.newStep({ name: 'Analizar requerimiento', kind: 'role', role: 'Eres un QA analista senior. Detectas ambigüedades y riesgos.', task: 'Analiza el requerimiento del input y lista: objetivo, reglas de negocio, riesgos y preguntas abiertas.' });
     const b = store.newStep({ name: 'Diseñar casos', kind: 'skill', skillRef: 'qa-test-architect', task: 'Con el análisis previo, diseña casos de prueba priorizados por riesgo (Gherkin breve).' });
@@ -224,7 +255,11 @@ app.put('/api/flows/:id', wrap((req) => {
   const body = req.body || {};
   // Server-managed fields are never overwritten by the UI.
   const byId = new Map(cur.steps.map((s) => [s.id, s]));
-  const steps = (body.steps || []).map((s) => {
+  if (body.steps !== undefined && !Array.isArray(body.steps)) throw fail(400, '"steps" debe ser una lista', 'BAD_REQUEST');
+  if (body.edges !== undefined && !Array.isArray(body.edges)) throw fail(400, '"edges" debe ser una lista', 'BAD_REQUEST');
+  if (body.vars !== undefined && (typeof body.vars !== 'object' || body.vars === null || Array.isArray(body.vars))) throw fail(400, '"vars" debe ser un objeto', 'BAD_VARS');
+  for (const k of ['name', 'description', 'cwd']) if (body[k] !== undefined && body[k] !== null && typeof body[k] !== 'string') throw fail(400, `"${k}" debe ser texto`, 'BAD_REQUEST');
+  const steps = (body.steps || []).filter((s) => s && typeof s === 'object' && typeof s.id === 'string').map((s) => {
     const prev = byId.get(s.id);
     return prev ? { ...s, memory: prev.memory, lastRun: prev.lastRun, pinned: prev.pinned, chatSessionId: prev.chatSessionId, chatContextHash: prev.chatContextHash } : store.newStep({ ...s, pinned: undefined });
   });
@@ -264,8 +299,9 @@ app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); eng
 
 // ----- runs -----
 // UI runs honour breaks unless {breakpoints:false}.
-app.post('/api/flows/:id/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
-app.post('/api/flows/:id/steps/:stepId/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: req.body?.input || '', only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+const uiInput = (v) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v, null, 2));
+app.post('/api/flows/:id/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+app.post('/api/flows/:id/steps/:stepId/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
 app.post('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.pinStep(req.params.id, req.params.stepId, req.body || {})));
 app.delete('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.unpinStep(req.params.id, req.params.stepId)));
 app.post('/api/flows/:id/stop', wrap((req) => ({ stopped: engine.stopRuns(req.params.id) })));
@@ -405,7 +441,7 @@ const wss = new WebSocketServer({ noServer: true });
 server.on('upgrade', (req, socket, head) => {
   if (req.url !== '/ws') return;
   const origin = req.headers.origin || '';
-  if (!isLocalReq(req) || (origin && !okHost(origin.replace(/^https?:\/\//, '')))) { socket.destroy(); return; }
+  if (!isLocalReq(req) || !hasUiKey(req) || (origin && !okHost(origin.replace(/^https?:\/\//, '')))) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
 engine.bus.on('msg', (msg) => {
@@ -421,5 +457,6 @@ server.listen(PORT, HOST, () => {
   // Only after owning the port: a second instance that fails to start must not touch the first one's runs.
   const recovered = engine.recoverStaleRuns();
   if (recovered) console.log(`${recovered} ejecución(es) interrumpidas por el reinicio marcadas como 'interrupted'.`);
-  console.log(`Agent Flow Studio → http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}  (claude: ${claudeBin()})`);
+  console.log(`Agent Flow Studio → ${uiUrl()}  (claude: ${claudeBin()})`);
+  console.log('Abre ese enlace (lleva la clave de la interfaz); luego este navegador la recuerda.');
 });

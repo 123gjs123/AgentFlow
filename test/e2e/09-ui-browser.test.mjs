@@ -29,6 +29,7 @@ before(async () => {
   s = await startServer({ name: 'ui', env: { NODE_ENV: 'development' } });
   await s.start();
   const ctx = await browser.newContext({ viewport: { width: 1500, height: 950 } });
+  await ctx.addCookies([{ name: 'afs_ui', value: s.uiKey, url: s.base }]); // UI access key
   await ctx.addInitScript(() => { try { localStorage.setItem('afs.tourDone', '1'); } catch {} });
   page = await ctx.newPage();
   page.setDefaultTimeout(60000); // generous: the suites run in parallel and Vite compiles on first load

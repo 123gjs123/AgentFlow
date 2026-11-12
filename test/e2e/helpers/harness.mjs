@@ -51,6 +51,7 @@ export async function startServer({ env = {}, name = 'e2e' } = {}) {
       try { const r = await fetch(base + '/api/ext/ping'); if (r.status === 401) break; } catch {}
       await sleep(250);
     }
+    srv.uiKey = JSON.parse(fs.readFileSync(path.join(dirs.data, 'config.json'), 'utf8')).uiKey; // UI access key
     srv.token = (await srv.ui('GET', '/api/info')).body.token;
     return srv;
   };
@@ -70,7 +71,7 @@ export async function startServer({ env = {}, name = 'e2e' } = {}) {
 
   // ---------- UI API (loopback, JSON) ----------
   srv.ui = async (method, url, body, headers = {}) => {
-    const r = await fetch(base + url, { method, headers: { ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body !== undefined ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined });
+    const r = await fetch(base + url, { method, headers: { ...(srv.uiKey ? { 'X-AFS-UI': srv.uiKey } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body !== undefined ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined });
     const text = await r.text(); let json; try { json = JSON.parse(text); } catch { json = undefined; }
     return { status: r.status, body: json ?? text, headers: r.headers };
   };
@@ -119,7 +120,7 @@ export async function startServer({ env = {}, name = 'e2e' } = {}) {
   // ---------- WebSocket ----------
   srv.sockets = [];
   srv.ws = (headers = {}) => new Promise((resolve, reject) => {
-    const ws = new WebSocket(base.replace('http', 'ws') + '/ws', { headers });
+    const ws = new WebSocket(base.replace('http', 'ws') + '/ws', { headers: { Cookie: `afs_ui=${srv.uiKey}`, ...headers } });
     const msgs = [];
     ws.on('message', (d) => { try { msgs.push(JSON.parse(d)); } catch {} });
     ws.on('open', () => { srv.sockets.push(ws); resolve({ ws, msgs, close: () => ws.close(), waitFor: async (pred, ms = 20000) => { const t0 = Date.now(); for (;;) { const m = msgs.find(pred); if (m) return m; if (Date.now() - t0 > ms) throw new Error('ws: mensaje no recibido'); await sleep(50); } } }); });

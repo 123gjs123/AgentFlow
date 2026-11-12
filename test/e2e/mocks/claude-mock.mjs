@@ -136,6 +136,8 @@ else if (dir('echo') !== null) reply = `ECHO>>${prompt}<<ECHO`;
 else if (isChat) reply = `Respuesta de chat (mock) a: ${prompt.split('\n').pop().slice(0, 120)}`;
 else reply = `MOCK-OK model=${model} agent=${opt('--agent') || '-'}`;
 
+// <route> chosen in the reply of the first turn (a JSON correction turn may omit it)
+if (dir('emit-route') !== null && !correcting) reply += `\n<route to="${dir('emit-route').trim()}"/>`;
 if (dir('propose') !== null) reply += `\n<step-update>${dir('propose')}</step-update>`;
 if (dir('propose-invalid') !== null) reply += '\n<step-update>{no es json</step-update>';
 for (const r of [...scope.matchAll(/\[\[mock:remember\s+([^\]]+)\]\]/g)]) if (!correcting) reply += `\n<remember>${r[1]}</remember>`;

@@ -21,7 +21,12 @@ function PauseCard({ flowId, runId, p, onDone }) {
   function saveEdit() {
     let parsed;
     if (json.trim()) { try { parsed = JSON.parse(json); } catch (e) { setErr(`JSON inválido: ${e.message}`); return; } }
-    act('edit', { output: text, ...(json.trim() ? { json: parsed } : {}) });
+    // Only send what changed: an untouched (possibly clipped) output must never replace the real one.
+    const outChanged = text !== (p.output || '');
+    if (outChanged && p.outputClipped) { setErr('La salida es muy larga y aquí se ve recortada: no se puede editar el texto completo. Edita solo el JSON o usa “Re-ejecutar con corrección”.'); return; }
+    const jsonChanged = json.trim() !== (p.json === undefined ? '' : JSON.stringify(p.json, null, 2)).trim();
+    if (!outChanged && !jsonChanged) { act('continue'); return; }
+    act('edit', { ...(outChanged ? { output: text } : {}), ...(jsonChanged && json.trim() ? { json: parsed } : {}) });
   }
   return (
     <div className="pause-card">
@@ -78,10 +83,10 @@ function PauseCard({ flowId, runId, p, onDone }) {
   );
 }
 
-export default function ReviewModal({ flowId, runId, onClose }) {
+export default function ReviewModal({ flowId, runId, refresh, onClose }) {
   const [run, setRun] = useState(null);
   const load = () => api.get(`/api/flows/${flowId}/runs/${runId}`).then(setRun).catch(() => {});
-  useEffect(() => { load(); }, [runId]);
+  useEffect(() => { load(); }, [runId, refresh]);
   if (!run) return null;
   const pauses = run.pauses || [];
   return (

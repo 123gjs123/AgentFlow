@@ -27,4 +27,4 @@ The app runs **on the user's machine with the user's privileges**. It can run sh
 ## Known limitations
 - The token is shared across all flows; spec 11 adds per-flow tokens.
 - `?token=` in webhook URLs can end up in proxy logs. Prefer header auth where the caller supports it.
-- There is no TLS. Use a reverse proxy or VPN for remote access.
+- There is no TLS. For remote callers expose **only `/api/ext/`** (tunnel or proxy rule limited to that path; the integration helper generates a cloudflared config). Never forward the whole port: the UI (pages, `/api`, `/ws`) additionally requires a per-installation **UI key** (`uiKey` in `data/config.json`, given once via the `/?k=…` link the server prints, then an HttpOnly SameSite=Strict cookie), because a TCP forwarder or a proxy that adds no forwarding headers looks local.

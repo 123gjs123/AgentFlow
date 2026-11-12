@@ -12,7 +12,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const B = process.env.AFS_URL || 'http://127.0.0.1:4319';
-const j = async (m, u, b) => { const r = await fetch(B + u, { method: m, headers: b ? { 'Content-Type': 'application/json' } : {}, body: b ? JSON.stringify(b) : undefined }); return r.json().catch(() => ({})); };
+// UI API access key: AFS_UI_KEY, or read from the instance's data dir (AFS_DATA)
+const UI_KEY = process.env.AFS_UI_KEY || (() => { try { return JSON.parse(fs.readFileSync(path.join(process.env.AFS_DATA || 'data', 'config.json'), 'utf8')).uiKey; } catch { return ''; } })();
+const j = async (m, u, b) => { const r = await fetch(B + u, { method: m, headers: { 'X-AFS-UI': UI_KEY, ...(b ? { 'Content-Type': 'application/json' } : {}) }, body: b ? JSON.stringify(b) : undefined }); return r.json().catch(() => ({})); };
 
 import { parseYaml } from './yaml-lite.mjs';
 

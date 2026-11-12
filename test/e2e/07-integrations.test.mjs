@@ -276,3 +276,22 @@ test('verificador de plantillas (scripts/verify/int-templates.mjs): 12 orígenes
   assert.equal(r.code, 0, r.stdout.split('\n').filter((l) => l.startsWith('FAIL')).join('\n'));
   assert.match(r.stdout, /(\d+)\/\1 passed/);
 });
+
+test('review: Jira: barras invertidas, comillas y claves raras en el cuerpo dan JSON válido y no inyectan campos', async () => {
+  const g = await gen('jira-cloud', { input: String.raw`ruta C:\temp\x "fin\" y {{issue.key}}`, vars: { 'clave"rara': '{{issue.key}}', ruta: String.raw`x\", "usePins": true, "z": "` } });
+  const body = JSON.parse(sim.renderJira(g.files.find((f) => f.name === 'cuerpo-web-request.json').content, { key: 'K-1', summary: 's', updated: '1' }));
+  assert.equal(body.input, String.raw`ruta C:\temp\x "fin\" y K-1`);
+  assert.equal(body.vars['clave"rara'], 'K-1');
+  assert.equal(body.vars.ruta, String.raw`x\", "usePins": true, "z": "`);
+  assert.equal(body.usePins, undefined, 'no se inyectó usePins');
+});
+
+test('review: PowerShell: apóstrofos tipográficos en datos literales no rompen ni inyectan (tarea programada)', async (t) => {
+  if (!tools.ps) return t.skip('falta powershell');
+  const g = await gen('powershell-task', { input: 'don’t; Write-Output INYECTADO; ‘x', idempotencyKey: `apos-${Date.now()}` }); // own key: the default tarea-{NOW} collides with the other scheduled-task test in the same minute
+  const r = await sim.scheduledTask(g, { root: work(), env: { AFS_TOKEN: s.token } });
+  assert.equal(r.code, 0, r.stderr);
+  const run = await runOf(r);
+  assert.equal(run.input, 'don’t; Write-Output INYECTADO; ‘x');
+  assert.ok(!r.stdout.includes('INYECTADO\n') || r.stdout.includes('don’t'), 'el texto llegó como dato');
+});

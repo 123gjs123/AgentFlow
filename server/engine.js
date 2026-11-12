@@ -18,7 +18,7 @@ const flowChanged = (flow) => emit({ type: 'flow.updated', flowId: flow.id, flow
 
 // Test seam: scales the waits of transient retries and schedules (AFS_TIME_SCALE=0.01 in the e2e suite).
 const TIME_SCALE = Number(process.env.AFS_TIME_SCALE) > 0 ? Number(process.env.AFS_TIME_SCALE) : 1;
-const MAX_PARALLEL = Number(process.env.AFS_MAX_PARALLEL || 2);
+const MAX_PARALLEL = Math.max(1, Math.round(Number(process.env.AFS_MAX_PARALLEL)) || 2);
 const activeRuns = new Map(); // runId -> { controller, flowId }
 const activeChats = new Map(); // `${flowId}:${key}` -> controller
 
@@ -58,7 +58,7 @@ const BASH = (() => {
   return 'bash';
 })();
 
-export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed = false, onSpawn } = {}) {
+export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed = false, onSpawn, onExit } = {}) {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve({ code: -1, stdout: '', stderr: 'aborted', aborted: true });
     let file, args;
@@ -70,14 +70,18 @@ export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed
     else { file = process.platform === 'win32' ? 'powershell.exe' : 'pwsh'; args = ['-NoProfile', '-NonInteractive', '-Command', cmd]; }
     const child = spawn(file, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, windowsVerbatimArguments: shell === 'cmd' });
     if (child.pid) { try { onSpawn?.(child.pid); } catch {} }
-    let stdout = '', stderr = '';
-    signal?.addEventListener?.('abort', () => killTree(child), { once: true });
+    let stdout = '', stderr = ''; let settled = false; let grace = null;
+    const settle = (r) => { if (settled) return; settled = true; clearTimeout(grace); try { onExit?.(child.pid); } catch {} resolve(r); };
+    signal?.addEventListener?.('abort', () => killTree(child), { once: true }); // never by PID once it exited: Windows reuses PIDs
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); // multibyte characters split across chunks stay intact
     child.stdout.on('data', (d) => (stdout += d));
     child.stderr.on('data', (d) => (stderr += d));
     child.stdin.on('error', () => {});
     child.stdin.end(input || '');
-    child.on('error', (e) => resolve({ code: -1, stdout, stderr: stderr + e.message }));
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('error', (e) => settle({ code: -1, stdout, stderr: stderr + e.message }));
+    // 'close' waits for every inherited pipe: `server &` left in the background would hold it forever.
+    child.on('exit', (code) => { grace = setTimeout(() => { try { child.stdout.destroy(); child.stderr.destroy(); } catch {} settle({ code, stdout, stderr }); }, 2000); });
+    child.on('close', (code) => settle({ code: code ?? child.exitCode, stdout, stderr }));
   });
 }
 
@@ -90,7 +94,7 @@ function loadHooks(code) {
   return new Function(body)();
 }
 
-function hookCtx({ flow, step, run, input, signal, log, upstream = [] }) {
+function hookCtx({ flow, step, run, input, signal, log, upstream = [], data }) {
   const ctx = {
     flow: { id: flow.id, name: flow.name, vars: flow.vars },
     step: { id: step.id, name: step.name, kind: step.kind },
@@ -109,11 +113,12 @@ function hookCtx({ flow, step, run, input, signal, log, upstream = [] }) {
       const r = await runClaude({ prompt, model: o.model, allowedTools: o.tools, permissionMode: o.permissionMode, cwd: flowCwd(flow), signal, onEvent: (ev) => ev.kind !== 'delta' && ev.kind !== 'thinking_delta' && log({ ...ev, sub: true }) });
       return r.text;
     },
+    // Runs on the run's snapshot (per-run vars, this run's data); recorded under its own key, never over a step's record.
     runStep: async (nameOrId, inp) => {
-      const f = store.getFlow(flow.id);
-      const s = f.steps.find((x) => x.id === nameOrId || x.name === nameOrId);
+      const s = flow.steps.find((x) => x.id === nameOrId || x.name === nameOrId);
       if (!s) throw new Error(`Step no encontrado: ${nameOrId}`);
-      const r = await executeStep(f, s, inp ?? ctx.output ?? '', run, signal, []);
+      run.nestedSeq = (run.nestedSeq || 0) + 1;
+      const r = await executeStep(flow, s, inp ?? ctx.output ?? '', run, signal, [], { data, force: true, nested: `${s.id}~hook${run.nestedSeq}` });
       return r.output;
     },
     remember: (text) => addMemory(flow.id, step.id, text, 'hook'),
@@ -270,16 +275,19 @@ const assertionName = (a) => a.name || ({
 
 async function executeStep(flow, step, input, run, signal, upstream, opts = {}) {
   const data = opts.data || new Map();
-  const rs = run.steps[step.id] = {
+  const rs = run.steps[opts.nested || step.id] = {
     status: 'running', startedAt: now(), events: [], output: '', files: [], actions: [], inputs: [], assertions: [], warnings: [], denials: [], attempts: [],
   };
+  const setLast = (patch) => { if (!opts.nested) setStepRun(flow.id, step.id, patch); };
   const pending = new Map();
   let writeCalls = 0; // tool calls that may change something (counted at tool_use, even if no result ever arrives)
-  const trackPid = (pid) => { (rs.pids ||= []).push(pid); try { store.saveRun(run); } catch {} };
+  // Live child processes ({pid, at}): removed on exit, so recovery after a crash only kills what was really running.
+  const trackPid = (pid) => { (rs.pids ||= []).push({ pid, at: now() }); try { store.saveRun(run); } catch {} };
+  const untrackPid = (pid) => { if (rs.pids) rs.pids = rs.pids.filter((p) => (p?.pid ?? p) !== pid); };
   const log = (ev) => {
     const e = { ...ev, t: now() };
     if (ev.kind === 'tool_use' && ev.id) { pending.set(ev.id, { name: ev.name, input: ev.input }); if (!isReadOnlyTool(ev.name)) writeCalls++; }
-    if (ev.kind === 'queued' && rs.status === 'running') { rs.status = 'queued'; emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'queued' }); setStepRun(flow.id, step.id, { status: 'queued' }); }
+    if (ev.kind === 'queued' && rs.status === 'running') { rs.status = 'queued'; opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'queued' }); setLast({ status: 'queued' }); }
     if (ev.kind === 'tool_result' && pending.has(ev.id)) trackEffect(rs, pending.get(ev.id), ev);
     if (ev.kind !== 'delta' && ev.kind !== 'thinking_delta') {
       e.seq = ++run.eventSeq;
@@ -289,8 +297,8 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     }
     emit({ type: 'run.event', flowId: flow.id, runId: run.id, stepId: step.id, event: e });
   };
-  setStepRun(flow.id, step.id, { status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null });
-  emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
+  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null });
+  opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   store.saveRun(run);
 
   // Pinned output: the step is not executed (n8n-style "pin data"), downstream gets the frozen data.
@@ -299,7 +307,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       log({ kind: 'hook_log', text: '📌 Este step tiene una salida fijada, pero esta ejecución externa la ignora y lo ejecuta de verdad (usePins:false).' });
     } else {
       log({ kind: 'hook_log', text: '📌 Salida fijada: este step no se ejecuta. Desfíjala en la pestaña Datos para volver a ejecutarlo.' });
-      rs.status = 'success'; rs.pinned = true; rs.skipReason = 'pinned'; rs.output = step.pinned.output || ''; rs.json = step.pinned.json;
+      rs.status = 'success'; rs.pinned = true; rs.skipReason = 'pinned'; rs.output = step.pinned.output || ''; rs.json = step.pinned.json; rs.routes = step.pinned.routes || [];
       rs.inputView = { pinned: true, pinnedAt: step.pinned.at, pinnedSource: step.pinned.source };
       run.usedPins.push(step.name);
       return finish();
@@ -326,7 +334,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     for (let n = 0; ; n++) {
       const before = writeCalls;
       const at = { n: rs.attempts.length + 1, startedAt: null, reason: n ? 'transient' : reason };
-      const r = await runClaude({ cwd: flowCwd(flow), onEvent: log, ...o, signal: sig, onSpawn: trackPid, onStart: () => { at.startedAt = now(); startClock(); if (rs.status === 'queued') { rs.status = 'running'; emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' }); setStepRun(flow.id, step.id, { status: 'running' }); } } });
+      const r = await runClaude({ cwd: flowCwd(flow), onEvent: log, ...o, signal: sig, onSpawn: trackPid, onExit: untrackPid, onStart: () => { at.startedAt = now(); startClock(); if (rs.status === 'queued') { rs.status = 'running'; opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' }); setLast({ status: 'running' }); } } });
       at.startedAt ||= now();
       at.endedAt = now(); at.status = r.isError ? (r.aborted ? 'stopped' : 'error') : 'success'; if (r.isError) at.error = clipS(String(r.error || ''), 500);
       if (reason === 'judge') { (usage.judge ||= emptyUsage()); addUsage(usage.judge, r); } else addUsage(usage, r);
@@ -364,7 +372,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   let hooks = {}; let hookCompileError = null;
   // A hook that does not compile fails the step: running without it would skip its checks and report a false success.
   try { hooks = loadHooks(step.hooks); } catch (e) { hookCompileError = Object.assign(new Error(`Error compilando hooks: ${e.message}`), { code: 'HOOK_ERROR' }); }
-  const ctx = hookCtx({ flow, step, run, input, signal: sig, log, upstream });
+  const ctx = hookCtx({ flow, step, run, input, signal: sig, log, upstream, data });
 
   const wantsJson = step.output?.format === 'json';
   /** JSON extraction + schema (VER-2/3). Returns {output, json, error, code, fixable}. */
@@ -391,7 +399,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     if (step.kind === 'command') {
       const up = upstream.map((u) => u.output || (u.json != null ? JSON.stringify(u.json, null, 2) : '')).filter(Boolean).join('\n\n');
       const upJson = Object.fromEntries(upstream.filter((u) => u.json != null).map((u) => [u.name, u.json]));
-      const q = P.shellQuoter(step.shell);
+      const q = P.shellQuoter(step.shell, step.command);
       const raws = [];
       const quoted = P.placeholdersInSingleQuotes(step.command, step.shell);
       if (quoted.length) throw Object.assign(new Error(`{{${quoted[0]}}} está entre comillas simples: ahí no se expande y el comando recibiría el texto literal. Quita las comillas simples o usa comillas dobles.`), { code: 'TEMPLATE_IN_SINGLE_QUOTES' });
@@ -410,7 +418,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         log({ kind: 'tool_use', name: `shell:${step.shell}`, input: { cmd } });
         // stdin = output of previous steps (or the flow input for the first step)
         if (sig.aborted) break;
-        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid });
+        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
         log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 20000), isError: r.code !== 0 });
         output = takeRoutes(r.stdout.trim());
         rs.exitCode = r.code;
@@ -433,7 +441,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       if ((step.input?.mode || 'full') === 'summary') {
         for (const u of upstream) {
           if ((u.output || '').length <= 1500) continue;
-          const key = `${u.id}`;
+          const key = `${u.id}:${u.edgeId || ''}`; // per arrow: pick/route payloads differ
           if (!opts.summaries?.has(key)) opts.summaries?.set(key, await summarize(u.output, log, ai));
           u.summary = opts.summaries?.get(key) || null;
         }
@@ -455,13 +463,15 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
           let c = checkJson(output);
           if (c.error && c.fixable && sessionId && !sig.aborted) {
             log({ kind: 'hook_log', text: `✗ ${c.error}. Pidiendo una corrección (1 intento)…` });
-            const r2 = await ai({ prompt: `Tu respuesta no cumple el formato requerido: ${c.error}\n\nDevuelve la respuesta COMPLETA otra vez, terminando con UN bloque ${'```'}json válido que cumpla el schema.`, resume: sessionId, ...common }, 'correction');
+            const r2 = await ai({ prompt: `Tu respuesta no cumple el formato requerido: ${c.error}\n\nDevuelve la respuesta COMPLETA otra vez, terminando con UN bloque ${'```'}json válido que cumpla el schema.`, resume: sessionId, appendSystem: system, ...common }, 'correction');
             if (r2.isError) c = { ...c, error: `La corrección falló: ${r2.error || 'error'}`, code: r2.aborted ? null : 'CLI_ERROR' };
             else {
               sessionId = r2.sessionId || sessionId;
               tags = P.extractTags(r2.text);
               for (const m of tags.remember) addMemory(flow.id, step.id, m, 'run');
+              const routesBefore = rs.routes;
               c = checkJson(takeRoutes(tags.clean));
+              if (!rs.routes.length) rs.routes = routesBefore; // a correction with only the JSON keeps the chosen destinations
               if (!c.error || c.json !== undefined) output = c.output;
             }
           }
@@ -549,13 +559,15 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     rs.endedAt = now();
     rs.durationMs = rs.endedAt - rs.startedAt;
     if (step.kind === 'command') rs.usage = { ...(rs.usage || {}), durationMs: rs.durationMs };
-    const jsonFits = rs.json === undefined || JSON.stringify(rs.json).length < 300000;
-    setStepRun(flow.id, step.id, {
+    let jsonFits = true;
+    try { jsonFits = rs.json === undefined || JSON.stringify(rs.json).length < 300000; }
+    catch { rs.json = undefined; (rs.warnings ||= []).push('El JSON de la salida no se puede guardar (¿referencias circulares o BigInt?): se descartó.'); }
+    setLast({
       status: rs.status, endedAt: rs.endedAt, output: rs.output, json: jsonFits ? rs.json : undefined, files: rs.files, actions: rs.actions,
       pinned: !!rs.pinned, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, sessionId: rs.sessionId || null, runId: run.id,
       assertions: rs.assertions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: rs.attempts.length,
     });
-    emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
+    opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
     store.saveRun(run);
     run.dirty = false;
     return rs;
@@ -569,9 +581,10 @@ export function pinStep(flowId, stepId, body = {}) {
     if (!s) throw new Error('Step no encontrado');
     if (body.fromLast) {
       if (!s.lastRun || (!s.lastRun.output && s.lastRun.json === undefined)) throw new Error('El step todavía no tiene una salida para fijar');
-      s.pinned = { output: s.lastRun.output || '', json: s.lastRun.json, at: now(), source: 'last', runId: s.lastRun.runId };
+      s.pinned = { output: s.lastRun.output || '', json: s.lastRun.json, routes: s.lastRun.routes || [], at: now(), source: 'last', runId: s.lastRun.runId };
     } else {
-      s.pinned = { output: String(body.output ?? ''), json: body.json === undefined ? undefined : body.json, at: now(), source: 'edited' };
+      const ex = P.extractRoutes(String(body.output ?? '')); // edited pins may name destinations with <route to>
+      s.pinned = { output: ex.routes.length ? ex.clean : String(body.output ?? ''), json: body.json === undefined ? undefined : body.json, routes: ex.routes, at: now(), source: 'edited' };
     }
   });
   flowChanged(flow);
@@ -650,18 +663,22 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
   const flusher = setInterval(() => { if (run.dirty) { run.dirty = false; try { store.saveRun(run); } catch {} } }, 5000);
 
   // ---- breaks: the deadline clock stops while someone reviews ----
-  let pausedAt = null;
-  const pauseClock = () => { if (pausedAt) return; pausedAt = now(); clearTimeout(deadline); };
-  const resumeClock = () => {
-    if (!pausedAt || run.pauses.length) return;
-    const d = now() - pausedAt; pausedAt = null;
-    run.deadlineAt += d; run.pausedMs = (run.pausedMs || 0) + d;
-    deadline = setTimeout(onDeadline, Math.max(0, run.deadlineAt - now()));
+  // The clock stops only while something waits for review AND no other step is executing (parallel branches keep it running).
+  let pausedAt = null; let executing = 0;
+  const syncClock = () => {
+    const idle = run.pauses.length > 0 && executing === 0;
+    if (idle && !pausedAt) { pausedAt = now(); clearTimeout(deadline); }
+    else if (!idle && pausedAt) {
+      const d = now() - pausedAt; pausedAt = null;
+      run.deadlineAt += d; run.pausedMs = (run.pausedMs || 0) + d;
+      deadline = setTimeout(onDeadline, Math.max(0, run.deadlineAt - now()));
+    }
   };
+  const exec = async (...args) => { executing++; syncClock(); try { return await executeStep(...args); } finally { executing--; syncClock(); } };
   const pauseAt = (step, when, info) => new Promise((resolve) => {
     const key = `${run.id}:${step.id}`;
     const p = { stepId: step.id, step: step.name, when, at: now(), actions: REVIEW_ACTIONS[when], ...info };
-    run.pauses.push(p); run.status = 'paused'; pauseClock();
+    run.pauses.push(p); run.status = 'paused'; syncClock();
     if (when === 'before') run.steps[step.id] = { status: 'paused', pausedWhen: 'before', output: '', events: [], startedAt: now() };
     else run.steps[step.id].status = 'paused';
     setStepRun(flowId, step.id, { status: 'paused', runId: run.id });
@@ -675,7 +692,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
       controller.signal.removeEventListener('abort', onAbort);
       run.pauses = run.pauses.filter((x) => x !== p);
       if (!run.pauses.length && !controller.signal.aborted) run.status = 'running';
-      resumeClock();
+      syncClock();
       emit({ type: 'run.resumed', flowId, runId: run.id, stepId: step.id, action: d.action });
       resolve(d);
     }
@@ -739,15 +756,17 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
               if (d.action === 'skip') { skip(id, 'review', 'Omitido en el break (antes) por el revisor.'); data.set(id, { output: '', json: undefined, files: [], actions: [], routes: [] }); continue; }
             }
             const opts = { data, summaries, force: !!only, ancestors: only ? null : ancestorsOf(rflow, id) };
-            let r = await executeStep(rflow, step, input, run, controller.signal, upstream, opts);
+            let r = await exec(rflow, step, input, run, controller.signal, upstream, opts);
             for (const u of upstream) if (u.warning) r.warnings?.push(`Flecha desde "${u.name}": ${u.warning}.`);
             let rounds = 0;
             while ((brk === 'after' || brk === 'both') && r.status === 'success' && !controller.signal.aborted) {
               const d = await pauseAt(step, 'after', { output: clipS(r.output, 20000), json: r.json, routes: r.routes, round: rounds });
               if (d.action === 'retry') {
                 rounds++;
-                r = await executeStep(rflow, step, input, run, controller.signal, upstream, { ...opts, force: true, feedback: String(d.feedback || 'Rehaz la salida corrigiendo lo necesario.').slice(0, 4000), previousOutput: r.output });
+                const prevUsage = r.usage;
+                r = await exec(rflow, step, input, run, controller.signal, upstream, { ...opts, force: true, feedback: String(d.feedback || 'Rehaz la salida corrigiendo lo necesario.').slice(0, 4000), previousOutput: r.output });
                 r.reviewRounds = rounds;
+                r.usage = sumUsage(r.usage, prevUsage); // the run total keeps the cost of every attempt
                 continue;
               }
               if (d.action === 'stop') { Object.assign(r, { status: 'stopped', code: 'STOPPED', error: 'Detenido en el break por el revisor' }); controller.abort(); }
@@ -768,7 +787,10 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
             if (FAILED.has(r.status) && !(r.status === 'skipped' && NOT_A_FAILURE.has(r.skipReason))) failed.add(id);
           }
         };
-        await Promise.all(Array.from({ length: Math.min(MAX_PARALLEL, queue.length) }, worker));
+        // A worker that throws stops the others (abort) and fails the run, instead of leaving siblings running unattended.
+        const settled = await Promise.allSettled(Array.from({ length: Math.min(MAX_PARALLEL, queue.length) }, () => worker().catch((err) => { controller.abort(); throw err; })));
+        const failedWorker = settled.find((x) => x.status === 'rejected');
+        if (failedWorker) throw failedWorker.reason;
         if (controller.signal.aborted) break;
       }
       if (controller.signal.aborted) {
@@ -784,9 +806,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     for (const k of [...pendingReviews.keys()]) if (k.startsWith(`${run.id}:`)) pendingReviews.get(k).resolve({ action: 'stop' });
     run.pauses = [];
     run.endedAt = now();
-    run.totals = runTotals(run);
-    delete run.dirty;
-    store.saveRun(run);
+    try { run.totals = runTotals(run); delete run.dirty; store.saveRun(run); } catch (err) { console.error('No se pudo guardar la ejecución', run.id, err); }
     activeRuns.delete(run.id);
     emit({ type: 'run.finished', flowId, runId: run.id, status: run.status, error: run.error });
   })();
@@ -806,6 +826,14 @@ export function resumeRun(flowId, runId, stepId, body = {}) {
   if (action === 'edit' && body.output === undefined && body.json === undefined) throw Object.assign(new Error('Para "edit" envía "output" y/o "json"'), { status: 400, code: 'BAD_ACTION' });
   p.resolve({ action, output: body.output, json: body.json, feedback: body.feedback });
   return { runId, stepId: sid, action };
+}
+
+/** Adds the numeric usage fields of two attempts (break "retry"). */
+function sumUsage(a, b) {
+  if (!b) return a; if (!a) return b;
+  const out = { ...a };
+  for (const [k, v] of Object.entries(b)) if (typeof v === 'number') out[k] = Math.round(((Number(out[k]) || 0) + v) * 1e6) / 1e6;
+  return out;
 }
 
 function runTotals(run) {
@@ -856,7 +884,9 @@ export function recoverStaleRuns() {
         if (!['running', 'queued', 'paused'].includes(s.status)) continue;
         Object.assign(s, { status: 'interrupted', error: msg, code: 'INTERRUPTED', endedAt: at });
         // Processes the dead server started (claude, shells) may still be running: kill their trees.
-        for (const pid of s.pids || []) killPid(pid);
+        // Only processes started since the last boot (PIDs are reused) and still tracked (removed on exit).
+        const bootAt = now() - os.uptime() * 1000;
+        for (const p of s.pids || []) if (p && typeof p === 'object' && p.at > bootAt) killPid(p.pid);
       }
       r.totals = runTotals(r);
       delete r.dirty;
@@ -952,7 +982,7 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     parts[0] = block.text;
     r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: isFlow ? P.flowChatSystem() : P.stepChatSystem(), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, addDirs, permissionMode, cwd: flowCwd(flow), signal: controller.signal, onEvent });
   }
-  activeChats.delete(ck);
+  if (activeChats.get(ck) === controller) activeChats.delete(ck);
 
   const tags = P.extractTags(r.text);
   asst.text = tags.clean || (r.isError ? `⚠️ ${r.error || 'Error'}` : '');
@@ -961,7 +991,7 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   for (const m of tags.remember) { addMemory(flowId, isFlow ? '_flow' : key, m, 'chat'); asst.remembered.push(m); }
   store.updateChatMsg(flowId, key, asst.id, (m) => Object.assign(m, asst));
 
-  const updated = store.updateFlow(flowId, (f) => {
+  const updated = controller.signal.aborted ? null : store.updateFlow(flowId, (f) => {
     if (isFlow) { if (r.sessionId) f.globalSessionId = r.sessionId; f.globalContextHash = block.hash; }
     else {
       const s = f.steps.find((x) => x.id === key);

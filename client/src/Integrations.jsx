@@ -1,6 +1,6 @@
 // Integration helper (spec 17 INT): pick who calls, describe it, get ready-to-paste code (templates or AI), test it.
 import React, { useEffect, useState } from 'react';
-import { api } from './api.js';
+import { api, pendingSave } from './api.js';
 
 const ICON = { 'jira-cloud': '🟦', 'jira-dc': '🟦', 'jenkins-declarative': '🧔', 'jenkins-scripted': '🧔', 'github-actions': '🐙', 'bitbucket-pipelines': '🪣', 'gitlab-ci': '🦊', 'powershell-task': '⏰', 'bash-cron': '🐚', python: '🐍', 'claude-mcp': '🤖', webhook: '🔗' };
 const LOC = { cloud: 'en la nube', onprem: 'en otra máquina de tu red', local: 'en esta PC' };
@@ -48,6 +48,7 @@ export default function IntegrationWizard({ flow }) {
   }
 
   async function dryRun(real) {
+    await pendingSave.flush().catch(() => {});
     setTest({ busy: true });
     try {
       const m = out.mapping || {};

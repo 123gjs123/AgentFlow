@@ -129,13 +129,16 @@ async function handle(msg) {
 }
 
 let buf = '';
+process.stdin.setEncoding('utf8'); // StringDecoder: multibyte characters split across chunks stay intact
 process.stdin.on('data', (d) => {
-  buf += d.toString('utf8');
+  buf += d;
   let i;
   while ((i = buf.indexOf('\n')) >= 0) {
     const line = buf.slice(0, i).trim();
     buf = buf.slice(i + 1);
     if (!line) continue;
-    try { handle(JSON.parse(line)); } catch { /* ignore malformed */ }
+    let msg;
+    try { msg = JSON.parse(line); } catch { send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); continue; }
+    handle(msg);
   }
 });

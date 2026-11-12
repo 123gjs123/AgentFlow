@@ -32,9 +32,9 @@ function tmpFile(content) {
   return f;
 }
 
-/** Kills a process and all its children (Windows: taskkill /T). */
+/** Kills a running process and its children (Windows: taskkill /T). A process that already exited is left alone: its PID may belong to someone else now. */
 export function killTree(child) {
-  if (!child || child.exitCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === 'win32' && child.pid) {
     try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }); return; } catch {}
   }
@@ -174,12 +174,14 @@ function runClaudeNow(opts) {
     const [file, argv] = claudeSpawn(args);
     const child = spawn(file, argv, { cwd: workDir, env: { ...process.env }, windowsHide: true });
     if (child.pid) { try { opts.onSpawn?.(child.pid); } catch {} }
-    const kill = () => killTree(child);
+    const kill = () => killTree(child); // never by PID once the process exited: Windows reuses PIDs
     signal?.addEventListener?.('abort', kill, { once: true });
 
     let buf = '';
+    child.stdout.setEncoding('utf8'); // StringDecoder: multibyte characters split across chunks stay intact
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => {
-      buf += d.toString('utf8');
+      buf += d;
       let i;
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i).trim();
@@ -195,11 +197,14 @@ function runClaudeNow(opts) {
         }
       }
     });
-    child.stderr.on('data', (d) => { ctx.stderr += d.toString('utf8'); });
+    child.stderr.on('data', (d) => { ctx.stderr += d; });
     child.stdin.on('error', () => {});
     child.stdin.end(prompt ?? '');
 
+    let settled = false; let grace = null;
     const done = (code) => {
+      if (settled) return; settled = true; clearTimeout(grace);
+      try { opts.onExit?.(child.pid); } catch {}
       for (const f of files) fs.rm(f, { force: true }, () => {});
       const aborted = signal?.aborted;
       const r = ctx.result;
@@ -215,7 +220,9 @@ function runClaudeNow(opts) {
       });
     };
     child.on('error', (err) => { onEvent({ kind: 'error', text: `No se pudo lanzar claude (${claudeBin()}): ${err.message}` }); done(-1); });
-    child.on('close', done);
+    // 'close' waits for every inherited pipe: a process the CLI left in the background would hold it forever.
+    child.on('exit', (code) => { grace = setTimeout(() => { try { child.stdout.destroy(); child.stderr.destroy(); } catch {} done(code); }, 3000); });
+    child.on('close', (code) => done(code ?? child.exitCode));
   });
 }
 

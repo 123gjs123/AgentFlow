@@ -246,7 +246,25 @@ if ($run.status -eq 'success') { exit 0 } elseif ($run.status -eq 'timeout') { e
 
 // ---------------- literal quoting per target ----------------
 const bashLit = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-const psLit = (s) => `'${String(s).replace(/'/g, "''")}'`;
+/**
+ * PowerShell literal. Typographic single quotes are delimiters too, so they are doubled like '.
+ * Non-ASCII text becomes an ASCII-only expression (''+'don'+[char]0x2019+'t'): Windows PowerShell 5.1 reads BOM-less
+ * .ps1 files (and pasted Jenkins steps) as ANSI, which would corrupt \u00F1, accents or \u2019 inside a plain literal.
+ */
+const psLit = (s) => {
+  const str = String(s);
+  const lit = (x) => `'${x.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`;
+  if (!/[^\x20-\x7E]/.test(str)) return lit(str);
+  const parts = ["''"]; let buf = '';
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c >= 0x20 && c <= 0x7e) { buf += str[i]; continue; }
+    if (buf) { parts.push(lit(buf)); buf = ''; }
+    parts.push(`[char]0x${c.toString(16)}`); // UTF-16 units: surrogate pairs rebuild emoji too
+  }
+  if (buf) parts.push(lit(buf));
+  return `(${parts.join('+')})`;
+};
 const groovyTriple = (s) => String(s).replace(/\\/g, '\\\\').replace(/'''/g, "\\'\\'\\'"); // inside ''' ... ''' (no interpolation)
 const yamlStr = (s) => JSON.stringify(String(s)); // JSON strings are valid YAML double-quoted scalars
 
@@ -282,7 +300,9 @@ export function buildTemplate(callerId, o) {
     case 'jira-cloud':
     case 'jira-dc': {
       // Built as text so smart values stay inside the JSON strings ({{x.jsonEncode}} adds no quotes of its own).
-      const fields = [`  "input": "${input.replace(/"/g, '\\"')}"`, `  "vars": {${Object.entries(vars).map(([k, v]) => `"${k}": "${v.replace(/"/g, '\\"')}"`).join(', ')}}`, `  "source": "${callerId}"`];
+      // Literal text is JSON-escaped; {{smart values}} stay as written (they already carry .jsonEncode where needed).
+      const jstr = (s) => String(s ?? '').split(/(\{\{[^{}]*\}\})/).map((part, i) => (i % 2 ? part : JSON.stringify(part).slice(1, -1))).join('');
+      const fields = [`  "input": "${jstr(input)}"`, `  "vars": {${Object.entries(vars).map(([k, v]) => `${JSON.stringify(k)}: "${jstr(v)}"`).join(', ')}}`, `  "source": "${callerId}"`];
       if (o.stepId) fields.push(`  "step": "${o.stepId}"`);
       if (o.mode === 'wait') fields.push('  "wait": true', '  "timeoutSec": 25');
       files.push({ name: 'cuerpo-web-request.json', language: 'json', content: `{\n${fields.join(',\n')}\n}\n` });
@@ -419,7 +439,7 @@ export function lintIntegration(files, { flow, flows, callerId, token, flowVars 
       const p = m[0].replace(/[?#].*$/, '').replace(/[.,;]+$/, '');
       const hit = EXT_PATHS.map((re) => p.match(re)).find(Boolean);
       if (!hit) { errors.push({ code: 'WRONG_ENDPOINT', message: `${f.name}: ${p} no es un endpoint de la API externa.` }); continue; }
-      const ref = hit[1] && decodeURIComponent(hit[1]);
+      let ref = hit[1]; try { ref = ref && decodeURIComponent(ref); } catch { /* malformed %: compare as written */ }
       if (ref && !/[$%{]/.test(ref) && !flowExists(ref)) errors.push({ code: 'UNKNOWN_FLOW', message: `${f.name}: el flujo "${ref}" no existe.` });
     }
     for (const m of c.matchAll(/(?:--flow|-Flow)\s+'((?:[^']|'')*)'/g)) { const ref = m[1].replace(/''/g, "'").replace(/'\\''/g, "'"); if (!flowExists(ref)) errors.push({ code: 'UNKNOWN_FLOW', message: `${f.name}: el flujo "${ref}" no existe.` }); }

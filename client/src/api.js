@@ -13,6 +13,8 @@ async function req(method, url, body) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
+/** Pending-edit flush registered by App (debounced save). Await before any call that reads the flow on the server. */
+export const pendingSave = { flush: async () => {} };
 export const api = {
   get: (u) => req('GET', u),
   post: (u, b = {}) => req('POST', u, b),

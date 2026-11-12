@@ -127,7 +127,7 @@ export function previewStep(flowId, stepId, { draft = null, target = 'run', samp
   // ---- command step ----
   else if (step.kind === 'command') {
     const up = upstream.map((u) => u.output || (u.json != null ? JSON.stringify(u.json, null, 2) : '')).filter(Boolean).join('\n\n');
-    const q = P.shellQuoter(step.shell);
+    const q = P.shellQuoter(step.shell, step.command);
     let rendered = '';
     const raws = [];
     const quoted = P.placeholdersInSingleQuotes(step.command, step.shell);

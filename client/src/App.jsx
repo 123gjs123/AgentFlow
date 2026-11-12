@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
-import { api, onWs, onConn } from './api.js';
+import { api, onWs, onConn, pendingSave } from './api.js';
 import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
@@ -50,6 +50,8 @@ export default function App() {
   const [resetNonce, setResetNonce] = useState(0);
   const [autoOrder, setAutoOrder] = useState(ls.get('afs.autoOrder') !== '0');
   const dirty = useRef(false);
+  const version = useRef(0); // bumped on every local edit: a save only clears `dirty` if nothing changed meanwhile
+  const varsDirty = useRef(false); // vars edited locally (else server-side changes such as ctx.setVar win)
   const saveTimer = useRef(null);
   const flowRef = useRef(null);
   flowRef.current = flow;
@@ -59,12 +61,12 @@ export default function App() {
   const loadCatalog = (cwd) => api.get(`/api/catalog${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`).then((c) => { setCatalog(c); if (c.rateLimit) setRate(c.rateLimit); });
 
   useEffect(() => {
-    loadFlows().then(() => {});
     const last = ls.get('afs.flow');
     api.get('/api/flows').then((list) => {
+      setFlows(list);
       const id = list.find((f) => f.id === last)?.id || list[0]?.id;
       if (id) openFlow(id);
-    });
+    }).catch(() => {});
   }, []);
   useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
   // When the canvas is empty, show what is still attached to the flow (description, vars, chats, runs…).
@@ -84,36 +86,48 @@ export default function App() {
     if (!wasOffline.current) return;
     wasOffline.current = false;
     loadFlows().catch(() => {});
+    // Unsaved local edits win: save them instead of reloading the flow from the server.
+    if (dirty.current) { flushSave().catch(() => {}); return; }
     const id = flowRef.current?.id || ls.get('afs.flow');
     if (id) openFlow(id);
   }), []);
 
   async function openFlow(id) {
     if (!id) return;
+    // Save pending edits of the current flow first (the debounced save would otherwise write the NEW flow).
+    try { await flushSave(); } catch (e) { if (!confirm(`No se pudieron guardar los últimos cambios (${e.message}). ¿Abrir el otro flujo igual? Se perderán.`)) return; clearTimeout(saveTimer.current); dirty.current = false; varsDirty.current = false; }
     let f;
     try { f = await api.get(`/api/flows/${id}`); } catch (e) { notify(`No se pudo abrir el flujo: ${e.message}`); return; }
-    if (f.steps.length && f.steps.every((s) => !s.position?.x && !s.position?.y)) { f = { ...f, steps: autoLayout(f.steps, f.edges) }; api.put(`/api/flows/${f.id}`, f); }
+    if (f.steps.length && f.steps.every((s) => !s.position?.x && !s.position?.y)) { f = { ...f, steps: autoLayout(f.steps, f.edges) }; api.put(`/api/flows/${f.id}`, f).catch(() => {}); }
     setFlow(f); setSelectedId(null); setSelectedEdge(null); setLive({}); setPaused(null); setReviewOpen(false); ls.set('afs.flow', id);
     // A run of this flow may be waiting at a break (e.g. after reloading the page).
     api.get(`/api/flows/${id}/runs`).then((runs) => { const p = (runs || []).find((r) => r.status === 'paused'); if (p) setPaused({ runId: p.id }); }).catch(() => {});
   }
 
   // ---- persistence (debounced) ----
+  /** Saves the open flow now. `dirty` is cleared only if no edit happened while the PUT was in flight; on error it stays dirty. */
+  async function saveNow() {
+    const f = flowRef.current;
+    if (!f) return;
+    const v = version.current;
+    try {
+      await api.put(`/api/flows/${f.id}`, f);
+      if (version.current === v) { dirty.current = false; varsDirty.current = false; setSaveState('guardado'); }
+      loadFlows().catch(() => {});
+    } catch (e) { setSaveState('error'); notify(`No se guardó: ${e.message}`); throw e; }
+  }
   const scheduleSave = useCallback(() => {
-    dirty.current = true; setSaveState('…');
+    dirty.current = true; version.current++; setSaveState('…');
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      const f = flowRef.current;
-      try { await api.put(`/api/flows/${f.id}`, f); setSaveState('guardado'); loadFlows(); }
-      catch (e) { setSaveState('error'); notify(e.message); }
-      dirty.current = false;
-    }, 500);
+    saveTimer.current = setTimeout(() => { saveNow().catch(() => {}); }, 500);
   }, []);
 
   const mutate = useCallback((fn, { layout = false } = {}) => {
     setFlow((cur) => {
       let next = fn(structuredClone(cur));
       if (layout && autoOrder) next = { ...next, steps: autoLayout(next.steps, next.edges) };
+      if (JSON.stringify(next.vars || {}) !== JSON.stringify(cur.vars || {})) varsDirty.current = true;
+      flowRef.current = next; // a flush right after an edit must send this version
       return next;
     });
     scheduleSave();
@@ -131,7 +145,7 @@ export default function App() {
           if (!c || c.id !== m.flow.id) return c;
           const srv = new Map(m.flow.steps.map((s) => [s.id, s]));
           return {
-            ...c, memory: m.flow.memory, globalSessionId: m.flow.globalSessionId, vars: dirty.current ? c.vars : m.flow.vars,
+            ...c, memory: m.flow.memory, globalSessionId: m.flow.globalSessionId, vars: varsDirty.current ? c.vars : m.flow.vars,
             steps: c.steps.map((s) => {
               const p = srv.get(s.id);
               if (!p) return s;
@@ -160,7 +174,7 @@ export default function App() {
         setPaused((p) => (p?.runId === m.runId ? null : p));
         break;
       case 'run.paused':
-        setPaused({ runId: m.runId, step: m.step, when: m.when });
+        setPaused((p) => ({ runId: m.runId, step: m.step, when: m.when, nonce: Date.now(), ...(p?.runId === m.runId ? {} : {}) }));
         setReviewOpen(true);
         notify(`⏸ Break en “${m.step}”: valida para seguir`);
         break;
@@ -179,17 +193,22 @@ export default function App() {
   async function createFlow(template) {
     const name = prompt('Nombre del flujo', template === 'demo' ? 'Demo QA: requerimiento → casos → revisión' : 'Nuevo flujo');
     if (!name) return;
-    const f = await api.post('/api/flows', { name, template });
-    await loadFlows();
-    const laid = { ...f, steps: autoLayout(f.steps, f.edges) };
-    await api.put(`/api/flows/${f.id}`, laid);
-    openFlow(f.id);
+    try {
+      const f = await api.post('/api/flows', { name, template });
+      await loadFlows();
+      const laid = { ...f, steps: autoLayout(f.steps, f.edges) };
+      await api.put(`/api/flows/${f.id}`, laid);
+      openFlow(f.id);
+    } catch (e) { notify(e.message); }
   }
   async function deleteFlow() {
     if (!confirm(`¿Eliminar el flujo "${flow.name}" con sus chats y ejecuciones?`)) return;
-    await api.del(`/api/flows/${flow.id}`);
-    const list = await api.get('/api/flows'); setFlows(list);
-    if (list[0]) openFlow(list[0].id); else setFlow(null);
+    try {
+      clearTimeout(saveTimer.current); dirty.current = false; varsDirty.current = false;
+      await api.del(`/api/flows/${flow.id}`);
+      const list = await api.get('/api/flows'); setFlows(list);
+      if (list[0]) openFlow(list[0].id); else setFlow(null);
+    } catch (e) { notify(e.message); }
   }
   function addStep(preset) {
     setModal(null);
@@ -232,10 +251,28 @@ export default function App() {
     if (!name) return;
     try { await flushSave(); await api.post('/api/library', { flow: flow.id, step: id, name }); notify(`Guardado en “Mis steps”: ＋ Step para insertarlo en cualquier flujo`); } catch (e) { notify(e.message); }
   }
-  const onDeleteSteps = (ids) => { mutate((f) => { f.steps = f.steps.filter((s) => !ids.includes(s.id)); f.edges = f.edges.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)); return f; }, { layout: true }); setSelectedId(null); };
+  const onDeleteStepsRaw = (ids) => { mutate((f) => { f.steps = f.steps.filter((s) => !ids.includes(s.id)); f.edges = f.edges.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)); return f; }, { layout: true }); setSelectedId(null); };
   const onDeleteEdges = (ids) => mutate((f) => { f.edges = f.edges.filter((e) => !ids.includes(e.id)); return f; }, { layout: true });
   const onMove = (id, pos) => mutate((f) => { const s = f.steps.find((x) => x.id === id); if (s) s.position = pos; return f; });
-  const patchStep = (id, patch) => mutate((f) => { const s = f.steps.find((x) => x.id === id); Object.assign(s, patch); return f; });
+  const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, (m) => `\\${m}`);
+  /** Steps whose task/context/command/hooks reference {{steps.<name>…}}. */
+  const refsTo = (f, name, exceptId) => f.steps.filter((s) => s.id !== exceptId && ['task', 'context', 'command', 'hooks', 'role'].some((k) => new RegExp(`\\{\\{\\{?\\s*steps\\.${reEsc(name)}(\\.|\\s*\\})`).test(s[k] || '')));
+  const patchStep = (id, patch) => mutate((f) => {
+    const s = f.steps.find((x) => x.id === id);
+    const old = s.name;
+    Object.assign(s, patch);
+    // Renaming a box rewrites the references to it in the other boxes ({{steps.Old…}} → {{steps.New…}}).
+    if (patch.name !== undefined && old && patch.name && patch.name !== old) {
+      const re = new RegExp(`(\\{\\{\\{?\\s*steps\\.)${reEsc(old)}(?=\\.|\\s*\\})`, 'g');
+      for (const o of f.steps) if (o.id !== id) for (const k of ['task', 'context', 'command', 'hooks', 'role']) if (o[k]) o[k] = o[k].replace(re, (_m, pre) => pre + patch.name); // function: a "$" in the name is literal
+    }
+    return f;
+  });
+  const onDeleteSteps = (ids) => {
+    const users = ids.flatMap((id) => { const s = flow.steps.find((x) => x.id === id); return s ? refsTo(flow, s.name, id).filter((u) => !ids.includes(u.id)).map((u) => `"${u.name}" usa {{steps.${s.name}…}}`) : []; });
+    if (users.length && !confirm(`Otros steps usan datos del que vas a borrar:\n${users.join('\n')}\n\nEsas referencias quedarán sin resolver. ¿Borrar igual?`)) return;
+    onDeleteStepsRaw(ids);
+  };
   const relayout = () => { setFlow((f) => ({ ...f, steps: autoLayout(f.steps, f.edges) })); scheduleSave(); };
 
   async function runFlow() {
@@ -248,10 +285,11 @@ export default function App() {
   async function flushSave() {
     if (!dirty.current) return;
     clearTimeout(saveTimer.current);
-    await api.put(`/api/flows/${flowRef.current.id}`, flowRef.current);
-    dirty.current = false; setSaveState('guardado');
+    await saveNow();
   }
+  pendingSave.flush = flushSave;
   async function resetFlow(parts, ask = true) {
+    try { await flushSave(); } catch {}
     const labels = { steps: 'steps y relaciones', description: 'descripción', vars: 'variables', memory: 'memoria del flujo', chats: 'chats', runs: 'historial de ejecuciones', schedule: 'programación' };
     if (ask && !confirm(`Se va a borrar: ${parts.map((p) => labels[p]).join(', ')}.
 Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
@@ -266,13 +304,11 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
   }
   async function probe() {
     notify('Detectando tools y MCPs de tu Claude Code…');
-    await api.post('/api/catalog/probe', { cwd: flow?.cwd });
-    await loadCatalog(flow?.cwd);
-    notify('Catálogo actualizado');
+    try { await api.post('/api/catalog/probe', { cwd: flow?.cwd }); await loadCatalog(flow?.cwd); notify('Catálogo actualizado'); } catch (e) { notify(`No se pudo detectar: ${e.message}`); }
   }
 
   const step = flow?.steps.find((s) => s.id === selectedId);
-  const anyRunning = Object.values(live).some((l) => l.status === 'running' || l.status === 'paused') || !!paused;
+  const anyRunning = Object.values(live).some((l) => ['running', 'paused', 'queued'].includes(l.status)) || !!paused;
   const edgeObj = flow?.edges.find((e) => e.id === selectedEdge);
   const win = rate?.unifiedWindows;
 
@@ -368,7 +404,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         </div>
       )}
       {paused && flow && <div className="review-bar">⏸ Ejecución en pausa{paused.step ? ` en “${paused.step}”` : ''}: valida la salida para seguir <button className="primary small" onClick={() => setReviewOpen(true)}>Revisar</button></div>}
-      {paused && reviewOpen && flow && <ReviewModal key={`${paused.runId}:${paused.nonce || 0}`} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}
+      {paused && reviewOpen && flow && <ReviewModal key={paused.runId} refresh={paused.nonce || 0} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}
       {!online && <div className="offline-bar">⚠️ El servidor de Agent Flow Studio no responde. Arráncalo con <code>npm start</code> en la carpeta del proyecto (o con cualquier comando <code>afs</code>); esta página se reconecta sola.</div>}
       {toast && <div className="toast">{toast}</div>}
       {modal === 'picker' && <StepPicker catalog={catalog} onPick={addStep} onClose={() => setModal(null)} />}

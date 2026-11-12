@@ -291,3 +291,40 @@ test('cajas reutilizables: guardar un step configurado en la biblioteca (sin est
   assert.ok(!(await s.uiOk('GET', '/api/library')).some((x) => x.id === item.id));
   assert.equal((await s.ui('POST', '/api/library', { flow: f.id, step: 'nope' })).status, 404);
 });
+
+test('review: reintentar con la misma Idempotency-Key mientras la ejecución está en pausa reutiliza esa ejecución', async () => {
+  const a = role('Pausa idem', '[[mock:say x]]', { id: 's_pi', breakpoint: 'after' });
+  const f = await flowE('Idem en pausa', [a], []);
+  const r1 = await s.runExt(f.id, { breakpoints: true }, { 'Idempotency-Key': 'k-paused' });
+  assert.equal(r1.body.status, 'paused');
+  const r2 = await s.runExt(f.id, { breakpoints: true }, { 'Idempotency-Key': 'k-paused' });
+  assert.equal(r2.body.runId, r1.body.runId);
+  assert.equal(r2.body.idempotentReplay, true);
+  await s.ext('POST', `/flows/${f.id}/runs/${r1.body.runId}/resume`, { action: 'stop' });
+});
+
+test('review: un step fijado que eligió destinos (<route>) los conserva; resumen por flecha no se mezcla', async () => {
+  const r = role('Router', '[[mock:say hecho <route to="B">para B</route>]]', { id: 's_rt' });
+  const b = role('B', '[[mock:echo]]', { id: 's_rb2' });
+  const c = role('C', '[[mock:echo]]', { id: 's_rc2' });
+  const f = await flowE('Pin con rutas', [r, b, c], [edge('s_rt', 's_rb2', { when: { type: 'route' } }), edge('s_rt', 's_rc2', { when: { type: 'route' } })]);
+  await s.runUi(f.id);
+  await s.uiOk('POST', `/api/flows/${f.id}/steps/s_rt/pin`, { fromLast: true });
+  const run = await s.runUi(f.id);
+  assert.equal(run.steps.s_rt.pinned, true);
+  assert.equal(run.steps.s_rb2.status, 'success', 'la ruta fijada sigue activa');
+  assert.match(run.steps.s_rb2.output, /para B/);
+  assert.equal(run.steps.s_rc2.skipReason, 'not_routed');
+});
+
+test('review: corrección de JSON conserva los destinos elegidos y lleva las instrucciones del step', async () => {
+  const r = role('Router JSON', '[[mock:badjson-then-fix {"ok":true}]] [[mock:emit-route Dest]]', { id: 's_rj', output: { format: 'json' } });
+  const d = role('Dest', '[[mock:echo]]', { id: 's_dj' });
+  const f = await flowE('Corrección rutas', [r, d], [edge('s_rj', 's_dj', { when: { type: 'route' } })]);
+  const n = s.calls().length;
+  const run = await s.runUi(f.id);
+  assert.equal(run.steps.s_rj.status, 'success', run.steps.s_rj.error);
+  const corr = s.callsSince(n).find((c) => c.resume && /no cumple el formato/.test(c.prompt));
+  assert.match(corr.append, /# Step "Router JSON"/, 'la corrección lleva el system prompt del step');
+  assert.equal(run.steps.s_dj.status, 'success', 'el destino elegido antes de la corrección se mantiene');
+});

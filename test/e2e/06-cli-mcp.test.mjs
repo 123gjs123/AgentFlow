@@ -47,12 +47,12 @@ test('afs run: -i, --var, stdin, -f, --step, --json, --follow; exit 0 y resultad
   assert.match(st.steps[0].output, /de archivo/);
 });
 
-test('afs run de un flujo que falla → exit 1 con el código del step; flujo inexistente → exit 1', async () => {
+test('afs run de un flujo que falla → exit 1 con el código del step; flujo inexistente → exit 2 (no se pudo llamar)', async () => {
   const r = await s.afs(['run', 'Flujo Malo', '-i', 'x']);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /EXIT_NONZERO/);
   const nf = await s.afs(['run', 'No existe', '-i', 'x']);
-  assert.equal(nf.code, 1);
+  assert.equal(nf.code, 2);
   assert.match(nf.stderr, /FLOW_NOT_FOUND/);
 });
 
@@ -94,9 +94,9 @@ test('afs ask (flujo y --step)', async () => {
   assert.match(b.stderr, /responde: Final/);
 });
 
-test('afs con token inválido → exit 1 con UNAUTHORIZED (no arranca otro servidor)', async () => {
+test('afs con token inválido → exit 2 con UNAUTHORIZED (no arranca otro servidor)', async () => {
   const r = await s.afs(['list'], { env: { AFS_TOKEN: 'malo' } });
-  assert.equal(r.code, 1);
+  assert.equal(r.code, 2);
   assert.match(r.stderr, /UNAUTHORIZED/);
 });
 
@@ -154,7 +154,7 @@ test('afs --breaks: vuelve en pausa (exit 4) con la salida a validar; afs resume
   assert.equal(run.status, 'success');
   assert.match(run.steps[g.steps[1].id].output, /aprobado por CLI/);
   const bad = await s.afs(['resume', 'Flujo Break CLI', m[1]]);
-  assert.equal(bad.code, 1);
+  assert.equal(bad.code, 2);
   assert.match(bad.stderr, /RUN_NOT_FOUND/);
 });
 
@@ -172,4 +172,13 @@ test('MCP: run_flow con breakpoints vuelve en pausa (no es error) y resume_run c
     assert.equal(done.structuredContent.status, 'success');
     assert.equal(done.isError, false);
   } finally { m.close(); }
+});
+
+test('review: afs valida argumentos (exit 2) y afs ui --print da el enlace con la clave', async () => {
+  assert.equal((await s.afs(['run', 'Flujo OK', '--var'])).code, 2);
+  assert.equal((await s.afs(['run', 'Flujo OK', '--var', 'sinIgual'])).code, 2);
+  assert.equal((await s.afs(['run', 'Flujo OK', '-f', 'no-existe.txt'])).code, 2);
+  const ui = await s.afs(['ui', '--print']);
+  assert.equal(ui.code, 0);
+  assert.equal(ui.stdout.trim(), `${s.base}/?k=${s.uiKey}`);
 });

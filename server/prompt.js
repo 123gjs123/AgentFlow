@@ -58,13 +58,37 @@ const TPL_RE = /\{\{\{\s*([^{}]+?)\s*\}\}\}|\{\{\s*([^{}]+?)\s*\}\}/g;
 /** Fills {{…}} templates. With ctx.quote (command steps) every value goes through it, so data never becomes code.
  *  {{{…}}} (triple braces) splices the value verbatim — opt-out for authors who template command fragments on purpose. */
 export function render(tpl, ctx) {
-  return String(tpl || '').replace(TPL_RE, (m, raw, key) => {
+  return String(tpl || '').replace(TPL_RE, (m, raw, key, offset) => {
     const k = raw ?? key;
     const v = resolveKey(k, ctx);
     if (v === null) return m;
     if (raw !== undefined) { ctx.onRaw?.(k); return v; }
-    return ctx.quote ? ctx.quote(v, k) : v;
+    return ctx.quote ? ctx.quote(v, k, offset) : v;
   });
+}
+
+/**
+ * Quote state at each offset of a shell command: 'none' | 'single' | 'double'.
+ * bash: \ escapes, '…' literal, "…" with \ escapes. PowerShell: ` escapes, '' inside '…', "" inside "…". cmd: only "…".
+ */
+export function quoteStateAt(cmd, shell = 'powershell') {
+  const s = String(cmd || ''); const st = new Array(s.length + 1); let q = 'none';
+  const bash = shell === 'bash';
+  for (let i = 0; i < s.length; i++) {
+    st[i] = q; const ch = s[i];
+    if (shell === 'cmd') { if (ch === '"') q = q === 'double' ? 'none' : 'double'; continue; }
+    const esc = bash ? ch === '\\' : ch === '`';
+    if (q === 'single') { if (ch === "'") { if (!bash && s[i + 1] === "'") { st[++i] = q; continue; } q = 'none'; } continue; }
+    if (q === 'double') {
+      if (esc) { st[++i] = q; continue; }
+      if (ch === '"') { if (!bash && s[i + 1] === '"') { st[++i] = q; continue; } q = 'none'; }
+      continue;
+    }
+    if (esc) { st[++i] = q; continue; }
+    if (ch === "'") q = 'single'; else if (ch === '"') q = 'double';
+  }
+  st[s.length] = q;
+  return (offset) => st[offset] ?? q;
 }
 
 /** Raw ({{{…}}}) placeholders used in a text. */
@@ -72,14 +96,19 @@ export const rawPlaceholders = (tpl) => [...String(tpl || '').matchAll(/\{\{\{\s
 
 /** Command steps: each template value travels as an environment variable; the command only references it.
  *  PowerShell: $env:AFS_V0 · bash: "$AFS_V0" · cmd: !AFS_V0! (delayed expansion happens after parsing). */
-export function shellQuoter(shell) {
+export function shellQuoter(shell, template = '') {
   const env = {}; const values = []; let i = 0;
-  const quote = (v, key) => {
+  const at = quoteStateAt(template, shell);
+  const quote = (v, key, offset) => {
     const k = `AFS_V${i++}`;
     env[k] = String(v);
     values.push({ name: k, ref: key, value: clip(String(v), 2000) });
-    // Braced forms so adjacent text can't change the variable: {{x}}.json, {{a}}_{{b}}
-    return shell === 'bash' ? `"\${${k}}"` : shell === 'cmd' ? `"!${k}!"` : `\${env:${k}}`;
+    // Inside the author's own "…" the reference must be bare: our quotes would close theirs and leave the value
+    // unquoted (bash word-splitting/globbing, cmd argument splitting). Braced forms: {{x}}.json, {{a}}_{{b}}.
+    const inDouble = offset !== undefined && at(offset) === 'double';
+    if (shell === 'bash') return inDouble ? `\${${k}}` : `"\${${k}}"`;
+    if (shell === 'cmd') return inDouble ? `!${k}!` : `"!${k}!"`;
+    return `\${env:${k}}`;
   };
   return { quote, env, values };
 }
@@ -87,9 +116,8 @@ export function shellQuoter(shell) {
 /** Placeholders written inside single quotes would never expand (PowerShell/bash): flag them instead of silently passing the literal. */
 export function placeholdersInSingleQuotes(cmd, shell) {
   if (shell === 'cmd') return [];
-  const out = [];
-  for (const m of String(cmd || '').matchAll(/'[^'\n]*'/g)) for (const p of m[0].matchAll(/\{\{(?!\{)\s*([^{}]+?)\s*\}\}/g)) out.push(p[1]);
-  return out;
+  const at = quoteStateAt(cmd, shell || 'powershell');
+  return [...String(cmd || '').matchAll(/\{\{(?!\{)\s*([^{}]+?)\s*\}\}/g)].filter((m) => at(m.index) === 'single').map((m) => m[1]);
 }
 
 const memList = (items) => (items?.length ? items.map((m) => `- ${m.text}`).join('\n') : '(vacía)');

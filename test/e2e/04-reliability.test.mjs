@@ -11,7 +11,7 @@ let s;
 before(async () => { s = await startServer({ name: 'rel' }); await s.start(); });
 after(async () => { await s?.stop(); });
 
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const alive = (p) => { try { process.kill(p?.pid ?? p, 0); return true; } catch { return false; } };
 /** taskkill runs asynchronously: under load the tree can take a few seconds to disappear. */
 const dead = async (pid, ms = 10000) => { for (let t = 0; t < ms; t += 250) { if (!alive(pid)) return true; await sleep(250); } return false; };
 
@@ -62,14 +62,19 @@ test('timeout del step (TIMEOUT) y deadline de la ejecución (DEADLINE) matan el
   const next = role('Nunca', 'x');
   const f2 = await s.flow('Deadline', [ai, next], [[ai.id, next.id]], { runTimeoutSec: 10 });
   const t0 = Date.now();
-  const [r1, r2] = await Promise.all([s.runUi(f1.id, '', { timeoutMs: 40000 }), s.runUi(f2.id, '', { timeoutMs: 40000 })]);
+  const id1 = (await s.uiOk('POST', `/api/flows/${f1.id}/run`, { input: '' })).runId;
+  const id2 = (await s.uiOk('POST', `/api/flows/${f2.id}/run`, { input: '' })).runId;
+  const live1 = (await s.waitRun(f1.id, id1, 20000, (r) => r.steps?.[slow.id]?.pids?.length)).steps[slow.id].pids;
+  const live2 = (await s.waitRun(f2.id, id2, 20000, (r) => r.steps?.[ai.id]?.pids?.length)).steps[ai.id].pids;
+  const [r1, r2] = await Promise.all([s.waitRun(f1.id, id1, 40000), s.waitRun(f2.id, id2, 40000)]);
   assert.ok(Date.now() - t0 < 30000, 'no espera los 60 s');
   assert.equal(r1.status, 'timeout');
   assert.equal(r1.steps[slow.id].code, 'TIMEOUT');
   assert.equal(r2.status, 'timeout');
   assert.equal(r2.steps[ai.id].code, 'DEADLINE');
   assert.equal(r2.steps[next.id].skipReason, 'deadline');
-  for (const pid of [...(r1.steps[slow.id].pids || []), ...(r2.steps[ai.id].pids || [])]) assert.ok(await dead(pid), `proceso ${pid} sigue vivo`);
+  for (const p of [...live1, ...live2]) assert.ok(await dead(p), `proceso ${p.pid} sigue vivo`);
+  assert.deepEqual(r1.steps[slow.id].pids, [], 'los procesos terminados dejan de figurar');
 });
 
 test('cancelar una ejecución (UI) y detener todo el flujo; la otra ejecución sigue', async () => {
@@ -78,7 +83,7 @@ test('cancelar una ejecución (UI) y detener todo el flujo; la otra ejecución s
   const f = await s.flow('Cancelar', [a, b], [[a.id, b.id]]);
   const { runId: r1 } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '1' });
   const { runId: r2 } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '2' });
-  await s.waitRun(f.id, r1, 10000, (r) => r.steps?.[a.id]?.pids?.length);
+  const livePids = (await s.waitRun(f.id, r1, 10000, (r) => r.steps?.[a.id]?.pids?.length)).steps[a.id].pids;
   const c = await s.uiOk('POST', `/api/flows/${f.id}/runs/${r1}/cancel`, {});
   assert.equal(c.status, 'stopped');
   const run1 = await s.waitRun(f.id, r1);
@@ -91,7 +96,7 @@ test('cancelar una ejecución (UI) y detener todo el flujo; la otra ejecución s
   const stop = await s.uiOk('POST', `/api/flows/${f.id}/stop`, {});
   assert.ok(stop.stopped >= 1);
   assert.equal((await s.waitRun(f.id, r2)).status, 'stopped');
-  for (const pid of run1.steps[a.id].pids) assert.ok(await dead(pid), 'el proceso de claude se mató');
+  for (const p of livePids) assert.ok(await dead(p), 'el proceso de claude se mató');
 });
 
 test('cancelar durante la espera de un reintento de comando no lo vuelve a ejecutar', async () => {
@@ -195,6 +200,38 @@ test('caída del servidor durante una ejecución → al reiniciar queda "interru
     assert.equal(run.status, 'interrupted');
     assert.equal(run.steps[a.id].code, 'INTERRUPTED');
     assert.equal((await c.getFlow(f.id)).steps[0].lastRun.status, 'interrupted');
-    for (const pid of live.steps[a.id].pids) assert.ok(await dead(pid), `huérfano ${pid} sigue vivo`);
+    for (const p of live.steps[a.id].pids) assert.ok(await dead(p), `huérfano ${p.pid} sigue vivo`);
   } finally { await c.stop(); }
+});
+
+test('review: bash "…{{x}}…" dentro de comillas dobles no parte ni expande el valor; apóstrofos en comillas dobles no son error', async (t) => {
+  if (!(await hasBin(process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash', ['-c', 'exit 0']))) return t.skip('sin bash');
+  const a = cmd('Bash dq', 'printf "[%s]" "dir/{{input}}"', { shell: 'bash' });
+  const b = cmd('Apóstrofo', 'Write-Output "it\'s {{input}}"');
+  const f = await s.flow('Comillas dobles', [a, b]);
+  const run = await s.runUi(f.id, 'a b *');
+  assert.equal(run.steps[a.id].output, '[dir/a b *]', 'un solo argumento, sin glob');
+  assert.equal(run.steps[b.id].status, 'success', run.steps[b.id].error);
+  assert.equal(run.steps[b.id].output, "it's a b *");
+});
+
+test('review: un comando que deja un proceso en segundo plano no cuelga el step', async (t) => {
+  if (!(await hasBin(process.platform === 'win32' ? 'C:/Program Files/Git/bin/bash.exe' : 'bash', ['-c', 'exit 0']))) return t.skip('sin bash');
+  const a = cmd('Fondo', 'sleep 20 & echo arrancado', { shell: 'bash' });
+  const f = await s.flow('Fondo', [a]);
+  const t0 = Date.now();
+  const run = await s.runUi(f.id, '', { timeoutMs: 15000 });
+  assert.equal(run.steps[a.id].status, 'success');
+  assert.equal(run.steps[a.id].output, 'arrancado');
+  assert.ok(Date.now() - t0 < 12000, 'no espera al proceso de fondo');
+});
+
+test('review: UTF-8 multibyte intacto aunque la salida llegue en muchos trozos', async () => {
+  const big = 'ñáé€😀'.repeat(20000);
+  const a = cmd('Unicode', `$s = '${'ñáé€'}' * 30000; [Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Out.Write($s)`);
+  const f = await s.flow('Unicode', [a]);
+  const run = await s.runUi(f.id);
+  assert.ok(!run.steps[a.id].output.includes('\uFFFD'), 'sin caracteres de reemplazo');
+  assert.equal(run.steps[a.id].output.length, 4 * 30000);
+  assert.ok(big.length > 0);
 });

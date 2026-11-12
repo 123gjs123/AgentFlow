@@ -120,7 +120,7 @@ test('catálogo: skills y agentes del usuario y del proyecto; archivo de definic
 });
 
 test('UI: sirve la app, info y rotación de token', async () => {
-  const home = await fetch(s.base + '/');
+  const home = await fetch(s.base + '/', { headers: { 'X-AFS-UI': s.uiKey } });
   assert.equal(home.status, 200);
   assert.match(await home.text(), /<div id="root"|<script/);
   const info = await s.uiOk('GET', '/api/info');
