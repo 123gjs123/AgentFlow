@@ -8,7 +8,7 @@
 const eq = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const SERVER_STEP = new Set(['memory', 'lastRun', 'pinned', 'chatSessionId', 'chatContextHash']);
 const SERVER_FLOW = new Set(['memory', 'globalSessionId', 'globalContextHash', 'updatedAt', 'createdAt', 'rev', 'id']);
-const FLOW_FIELDS = ['name', 'description', 'cwd', 'vars', 'schedule', 'runTimeoutSec', 'versionEveryMin', 'contextSources', 'finally'];
+const FLOW_FIELDS = ['name', 'description', 'cwd', 'vars', 'schedule', 'runTimeoutSec', 'versionEveryMin', 'contextSources', 'finally', 'requirements'];
 
 function field(b, l, r, label, conflicts) {
   if (eq(l, b)) return r;

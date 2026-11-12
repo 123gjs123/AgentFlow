@@ -35,6 +35,7 @@ Runs use your Claude Code login: your subscription, skills, agents and MCP conne
    - [Undo, redo and versions](#undo-redo-and-versions)
    - [Several tabs](#several-tabs)
    - [Simple and complex flows](#simple-and-complex-flows)
+   - [Requirements: what a flow needs on the machine](#requirements-what-a-flow-needs-on-the-machine)
    - [Schedules](#schedules)
 6. [Running flows from outside](#running-flows-from-outside)
    - [External HTTP API](#external-http-api)
@@ -373,6 +374,20 @@ Flows that build things (clone a repo, build a Docker image, run Argo or kubectl
 
   See [docs/specs/22](docs/specs/22-workspace-finally-access.md).
 
+### Requirements: what a flow needs on the machine
+
+Flujo → **✅ Requisitos para usar este flujo** lists what a person needs before running the flow. Each item has a "how to get it" text.
+
+- **🧰 Tool**: installed, with an optional check such as Docker running.
+- **📄 File**: for example a secrets file. With a template, **Crear desde plantilla** creates it with the key names; you fill in the values.
+- **🔑 Environment variable**.
+- **🌐 Reachable service**: VPN or QA environment.
+- **🔌 MCP connector**: for example Atlassian.
+
+**✨ Sugerir** proposes them from what the flow uses.
+
+They are checked before every run. If something required is missing, the run does not start: the UI shows **"Antes de ejecutar este flujo…"** with the instructions, and the API, `afs` and MCP answer `PREFLIGHT_FAILED` with the list. A header chip warns when the open flow is missing something. Recommended items never block.
+
 ### Schedules
 
 **Flujo → Programación**: run the flow every N minutes with a fixed input. A scheduled run does not start while the previous one is still running.
@@ -589,7 +604,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **167 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **172 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

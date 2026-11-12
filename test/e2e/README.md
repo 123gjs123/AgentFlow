@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (167 tests)
+## Qué cubre (172 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -57,6 +57,7 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `13-history-versions-chat` | Spec 20: versiones automáticas (estado inicial + intervalo, 0 = apagado), con nombre, restaurar (conserva lo ejecutado, se puede deshacer, 409 con ejecución en curso), lógica de deshacer/rehacer (solo su acción), y en el navegador: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z y ↶ ↷, pestaña Versiones, mover una flecha a otros puntos, chat con Enter / Alt+Enter / Shift+Enter |
 | `14-context-sources` | Spec 21: las fuentes de contexto NO van en el prompt (índice + acceso: --add-dir, Read/Grep/Glob, WebFetch, herramientas de Atlassian), contexto del flujo para todos los steps, plantillas en referencias, fuente inexistente = aviso, vista previa = lo enviado, chat con acceso, API de comprobar / explorar carpetas / subir documento / saneo, y en el navegador: sección 📎 Contexto con explorador, ✓, insignia y contexto del flujo |
 | `15-workspace-finally-access` | Spec 22: directorio de trabajo inexistente → CWD_MISSING (UI, API, dry run, vista previa) y aviso sin directorio solo en steps que escriben; "Al terminar" en éxito/error/detenido/caída del servidor, sin cambiar el resultado, no en steps sueltos, saneado y con 422 para raw externo; {{run.id}}/{{run.short}}/{{run.date}}; acceso de terminal restringida (git sin push, docker, sin web) |
+| `16-requirements-preflight` | Spec 23: comprobaciones de herramienta (instalada / falta / falla su chequeo), archivo, variable, URL y conector MCP; archivo de secretos desde plantilla (no sobrescribe, avisa mientras falten valores, CRLF); bloqueo 412 en UI, step suelto, API, afs y dry run, lo recomendado no bloquea; sugerencias; y en el navegador: aviso en la barra, ventana "Antes de ejecutar", crear desde plantilla y ejecutar |
 
 Cómo se simula cada origen en `07-integrations`:
 

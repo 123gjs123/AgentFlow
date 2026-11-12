@@ -319,3 +319,15 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .ok-text { color: var(--ok); }
 .fs-list { list-style: none; padding: 0; margin: 8px 0; max-height: 55vh; overflow: auto; }
 .fs-entry { width: 100%; text-align: left; padding: 3px 6px; }
+
+/* ---- spec 23: requirements / preflight ---- */
+.req-list, .req-results { list-style: none; padding: 0; margin: 8px 0; }
+.req-item { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px; }
+.req-item input, .req-item textarea { width: 100%; }
+.req-result { border-left: 4px solid var(--line); padding: 6px 10px; margin-bottom: 8px; background: var(--bg2); border-radius: 4px; }
+.req-result.ok { border-left-color: var(--ok); }
+.req-result.bad { border-left-color: var(--err); }
+.req-result.warn, .req-result.unknown { border-left-color: var(--warn); }
+.req-help { margin: 4px 0; white-space: pre-wrap; }
+.req-sugg { border: 1px dashed var(--line); border-radius: 6px; padding: 8px; margin-top: 6px; }
+.warn-chip { color: var(--warn); border-color: var(--warn); }

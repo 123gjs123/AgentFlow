@@ -7,6 +7,7 @@ import { ExternalInvoke } from './Help.jsx';
 import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
 import ContextBox from './Context.jsx';
 import ContextSources, { FsPicker } from './Sources.jsx';
+import RequirementsEditor from './Requirements.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -291,6 +292,10 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
         <div className="panel-body pad">
           <Field label="Nombre"><input value={flow.name} onChange={set('name')} /></Field>
           <Field label="Descripción"><textarea rows={2} value={flow.description} onChange={set('description')} /></Field>
+          <div className="ctx-block" data-testid="flow-requirements">
+            <div className="ctx-title">✅ Requisitos para usar este flujo{(flow.requirements || []).length ? ` (${flow.requirements.length})` : ''} <span className="muted small">— lo que debe tener instalado quien lo ejecute</span></div>
+            <RequirementsEditor flow={flow} onChange={(v) => onChange({ requirements: v })} />
+          </div>
           <div className="ctx-block" data-testid="flow-context">
             <div className="ctx-title">📎 Contexto del flujo{(flow.contextSources || []).length ? ` (${flow.contextSources.length})` : ''} <span className="muted small">— lo pueden consultar todos los steps</span></div>
             <ContextSources flow={flow} scope="flow" value={flow.contextSources} onChange={(v) => onChange({ contextSources: v })} />

@@ -2,6 +2,7 @@
 // - UI API (/api/*): loopback only, same-origin, JSON-only writes (blocks CSRF / DNS rebinding).
 // - External API (/api/ext/*): token required (Bearer, X-AFS-Token or ?token=). Usable from scripts,
 //   Jenkins, webhooks, the `afs` CLI and the MCP server. Reachable from other hosts only if HOST is set.
+import './certs.js'; // first: trust the OS certificate store (corporate TLS proxies)
 import express from 'express';
 import http from 'node:http';
 import path from 'node:path';
@@ -16,6 +17,7 @@ import { lastInit, lastRateLimit, probeInit, claudeBin } from './claude.js';
 import { previewStep, definitionFile } from './context.js';
 import * as integ from './integrations.js';
 import { SOURCE_TYPES, checkSource } from './sources.js';
+import { REQ_TYPES, preflight, preflightMessage, suggestRequirements, createFromTemplate, clearPreflightCache } from './preflight.js';
 import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -126,7 +128,8 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
     const warnings = [];
     if (!input) warnings.push('input vacío');
     for (const k of Object.keys(body.vars || {})) if (!(k in (flow.vars || {}))) warnings.push(`la variable "${k}" no existe en el flujo`);
-    return { dryRun: true, ok: true, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, wouldReplay, warnings };
+    const pf = (flow.requirements || []).length ? await preflight(flow) : { ok: true, blocking: [], results: [] };
+    return { dryRun: true, ok: pf.ok, preflight: { ok: pf.ok, missing: pf.blocking, results: pf.results }, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, wouldReplay, warnings };
   }
   let bodyHash = null;
   if (key) {
@@ -141,6 +144,7 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
   }
   const problem = engine.externalRunProblem(flow, { only, vars: body.vars });
   if (problem) throw fail(problem.status, problem.error, problem.code);
+  { const blocked = await gate(flow, res); if (blocked) return blocked; }
   const trigger = String(body.source || req.query.source || 'api').slice(0, 20);
   const runId = engine.startRun(flow.id, { input, only, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null, breakpoints: truthy(body.breakpoints) });
   if (key) store.setIdem(`${flow.id}:${key}`, { runId, bodyHash, flowId: flow.id });
@@ -249,7 +253,7 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   const d = v.flow;
   const steps = (d.steps || []).map((s) => { const p = prev.get(s.id); return p ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId, chatContextHash: p.chatContextHash } : { ...s, memory: [], lastRun: null }; });
   for (const s of cur.steps) if (!steps.some((x) => x.id === s.id)) store.clearChat(cur.id, s.id);
-  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, contextSources: d.contextSources, finally: d.finally, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
+  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, contextSources: d.contextSources, finally: d.finally, requirements: d.requirements, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
   engine.topoLevels(next);
   const saved = store.saveFlow(next);
   engine.syncSchedule(saved);
@@ -257,6 +261,27 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
   return saved;
 }));
+
+/** Requirements (spec 23): known types and fields only, bounded sizes. */
+function cleanRequirements(list) {
+  if (!Array.isArray(list)) return undefined;
+  return list.filter((r) => r && REQ_TYPES.includes(r.type)).slice(0, 40).map((r) => {
+    const o = { id: typeof r.id === 'string' ? r.id.slice(0, 40) : store.uid('rq_'), type: r.type };
+    for (const k of ['label', 'name', 'check', 'path', 'url', 'server', 'help']) if (typeof r[k] === 'string' && (r[k].trim() || k === 'check')) o[k] = r[k].slice(0, k === 'help' ? 2000 : 1000);
+    if (typeof r.template === 'string' && r.template.trim()) o.template = r.template.slice(0, 5000);
+    if (r.optional) o.optional = true;
+    if (r.disabled) o.disabled = true;
+    return o;
+  });
+}
+/** Blocks the start of a run when a required requirement is missing: 412 + what is missing and how to fix it. */
+async function gate(flow, res) {
+  if (!(flow.requirements || []).length) return null;
+  const pf = await preflight(flow);
+  if (pf.ok) return null;
+  res.status(412);
+  return { error: preflightMessage(pf), code: 'PREFLIGHT_FAILED', missing: pf.blocking };
+}
 
 /** "Al terminar" (spec 22): one command run after every full run. */
 function cleanFinally(f) {
@@ -333,13 +358,14 @@ app.put('/api/flows/:id', wrap((req, res) => {
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
-  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, steps, edges };
+  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, requirements: cleanRequirements(body.requirements) ?? cur.requirements, steps, edges };
   engine.topoLevels(next); // throws on cycles
   next.rev = (cur.rev || 0) + 1;
   delete next.baseRev;
   if (body.versionEveryMin !== undefined) next.versionEveryMin = Math.min(1440, Math.max(0, Number(body.versionEveryMin) || 0));
   const saved = store.saveFlow(next);
   autoVersion(cur, saved);
+  clearPreflightCache(saved.id);
   engine.syncSchedule(saved);
   engine.flowChanged(saved, String(req.get('x-afs-tab') || '').slice(0, 40) || null);
   if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
@@ -375,8 +401,8 @@ app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); eng
 // ----- runs -----
 // UI runs honour breaks unless {breakpoints:false}.
 const uiInput = (v) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v, null, 2));
-app.post('/api/flows/:id/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
-app.post('/api/flows/:id/steps/:stepId/run', wrap((req) => ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+app.post('/api/flows/:id/run', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+app.post('/api/flows/:id/steps/:stepId/run', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
 app.post('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.pinStep(req.params.id, req.params.stepId, req.body || {})));
 app.delete('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.unpinStep(req.params.id, req.params.stepId)));
 app.post('/api/flows/:id/stop', wrap((req) => ({ stopped: engine.stopRuns(req.params.id) })));
@@ -417,6 +443,16 @@ app.delete('/api/flows/:id/chat/:key', wrap((req) => {
   return f;
 }));
 app.post('/api/flows/:id/chat/:key/apply', wrap((req) => engine.applyProposal(req.params.id, req.params.key, req.body.messageId, req.body.proposalId)));
+
+// ----- requirements / preflight (spec 23) -----
+app.get('/api/flows/:id/preflight', wrap(async (req) => preflight(need(req.params.id), { fresh: req.query.fresh === '1', probe: req.query.probe === '1' })));
+app.get('/api/flows/:id/requirements/suggest', wrap((req) => suggestRequirements(need(req.params.id))));
+app.post('/api/flows/:id/requirements/:rid/create-file', wrap((req) => {
+  const flow = need(req.params.id);
+  const r = (flow.requirements || []).find((x) => x.id === req.params.rid);
+  if (!r) throw fail(404, 'Requisito no encontrado', 'REQUIREMENT_NOT_FOUND');
+  return createFromTemplate(r, flow);
+}));
 
 // ----- context sources helpers (spec 21) -----
 app.post('/api/context/check', wrap(async (req) => {

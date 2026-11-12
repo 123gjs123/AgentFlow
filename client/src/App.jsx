@@ -6,6 +6,7 @@ import { createHistory } from './history.js';
 import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
+import { PreflightModal } from './Requirements.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -41,6 +42,8 @@ export default function App() {
   const setSelectedId = (id) => { setSelectedIdRaw(id); if (id) setSelectedEdge(null); };
   const [paused, setPaused] = useState(null); // {runId, step, when} of a run waiting at a break (spec 18)
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [preflight, setPreflight] = useState(null); // {missing: n} for the header chip (spec 23)
+  const [pfModal, setPfModal] = useState(null); // {retry: fn}
   const [stepTab, setStepTab] = useState('config');
   const [flowTab, setFlowTab] = useState('chat');
   const [rate, setRate] = useState(null);
@@ -77,6 +80,12 @@ export default function App() {
     }).catch(() => {});
   }, []);
   useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
+  // Requirements (spec 23): header chip when something required is missing on this machine.
+  useEffect(() => {
+    if (!flow?.requirements?.length) { setPreflight(null); return; }
+    const t = setTimeout(() => api.get(`/api/flows/${flow.id}/preflight`).then((p) => setPreflight({ missing: p.blocking.length, recommended: p.results.filter((r) => r.ok === false && r.optional).length })).catch(() => {}), 800);
+    return () => clearTimeout(t);
+  }, [flow?.id, JSON.stringify(flow?.requirements || []), JSON.stringify(flow?.vars || {}), pfModal]);
   // Tab title = flow name, to tell tabs apart.
   useEffect(() => { document.title = flow ? `${flow.name} · Agent Flow Studio` : 'Agent Flow Studio'; }, [flow?.name]);
   // When the canvas is empty, show what is still attached to the flow (description, vars, chats, runs…).
@@ -355,10 +364,12 @@ export default function App() {
 
   async function runFlow() {
     setShowRun(false);
-    try { await flushSave(); await api.post(`/api/flows/${flow.id}/run`, { input: runInput }); } catch (e) { notify(e.message); }
+    try { await flushSave(); await api.post(`/api/flows/${flow.id}/run`, { input: runInput }); }
+    catch (e) { if (e.code === 'PREFLIGHT_FAILED') setPfModal({ retry: runFlow }); else notify(e.message); }
   }
   async function runStep(id, input) {
-    try { await flushSave(); await api.post(`/api/flows/${flow.id}/steps/${id}/run`, { input }); } catch (e) { notify(e.message); }
+    try { await flushSave(); await api.post(`/api/flows/${flow.id}/steps/${id}/run`, { input }); }
+    catch (e) { if (e.code === 'PREFLIGHT_FAILED') setPfModal({ retry: () => runStep(id, input) }); else notify(e.message); }
   }
   async function flushSave() {
     if (!dirty.current) return;
@@ -422,6 +433,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
               </span>
             )}
             <span className="muted small save">{saveState}</span>
+            {preflight?.missing > 0 && <button className="ghost small warn-chip" onClick={() => setPfModal({})} title="Este flujo necesita cosas que faltan en esta máquina">⚠ Faltan {preflight.missing} requisito{preflight.missing > 1 ? 's' : ''}</button>}
             <div className="run-wrap" data-tour="run">
               <button className="primary" onClick={() => setShowRun(!showRun)} disabled={!flow.steps.length}>▶ Ejecutar flujo</button>
               {showRun && (
@@ -485,6 +497,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           <p className="muted small">¿Primera vez? <a onClick={() => setTourStep(0)}>Haz el recorrido guiado</a> o abre <a onClick={() => setModal({ help: 'start' })}>Ayuda</a>.</p>
         </div>
       )}
+      {pfModal && flow && <PreflightModal flow={flow} onClose={() => setPfModal(null)} onReady={pfModal.retry} />}
       {paused && flow && <div className="review-bar">⏸ Ejecución en pausa{paused.step ? ` en “${paused.step}”` : ''}: valida la salida para seguir <button className="primary small" onClick={() => setReviewOpen(true)}>Revisar</button></div>}
       {paused && reviewOpen && flow && <ReviewModal key={paused.runId} refresh={paused.nonce || 0} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}
       {!online && <div className="offline-bar">⚠️ El servidor de Agent Flow Studio no responde. Arráncalo con <code>npm start</code> en la carpeta del proyecto (o con cualquier comando <code>afs</code>); esta página se reconecta sola.</div>}
