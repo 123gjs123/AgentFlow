@@ -156,6 +156,8 @@ export function systemSections(flow, step, rctx = {}) {
   if (step.kind === 'skill' && step.skillRef) out.push(S('skillHint', 'Instrucción de usar la skill', 'step.skillRef', `Usa la skill "${step.skillRef}" (vía la herramienta Skill) para realizar la tarea.`));
   if (step.role) out.push(S('role', 'Rol / cómo trabaja', 'step.role', `## Rol\n${step.role}`));
   if (step.context) out.push(S('context', 'Contexto (renderizado)', 'step.context', `## Contexto\n${render(step.context, { flow, vars: flow.vars, ...rctx })}`));
+  // Attached context sources (spec 21), already resolved by sources.resolveContext (same in runs and preview).
+  for (const c of rctx.contextSources || []) out.push(S(c.id, c.label, c.source, c.text));
   out.push(S('memoryStep', `Memoria del step (${step.memory?.length || 0})`, 'step.memory', `## Memoria de este step\n${memList(step.memory)}`));
   if (flow.memory?.length) out.push(S('memoryFlow', `Memoria del flujo (${flow.memory.length})`, 'flow.memory', `## Memoria general del flujo\n${memList(flow.memory)}`));
   if (step.output?.format === 'json') {
@@ -283,7 +285,7 @@ Eres la interfaz conversacional de UN step de un flujo de agentes de IA. En cada
 - Responde en el idioma del usuario.`;
 }
 
-export function stepContextBlock(flow, step) {
+export function stepContextBlock(flow, step, attached = []) {
   const { up, down } = neighbors(flow, step);
   const lr = step.lastRun;
   const body = [
@@ -293,6 +295,7 @@ export function stepContextBlock(flow, step) {
     `Rol:\n${step.role || '(vacío)'}`,
     `Tarea:\n${step.task || '(vacía)'}`,
     `Contexto:\n${step.context || '(vacío)'}`,
+    `Contexto adjunto (documentos, carpetas, páginas, Jira, Confluence; léelos con tus herramientas si hace falta):\n${attached.join('\n') || '(ninguno)'}`,
     `Modelo: ${step.model || 'por defecto'} | Effort: ${step.effort || 'por defecto'} | Permisos: ${step.permissionMode || 'por defecto'} | Tools permitidas: ${step.allowedTools || '(ninguna extra)'}`,
     `Hooks (código):\n${clip(step.hooks, 3000) || '(ninguno)'}`,
     `Steps anteriores: ${up.map((s) => s.name).join(', ') || '—'} | Steps siguientes: ${down.map((s) => s.name).join(', ') || '—'}`,

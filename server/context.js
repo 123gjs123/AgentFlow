@@ -9,6 +9,7 @@ import { parseSchema } from './schema.js';
 import { findAgent, findSkill } from './catalog.js';
 import { buildArgs, lastInit } from './claude.js';
 import { cliOptions, ancestorsOf, evalAssertion } from './engine.js';
+import { resolveContext, contextAccess } from './sources.js';
 
 const est = (n) => Math.ceil(n / 4);
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + `\n… [${s.length - n} chars más]` : s || '');
@@ -57,7 +58,7 @@ function claudeCodeSection(flow) {
  * Preview of a step invocation.
  * opts: { draft?: partial step (not saved), target?: 'run'|'chat', sample?: { mode: 'ui'|'external', input?, vars?, runId? } }
  */
-export function previewStep(flowId, stepId, { draft = null, target = 'run', sample = {} } = {}) {
+export async function previewStep(flowId, stepId, { draft = null, target = 'run', sample = {} } = {}) {
   const stored = store.getFlow(flowId);
   if (!stored) throw Object.assign(new Error('Flujo no encontrado'), { status: 404 });
   const base = stored.steps.find((s) => s.id === stepId);
@@ -108,13 +109,16 @@ export function previewStep(flowId, stepId, { draft = null, target = 'run', samp
   const refs = [];
   const pinsUsed = [];
   const ancestors = ancestorsOf(flow, stepId);
-  const rctx = (strict) => ({ runId: run?.id, refs, allowed: strict && !step.input?.allowNonUpstream ? ancestors : null, usePins: mode !== 'external', onPinned: (n) => pinsUsed.push(n) });
+  // Attached context: resolved exactly as a run does (spec 21)
+  const cx = step.kind === 'command' ? { sections: [], tools: [], addDirs: [], warnings: [], sources: [] } : await resolveContext(rflow, step, { input });
+  for (const w of cx.warnings) warn('CONTEXT_SOURCE', w, 'context');
+  const rctx = (strict) => ({ runId: run?.id, refs, allowed: strict && !step.input?.allowNonUpstream ? ancestors : null, usePins: mode !== 'external', onPinned: (n) => pinsUsed.push(n), contextSources: cx.sections });
 
   const result = { kind: step.kind, target, sample: { mode, runId: run?.id || null, input }, warnings, upstream: upstream.map(({ output, json, source, origin, sample, summaryState, ...u }) => ({ ...u, source: sample ? origin : source, sample, summary: summaryState, chars: (output || '').length, hasJson: json !== undefined && json !== null })), refs };
 
   // ---- chat target (spec 17 CTX-14) ----
   if (target === 'chat') {
-    const block = P.stepContextBlock(flow, step);
+    const block = P.stepContextBlock(flow, step, contextAccess(flow, step).lines);
     const system = P.stepChatSystem();
     result.chat = { system, block: block.text, hash: block.hash, willResend: !base.chatSessionId || block.hash !== base.chatContextHash };
     result.sections = [
@@ -152,7 +156,8 @@ export function previewStep(flowId, stepId, { draft = null, target = 'run', samp
     const system = sys.map((s) => s.text).join('\n\n');
     const user = usr.map((s) => s.text).join('\n\n');
     result.system = system; result.user = user;
-    const cli = cliOptions(step);
+    const cli = cliOptions(step, cx);
+    result.context = cx.sources;
     const args = buildArgs({ ...cli, appendSystem: system }, (k) => (k === 'append' ? '<system>' : '<file>'));
     const builtins = cli.tools === undefined ? null : cli.tools ? cli.tools.split(',') : [];
     const allowed = (String(step.allowedTools || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || []);

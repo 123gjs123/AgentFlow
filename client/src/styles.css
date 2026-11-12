@@ -303,3 +303,19 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .icon-btn:disabled { opacity: .35; cursor: default; }
 .version-list { list-style: none; padding: 0; margin: 10px 0 0; }
 .version-list li { border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+
+/* ---- spec 21: 📎 Contexto (consultation sources) ---- */
+.ctx-block { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 6px 0 14px; background: var(--bg2); }
+.ctx-title { font-weight: 600; margin-bottom: 4px; }
+.src-list { list-style: none; padding: 0; margin: 8px 0; }
+.src-item { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px; }
+.src-item.off { opacity: .55; }
+.src-item .row { align-items: center; gap: 6px; }
+.src-icon { font-size: 16px; }
+.src-label { flex: 1; }
+.src-ref { flex: 1; min-width: 0; }
+.src-note { width: 100%; }
+.src-add button { margin: 2px 4px 2px 0; }
+.ok-text { color: var(--ok); }
+.fs-list { list-style: none; padding: 0; margin: 8px 0; max-height: 55vh; overflow: auto; }
+.fs-entry { width: 100%; text-align: left; padding: 3px 6px; }

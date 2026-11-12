@@ -1,6 +1,6 @@
 // Context box (spec 17 CTX): live preview of what a step would send, by section, labelled by source and destination.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { api } from './api.js';
+import { api, pendingSave } from './api.js';
 
 const DEST = {
   system: ['→ instrucciones de sistema', 'sys'],
@@ -9,7 +9,7 @@ const DEST = {
   'claude-code': ['lo agrega Claude Code', 'cc'],
   none: ['no va al modelo', 'none'],
 };
-const DRAFT_KEYS = ['name', 'kind', 'role', 'task', 'context', 'skillRef', 'agentRef', 'allowedTools', 'permissionMode', 'model', 'effort', 'output', 'input', 'assertions', 'timeoutSec', 'retry', 'allowDenials', 'allowEmpty', 'hooks', 'command', 'shell'];
+const DRAFT_KEYS = ['name', 'kind', 'role', 'task', 'context', 'skillRef', 'agentRef', 'allowedTools', 'permissionMode', 'model', 'effort', 'output', 'input', 'assertions', 'timeoutSec', 'retry', 'allowDenials', 'allowEmpty', 'hooks', 'command', 'shell', 'contextSources'];
 const fmtTok = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0));
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 
@@ -46,13 +46,14 @@ export default function ContextBox({ flow, step, target = 'run' }) {
 
   const draft = useMemo(() => Object.fromEntries(DRAFT_KEYS.map((k) => [k, step[k]])), [step]);
   const draftKey = JSON.stringify(draft);
-  const deps = `${draftKey}|${mode}|${sample}|${sampleInput}|${step.lastRun?.endedAt}|${step.memory?.length}|${flow.memory?.length}|${JSON.stringify(flow.edges)}|${JSON.stringify(flow.vars)}|${!!step.pinned}`;
+  const deps = `${draftKey}|${mode}|${sample}|${sampleInput}|${step.lastRun?.endedAt}|${step.memory?.length}|${flow.memory?.length}|${JSON.stringify(flow.edges)}|${JSON.stringify(flow.vars)}|${!!step.pinned}|${JSON.stringify(flow.contextSources || [])}`;
   useEffect(() => {
     const my = ++seq.current;
     setBusy(true);
     const t = setTimeout(() => {
       const body = { draft, target: mode, sample: sample === 'last' ? { runId: step.lastRun?.runId } : { mode: sample, ...(sampleInput.trim() ? { input: sampleInput } : {}) } };
-      api.post(`/api/flows/${flow.id}/steps/${step.id}/preview`, body)
+      // Flow-level sources live on the server: save pending edits first so the preview sees them.
+      pendingSave.flush().catch(() => {}).then(() => api.post(`/api/flows/${flow.id}/steps/${step.id}/preview`, body))
         .then((r) => { if (my === seq.current) { setP(r); setErr(''); } })
         .catch((e) => { if (my === seq.current) setErr(e.message); })
         .finally(() => { if (my === seq.current) setBusy(false); });
@@ -93,7 +94,7 @@ export default function ContextBox({ flow, step, target = 'run' }) {
     <div className={`ctx-box ${open ? 'open' : ''}`}>
       <div className="ctx-head" onClick={toggle} title="Qué contexto recibe este step: se arma igual que al ejecutar">
         <span className="caret">{open ? '▾' : '▸'}</span>
-        <b>Contexto</b>
+        <b>👁 Lo que recibe el modelo</b>
         <span className="ctx-chips">{chips.map((c, i) => <span key={i} className="chip">{c}</span>)}</span>
         {warns.length > 0 && <span className="chip warn" title={warns.map((w) => w.message).join('\n')}>⚠ {warns.length}</span>}
         {busy && <span className="muted small">actualizando…</span>}

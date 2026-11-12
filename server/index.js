@@ -15,6 +15,8 @@ import { listAgents, listSkills } from './catalog.js';
 import { lastInit, lastRateLimit, probeInit, claudeBin } from './claude.js';
 import { previewStep, definitionFile } from './context.js';
 import * as integ from './integrations.js';
+import { SOURCE_TYPES, checkSource } from './sources.js';
+import os from 'node:os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT || 4317);
@@ -247,7 +249,7 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   const d = v.flow;
   const steps = (d.steps || []).map((s) => { const p = prev.get(s.id); return p ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId, chatContextHash: p.chatContextHash } : { ...s, memory: [], lastRun: null }; });
   for (const s of cur.steps) if (!steps.some((x) => x.id === s.id)) store.clearChat(cur.id, s.id);
-  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
+  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, contextSources: d.contextSources, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
   engine.topoLevels(next);
   const saved = store.saveFlow(next);
   engine.syncSchedule(saved);
@@ -255,6 +257,18 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
   return saved;
 }));
+
+// Context sources (spec 21): only known types and fields, bounded sizes.
+function cleanSources(list) {
+  if (!Array.isArray(list)) return undefined;
+  return list.filter((s) => s && SOURCE_TYPES.includes(s.type)).slice(0, 50).map((s) => {
+    const o = { id: typeof s.id === 'string' ? s.id.slice(0, 40) : store.uid('cs_'), type: s.type };
+    for (const k of ['label', 'path', 'url', 'ref', 'note']) if (typeof s[k] === 'string' && s[k].trim()) o[k] = s[k].slice(0, k === 'note' ? 500 : 2000);
+    if (s.children) o.children = true;
+    if (s.disabled) o.disabled = true;
+    return o;
+  });
+}
 
 // ----- flows -----
 // Arrows keep only known fields (spec 18): sides on the boxes, label, condition and the JSON field they carry.
@@ -305,14 +319,14 @@ app.put('/api/flows/:id', wrap((req, res) => {
   if (body.edges !== undefined && !Array.isArray(body.edges)) throw fail(400, '"edges" debe ser una lista', 'BAD_REQUEST');
   if (body.vars !== undefined && (typeof body.vars !== 'object' || body.vars === null || Array.isArray(body.vars))) throw fail(400, '"vars" debe ser un objeto', 'BAD_VARS');
   for (const k of ['name', 'description', 'cwd']) if (body[k] !== undefined && body[k] !== null && typeof body[k] !== 'string') throw fail(400, `"${k}" debe ser texto`, 'BAD_REQUEST');
-  const steps = (body.steps || []).filter((s) => s && typeof s === 'object' && typeof s.id === 'string').map((s) => {
+  const steps = (body.steps || []).filter((s) => s && typeof s === 'object' && typeof s.id === 'string').map((s) => ({ ...s, contextSources: cleanSources(s.contextSources) })).map((s) => {
     const prev = byId.get(s.id);
     return prev ? { ...s, memory: prev.memory, lastRun: prev.lastRun, pinned: prev.pinned, chatSessionId: prev.chatSessionId, chatContextHash: prev.chatContextHash } : store.newStep({ ...s, pinned: undefined });
   });
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
-  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, steps, edges };
+  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, steps, edges };
   engine.topoLevels(next); // throws on cycles
   next.rev = (cur.rev || 0) + 1;
   delete next.baseRev;
@@ -396,6 +410,40 @@ app.delete('/api/flows/:id/chat/:key', wrap((req) => {
   return f;
 }));
 app.post('/api/flows/:id/chat/:key/apply', wrap((req) => engine.applyProposal(req.params.id, req.params.key, req.body.messageId, req.body.proposalId)));
+
+// ----- context sources helpers (spec 21) -----
+app.post('/api/context/check', wrap(async (req) => {
+  const flow = need(req.body?.flow);
+  const [src] = cleanSources([req.body?.source]) || [];
+  if (!src) throw fail(400, 'Fuente inválida', 'BAD_SOURCE');
+  return checkSource(src, { flow, input: typeof req.body?.input === 'string' ? req.body.input : '' });
+}));
+/** Folder browser for choosing paths (this machine only, behind the UI key). */
+app.get('/api/fs/list', wrap((req) => {
+  const flow = req.query.flow ? store.getFlow(String(req.query.flow)) : null;
+  let p = String(req.query.path || '').trim() || (flow?.cwd && fs.existsSync(flow.cwd) ? flow.cwd : os.homedir());
+  p = path.resolve(p);
+  let st; try { st = fs.statSync(p); } catch { throw fail(404, `No existe: ${p}`, 'PATH_NOT_FOUND'); }
+  if (!st.isDirectory()) p = path.dirname(p);
+  let entries = [];
+  try { entries = fs.readdirSync(p, { withFileTypes: true }); } catch (e) { throw fail(403, `No se puede leer ${p}: ${e.code || e.message}`, 'PATH_UNREADABLE'); }
+  const list = entries.filter((e) => !e.name.startsWith('$')).map((e) => { let size = null; if (!e.isDirectory()) { try { size = fs.statSync(path.join(p, e.name)).size; } catch {} } return { name: e.name, dir: e.isDirectory(), size }; })
+    .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1)).slice(0, 1000);
+  const parent = path.dirname(p);
+  return { path: p, parent: parent !== p ? parent : null, home: os.homedir(), entries: list };
+}));
+/** Upload a document (e.g. a .md or .pdf from another place): stored under data/context-files/<flow>/ and used by path. */
+app.post('/api/flows/:id/context-files', wrap((req) => {
+  const flow = need(req.params.id);
+  const name = String(req.body?.name || '').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'archivo';
+  const data = typeof req.body?.data === 'string' ? Buffer.from(req.body.data, 'base64') : null;
+  if (!data?.length) throw fail(400, 'Archivo vacío', 'BAD_FILE');
+  const dir = path.join(store.DATA, 'context-files', flow.id.replace(/[^\w-]/g, '_'));
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${Date.now().toString(36)}-${name}`);
+  fs.writeFileSync(file, data);
+  return { path: file, name, size: data.length };
+}));
 
 // ----- step library (spec 18) -----
 app.get('/api/library', wrap(() => store.listLibrary()));

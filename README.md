@@ -29,6 +29,7 @@ Runs use your Claude Code login: your subscription, skills, agents and MCP conne
    - [Reliability](#reliability)
    - [Memory, chats and hooks](#memory-chats-and-hooks)
    - [Context box](#context-box)
+   - [📎 Context: consultation sources](#-context-consultation-sources)
    - [Reusable boxes](#reusable-boxes)
    - [Pinned outputs](#pinned-outputs)
    - [Undo, redo and versions](#undo-redo-and-versions)
@@ -301,6 +302,26 @@ At the top of each step's **Config** and **Chat** tabs, the box shows **exactly*
 
 You can preview with UI or external-run semantics, type a test input, or replay the exact data of a past run and compare.
 
+### 📎 Context: consultation sources
+
+Each step has a **📎 Contexto** section in its Config. The flow has **📎 Contexto del flujo**, under Flujo, which every step can use.
+
+What you can attach:
+- a document (any file: .md, PDF, Word, code…; you can also upload one);
+- a folder;
+- a web page;
+- Jira: a ticket, several, an initiative or epic with its children, or a JQL query;
+- Confluence: a page, optionally with its children.
+
+How it reaches the model:
+- Sources are **not pasted into the prompt**. The model gets a short index, "what is available and where", plus the access to reach each source:
+  - read access to the folders and files ( + Read/Grep/Glob);
+  - WebFetch for pages;
+  - the Atlassian MCP read tools for Jira and Confluence.
+- Each skill, agent or role consults them when it needs to.
+- References accept templates (, ).
+- Each source shows a ✓/✗ check, and a folder browser helps pick paths.
+
 ### Reusable boxes
 
 - **Duplicate** copies a box in the same flow.
@@ -548,7 +569,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **154 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **160 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

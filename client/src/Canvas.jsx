@@ -72,8 +72,9 @@ function StepNode({ data, selected }) {
       <div className="node-name" title={step.name}>{step.name}</div>
       <div className="node-sub" title={ref}>{ref || <span className="muted">—</span>}</div>
       {live?.activity && status === 'running' && <div className="node-live" title={live.activity}>{live.activity}</div>}
-      {(step.breakpoint || step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0 || step.assertions?.length > 0) && (
+      {(step.breakpoint || step.contextSources?.length > 0 || step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0 || step.assertions?.length > 0) && (
         <div className="node-badges">
+          {step.contextSources?.length > 0 && <span title={`Contexto: ${step.contextSources.map((x) => x.label || x.path || x.url || x.ref).join(' · ')}`}>📎 {step.contextSources.length}</span>}
           {step.breakpoint && <span className="brk" title="Break: la ejecución se pausa aquí para validar">{BREAK_LABEL[step.breakpoint]}</span>}
           {step.memory?.length > 0 && <span title="Memoria">🧷 {step.memory.length}</span>}
           {step.hooks?.trim() && <span title="Hooks">🪝</span>}

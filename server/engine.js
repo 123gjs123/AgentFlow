@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as store from './store.js';
 import { runClaude, killTree, isTransient } from './claude.js';
+import { resolveContext, contextAccess } from './sources.js';
 import { findAgent, findSkill } from './catalog.js';
 import * as P from './prompt.js';
 import { validate, parseSchema } from './schema.js';
@@ -181,14 +182,18 @@ function trackEffect(rs, use, res) {
 }
 
 /** CLI options for an AI step run (shared by the engine and the context preview, spec 17 CTX-1/CTX-9). */
-export function cliOptions(step) {
+export function cliOptions(step, context = null) {
+  // Attached context (spec 21) may need tools (Read for files, WebFetch, Atlassian read tools) and --add-dir.
+  const allowedTools = [String(step.allowedTools || ''), ...(context?.tools || [])].join(' ').trim();
+  const s = { ...step, allowedTools };
   return {
     model: step.model || undefined, effort: step.effort || undefined,
     agent: step.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
-    permissionMode: step.permissionMode || undefined, allowedTools: step.allowedTools,
+    permissionMode: step.permissionMode || undefined, allowedTools,
     // Least privilege: --allowedTools only pre-approves; --tools makes other built-in tools unavailable.
     // Agent steps keep the tools of their agent definition.
-    tools: step.kind === 'agent' ? undefined : builtinTools(step),
+    tools: step.kind === 'agent' ? undefined : builtinTools(s),
+    ...(context?.addDirs?.length ? { addDirs: context.addDirs } : {}),
   };
 }
 
@@ -449,11 +454,17 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
           u.summary = opts.summaries?.get(key) || null;
         }
       }
+      // Attached context (documents, folders, pages, Jira, Confluence) — spec 21
+      const cx = await resolveContext(flow, step, { input: ctx.input });
+      rctx.contextSources = cx.sections;
+      for (const w of cx.warnings) rs.warnings.push(w);
+      if (cx.sources.length) log({ kind: 'hook_log', text: `📎 Fuentes de consulta disponibles: ${cx.sources.map((x) => `${x.label}${x.ok ? '' : ' (⚠)'}`).join(' · ')} — el modelo las consulta si las necesita` });
       const prompt = P.runUserPrompt(flow, step, ctx.input, upstream, data, rctx);
       const system = P.runSystemPrompt(flow, step, rctx);
       addRefInputs();
       rs.inputView = { kind: 'ai', mode: step.input?.mode || 'full', prompt: clipS(prompt, 60000), system: clipS(system, 30000), upstream: upMeta.map((m, i) => ({ ...m, summarized: !!upstream[i].summary })) };
-      const common = cliOptions(step);
+      const common = cliOptions(step, cx);
+      rs.inputView.context = cx.sources;
       rs.inputView.tools = common.tools ?? '(los del agente)';
       const r = await ai({ prompt, appendSystem: system, ...common });
       sessionId = r.sessionId;
@@ -940,7 +951,8 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   // Context: send full block only when it changed since this session last saw it.
   const sessionId = isFlow ? flow.globalSessionId : step.chatSessionId;
   const lastHash = isFlow ? flow.globalContextHash : step.chatContextHash;
-  const block = isFlow ? P.flowContextBlock(flow) : P.stepContextBlock(flow, step);
+  const access = contextAccess(flow, isFlow ? null : step);
+  const block = isFlow ? P.flowContextBlock(flow) : P.stepContextBlock(flow, step, access.lines);
   const parts = [];
   if (!sessionId || block.hash !== lastHash) parts.push(block.text);
   else parts.push(isFlow ? '<flow-context>(sin cambios desde el último mensaje)</flow-context>' : '<step-context>(sin cambios desde el último mensaje)</step-context>');
@@ -952,8 +964,8 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   if (origin === 'global') parts.push('(Este mensaje llegó desde el chat general y fue enrutado a ti.)');
   parts.push(message);
 
-  let allowedTools = isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools;
-  const addDirs = [];
+  let allowedTools = [isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...access.tools].filter(Boolean).join(' ');
+  const addDirs = [...access.addDirs];
   let permissionMode;
   if (improve && step) {
     const ref = step.kind === 'skill' ? findSkill(step.skillRef, flow.cwd) : step.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;

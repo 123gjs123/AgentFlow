@@ -98,7 +98,8 @@ test('abrir un flujo desde el selector, ejecutarlo desde la barra y ver los step
   assert.equal(runs[0].status, 'success');
   // step panel
   await page.locator('.node-name', { hasText: 'Analizar UI' }).click();
-  await page.getByText('Contexto', { exact: true }).first().waitFor();
+  await page.getByText('👁 Lo que recibe el modelo').first().waitFor();
+  await page.locator('[data-testid="step-context"]').waitFor();
   await page.locator('.tabs button', { hasText: 'Actividad' }).click();
   await page.locator(':is(pre, div, span):visible', { hasText: 'riesgo' }).first().waitFor();
   await page.locator('.tabs button', { hasText: 'Datos' }).click();

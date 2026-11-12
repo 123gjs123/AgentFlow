@@ -6,6 +6,7 @@ import { ACCESS, accessOf } from './presets.js';
 import { ExternalInvoke } from './Help.jsx';
 import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
 import ContextBox from './Context.jsx';
+import ContextSources from './Sources.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -128,6 +129,12 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
               ))}
             </div>
           </Field>
+          <div className="ctx-block" data-testid="step-context">
+            <div className="ctx-title">📎 Contexto{(step.contextSources || []).length ? ` (${step.contextSources.length})` : ''}</div>
+            {step.kind === 'command'
+              ? <p className="muted small">Los comandos no usan fuentes de consulta (léelas en el propio comando con su ruta).</p>
+              : <ContextSources flow={flow} value={step.contextSources} onChange={(v) => onChange({ contextSources: v })} inherited={(flow.contextSources || []).filter((x) => !x.disabled).length} />}
+          </div>
           <Field label="Break" hint="pausa la ejecución aquí para validar (solo ejecuciones desde la app, o externas con breakpoints:true)">
             <select value={step.breakpoint || ''} onChange={(e) => onChange({ breakpoint: e.target.value })}>
               <option value="">Sin break</option>
@@ -183,8 +190,8 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
               <IoSettings step={step} onChange={onChange} />
               <VerifySettings step={step} onChange={onChange} />
               <details className="advanced">
-                <summary>Avanzado: contexto, modelo, permisos y tools exactas</summary>
-              <Field div label="Contexto" hint="datos fijos: links, proyecto Jira, reglas, etc.">
+                <summary>Avanzado: notas fijas, modelo, permisos y tools exactas</summary>
+              <Field div label="Notas fijas en el prompt" hint="texto corto que SÍ va siempre en el prompt (p. ej. proyecto Jira, convenciones). Para documentos, carpetas, páginas, Jira o Confluence usa 📎 Contexto arriba">
                 <TplField flow={flow} step={step} rows={3} value={step.context} onChange={(v) => onChange({ context: v })} />
               </Field>
               <div className="grid3">
@@ -283,6 +290,10 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
         <div className="panel-body pad">
           <Field label="Nombre"><input value={flow.name} onChange={set('name')} /></Field>
           <Field label="Descripción"><textarea rows={2} value={flow.description} onChange={set('description')} /></Field>
+          <div className="ctx-block" data-testid="flow-context">
+            <div className="ctx-title">📎 Contexto del flujo{(flow.contextSources || []).length ? ` (${flow.contextSources.length})` : ''} <span className="muted small">— lo pueden consultar todos los steps</span></div>
+            <ContextSources flow={flow} scope="flow" value={flow.contextSources} onChange={(v) => onChange({ contextSources: v })} />
+          </div>
           <Field label="Directorio de trabajo" hint="cwd de Claude y comandos (repo, proyecto). Vacío = tu home">
             <input className="mono" value={flow.cwd} onChange={set('cwd')} placeholder="C:\Users\...\mi-repo" />
           </Field>
