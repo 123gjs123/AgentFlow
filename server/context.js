@@ -86,8 +86,9 @@ export function previewStep(flowId, stepId, { draft = null, target = 'run', samp
     if (data.has(u)) d = { ...data.get(u), source: data.get(u).source };
     else {
       d = s ? P.stepData(s, null, null, { usePins: mode !== 'external' }) : { output: '', source: 'none' };
-      if (mode === 'external' && s?.pinned) note = 'se ejecutará: la salida real no se conoce aún (ejemplo: su última salida)';
       if (d.source === 'none') note = 'todavía no tiene una salida exitosa: el step recibiría "(sin salida)"';
+      // External runs ignore the pin and execute the step: what it receives is produced in that run.
+      if (mode === 'external' && s?.pinned) note = `se ejecutará: la salida real no se conoce aún${d.source === 'none' ? '' : ' (ejemplo: su última salida)'}`;
     }
     if ((d.output || '').length > max) warn('UPSTREAM_TRUNCATED', `"${s?.name || u}" entrega ${(d.output || '').length.toLocaleString()} caracteres; se recortan a ${max.toLocaleString()} ("máx. caracteres").`, 'upstream');
     const summaryState = step.input?.mode === 'summary' && (d.output || '').length > 1500 ? 'pending' : undefined;

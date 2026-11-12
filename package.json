@@ -9,7 +9,11 @@
     "dev": "node --watch-path=server server/index.js",
     "build": "vite build",
     "prod": "vite build && cross-env NODE_ENV=production node server/index.js",
-    "afs": "node bin/afs.js"
+    "afs": "node bin/afs.js",
+    "test:e2e": "node --test --test-concurrency=3 --test-reporter=spec \"test/e2e/*.test.mjs\"",
+    "test:e2e:ci": "node -e \"require('fs').mkdirSync('test-results',{recursive:true})\" && node --test --test-concurrency=3 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results/e2e-junit.xml \"test/e2e/*.test.mjs\"",
+    "verify:templates": "node scripts/verify/int-templates.mjs",
+    "test:release": "vite build && npm run test:e2e:ci"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",

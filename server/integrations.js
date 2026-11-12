@@ -282,7 +282,7 @@ export function buildTemplate(callerId, o) {
     case 'jira-cloud':
     case 'jira-dc': {
       // Built as text so smart values stay inside the JSON strings ({{x.jsonEncode}} adds no quotes of its own).
-      const fields = [`  "input": "${input.replace(/"/g, '\\"')}"`, `  "vars": {${Object.entries(vars).map(([k, v]) => `"${k}": "${v.replace(/"/g, '\\"')}"`).join(', ')}}`, `  "source": "${callerId === 'jira-cloud' ? 'jira' : 'jira-dc'}"`];
+      const fields = [`  "input": "${input.replace(/"/g, '\\"')}"`, `  "vars": {${Object.entries(vars).map(([k, v]) => `"${k}": "${v.replace(/"/g, '\\"')}"`).join(', ')}}`, `  "source": "${callerId}"`];
       if (o.stepId) fields.push(`  "step": "${o.stepId}"`);
       if (o.mode === 'wait') fields.push('  "wait": true', '  "timeoutSec": 25');
       files.push({ name: 'cuerpo-web-request.json', language: 'json', content: `{\n${fields.join(',\n')}\n}\n` });
@@ -413,7 +413,7 @@ export function lintIntegration(files, { flow, flows, callerId, token, flowVars 
     for (const [re, why] of DANGEROUS) if (re.test(c)) errors.push({ code: 'DANGEROUS_COMMAND', message: `${f.name}: ${why}.` });
     for (const m of c.matchAll(/https?:\/\/([^\s/"'`<>)]+)/g)) {
       const host = m[1];
-      if (baseHost && host !== baseHost && !/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host) && !/^<|tu-|example/.test(host)) errors.push({ code: 'FOREIGN_HOST', message: `${f.name}: llama a otro servidor (${host}); solo debería llamar a ${baseHost}.` });
+      if (baseHost && host !== baseHost && !/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host) && !/^<|^tu-|(^|\.)example\.(com|org|net)(:\d+)?$/.test(host)) errors.push({ code: 'FOREIGN_HOST', message: `${f.name}: llama a otro servidor (${host}); solo debería llamar a ${baseHost}.` });
     }
     for (const m of c.matchAll(/\/api\/ext\/[^\s"'`<>)]*/g)) {
       const p = m[0].replace(/[?#].*$/, '').replace(/[.,;]+$/, '');

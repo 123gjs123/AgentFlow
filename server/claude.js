@@ -17,6 +17,12 @@ export function claudeBin() {
   return (cachedBin = 'claude');
 }
 
+/** [file, args] to spawn claude. A CLAUDE_BIN ending in .js/.mjs/.cjs runs with this node (tests use a mock CLI). */
+export function claudeSpawn(args) {
+  const bin = claudeBin();
+  return /.(m|c)?js$/i.test(bin) ? [process.execPath, [bin, ...args]] : [bin, args];
+}
+
 const TMP = path.join(os.tmpdir(), 'agent-flow-studio');
 fs.mkdirSync(TMP, { recursive: true });
 
@@ -36,7 +42,7 @@ export function killTree(child) {
 }
 
 /** Errors worth retrying: rate limit / overload / API 5xx / CLI died without a result. */
-export const isTransient = (r) => !!r && r.isError && !r.aborted && (r.noResult || /rate.?limit|overloaded|API Error: 5dd|(529|503|502)|ECONNRESET|ETIMEDOUT|socket hang up/i.test(String(r.error || '') + ' ' + String(r.text || '').slice(0, 300)));
+export const isTransient = (r) => !!r && r.isError && !r.aborted && (r.noResult || /rate.?limit|overloaded|API Error: 5\d\d|\b(529|503|502)\b|ECONNRESET|ETIMEDOUT|socket hang up/i.test(String(r.error || '') + ' ' + String(r.text || '').slice(0, 300)));
 
 const clip = (s, n) => (typeof s === 'string' && s.length > n ? s.slice(0, n) + `\n… [${s.length - n} chars more]` : s);
 
@@ -165,7 +171,8 @@ function runClaudeNow(opts) {
   return new Promise((resolve) => {
     const ctx = { result: null, text: '', sessionId: null, stderr: '', model: null };
     const workDir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
-    const child = spawn(claudeBin(), args, { cwd: workDir, env: { ...process.env }, windowsHide: true });
+    const [file, argv] = claudeSpawn(args);
+    const child = spawn(file, argv, { cwd: workDir, env: { ...process.env }, windowsHide: true });
     if (child.pid) { try { opts.onSpawn?.(child.pid); } catch {} }
     const kill = () => killTree(child);
     signal?.addEventListener?.('abort', kill, { once: true });
@@ -215,7 +222,8 @@ function runClaudeNow(opts) {
 /** Spawn claude only until the init event, to discover tools/MCPs without spending a model call. */
 export function probeInit(cwd) {
   return new Promise((resolve) => {
-    const child = spawn(claudeBin(), ['-p', '--output-format', 'stream-json', '--verbose'], { cwd: cwd && fs.existsSync(cwd) ? cwd : os.homedir(), windowsHide: true });
+    const [file, argv] = claudeSpawn(['-p', '--output-format', 'stream-json', '--verbose']);
+    const child = spawn(file, argv, { cwd: cwd && fs.existsSync(cwd) ? cwd : os.homedir(), windowsHide: true });
     let buf = ''; let finished = false;
     const finish = () => { if (finished) return; finished = true; try { child.kill(); } catch {} resolve({ ...lastInit }); };
     child.stdout.on('data', (d) => {

@@ -16,6 +16,8 @@ bus.setMaxListeners(100);
 const emit = (msg) => bus.emit('msg', msg);
 const flowChanged = (flow) => emit({ type: 'flow.updated', flowId: flow.id, flow });
 
+// Test seam: scales the waits of transient retries and schedules (AFS_TIME_SCALE=0.01 in the e2e suite).
+const TIME_SCALE = Number(process.env.AFS_TIME_SCALE) > 0 ? Number(process.env.AFS_TIME_SCALE) : 1;
 const MAX_PARALLEL = Number(process.env.AFS_MAX_PARALLEL || 2);
 const activeRuns = new Map(); // runId -> { controller, flowId }
 const activeChats = new Map(); // `${flowId}:${key}` -> controller
@@ -62,9 +64,11 @@ export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed
     let file, args;
     if (shell === 'bash') { file = BASH; args = ['-lc', cmd]; }
     // /v:on only when the command references template values (!AFS_V0! expands after parsing); otherwise "!" stays literal.
-    else if (shell === 'cmd') { file = 'cmd.exe'; args = ['/d', '/s', ...(delayed ? ['/v:on'] : []), '/c', cmd]; }
+    // cmd.exe does not understand the \" escaping Node applies to arguments: pass the line verbatim as /s /c "<cmd>"
+    // (cmd strips the outer quotes), the same way Node's own `shell: true` does.
+    else if (shell === 'cmd') { file = 'cmd.exe'; args = ['/d', '/s', ...(delayed ? ['/v:on'] : []), '/c', `"${cmd}"`]; }
     else { file = process.platform === 'win32' ? 'powershell.exe' : 'pwsh'; args = ['-NoProfile', '-NonInteractive', '-Command', cmd]; }
-    const child = spawn(file, args, { cwd, env: { ...process.env, ...env }, windowsHide: true });
+    const child = spawn(file, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, windowsVerbatimArguments: shell === 'cmd' });
     if (child.pid) { try { onSpawn?.(child.pid); } catch {} }
     let stdout = '', stderr = '';
     signal?.addEventListener?.('abort', () => killTree(child), { once: true });
@@ -332,7 +336,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       if (isTransient(r) && n < 2 && !sig.aborted && !sideEffects && reason !== 'judge') {
         const wait = n ? 120 : 30;
         log({ kind: 'retry', text: `↻ Error transitorio (${clipS(String(r.error || 'sin resultado'), 200)}). Reintento ${n + 1}/2 en ${wait}s…` });
-        await sleep(wait * 1000, sig);
+        await sleep(wait * 1000 * TIME_SCALE, sig);
         if (sig.aborted) return r;
         continue;
       }
@@ -355,8 +359,9 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   };
   const upMeta = upstream.map((u) => ({ name: u.name, chars: (u.output || '').length, json: u.json !== undefined && u.json !== null, source: u.source || 'run', fromRunId: u.fromRunId || null }));
 
-  let hooks = {};
-  try { hooks = loadHooks(step.hooks); } catch (e) { log({ kind: 'error', text: `Error compilando hooks: ${e.message}` }); }
+  let hooks = {}; let hookCompileError = null;
+  // A hook that does not compile fails the step: running without it would skip its checks and report a false success.
+  try { hooks = loadHooks(step.hooks); } catch (e) { hookCompileError = Object.assign(new Error(`Error compilando hooks: ${e.message}`), { code: 'HOOK_ERROR' }); }
   const ctx = hookCtx({ flow, step, run, input, signal: sig, log, upstream });
 
   const wantsJson = step.output?.format === 'json';
@@ -373,6 +378,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
 
   let output = ''; let json; let error = null; let sessionId = null;
   try {
+    if (hookCompileError) throw hookCompileError;
     if (hooks.onStart) {
       log({ kind: 'hook', text: 'onStart' });
       const r = await hooks.onStart(ctx);
@@ -1025,7 +1031,7 @@ export function syncSchedule(flow) {
   if (s?.enabled && Number(s.everyMinutes) >= 1) {
     timers.set(flow.id, setInterval(() => {
       if (!isRunning(flow.id)) { try { startRun(flow.id, { input: s.input || '', trigger: 'schedule' }); } catch {} }
-    }, Number(s.everyMinutes) * 60000));
+    }, Number(s.everyMinutes) * 60000 * TIME_SCALE));
   }
 }
 export function clearSchedule(flowId) { clearInterval(timers.get(flowId)); timers.delete(flowId); }

@@ -63,7 +63,8 @@ export default function IntegrationWizard({ flow }) {
   const files = out?.files || [];
   const lintErr = out?.lint?.errors || [];
   const src = caller || '';
-  const seen = inbound.filter((e) => e.source === src || (caller === 'webhook' && e.source === 'webhook'));
+  // The MCP server is not generated per caller: it always sends source "mcp".
+  const seen = inbound.filter((e) => e.source === src || (caller === 'claude-mcp' && e.source === 'mcp'));
   const lastSeen = seen[seen.length - 1];
 
   return (

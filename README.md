@@ -45,6 +45,17 @@ npm start        # → http://127.0.0.1:4317   (or double-click start.cmd)
 
 Product and technical specs (English) live in [docs/specs/](docs/specs/README.md).
 
+## Tests
+
+Functional e2e suite (real servers + mock Claude CLI; no subscription use, your flows untouched). Run before every release:
+
+```
+npm run test:release   # vite build + every suite, JUnit in test-results/e2e-junit.xml
+npm run test:e2e       # suites only
+```
+
+What it covers, the mock directives and how to add a test: [test/e2e/README.md](test/e2e/README.md).
+
 ## Data
 
 All data lives in `data/` (flows, chats, runs) as JSON.
