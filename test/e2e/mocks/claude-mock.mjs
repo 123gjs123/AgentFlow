@@ -76,7 +76,8 @@ if (/verificador estricto/.test(system)) { // assertion judge
 if (/^Resume el texto/.test(system)) await finish(`RESUMEN(${prompt.length} chars): ${prompt.replace(/\s+/g, ' ').slice(0, 60)}`);
 if (/enrutador de un flujo/.test(system)) {
   const msg = prompt.split('Mensaje nuevo del usuario:\n').pop(); // the history may hold older directives
-  const r = (msg.match(/\[\[mock:route\s+([^\]]*)\]\]/) || [])[1] ?? null;
+  // greedy up to the last "]]": the routed message may carry its own directive ([[mock:route ask flow x [[mock:propose-flow {…}]]]])
+  const r = (msg.match(/\[\[mock:route\s+([\s\S]*)\]\]/) || [])[1] ?? null;
   if (r === null) await finish('{"action":"ask","target":"flow","reason":"pregunta general","message":""}'.replace('""}', `${JSON.stringify(prompt.split('\n').pop())}}`));
   const [action, target = 'flow', ...rest] = r.trim().split(/\s+/);
   await finish(JSON.stringify({ action, target, reason: `mock route ${action}`, message: rest.join(' ') || 'pregunta enrutada', input: rest.join(' ') }));
@@ -140,5 +141,11 @@ else reply = `MOCK-OK model=${model} agent=${opt('--agent') || '-'}`;
 if (dir('emit-route') !== null && !correcting) reply += `\n<route to="${dir('emit-route').trim()}"/>`;
 if (dir('propose') !== null) reply += `\n<step-update>${dir('propose')}</step-update>`;
 if (dir('propose-invalid') !== null) reply += '\n<step-update>{no es json</step-update>';
+// spec 25 proposal kinds (chats only propose; the user confirms)
+if (dir('propose-flow') !== null) reply += `\n<flow-update>${dir('propose-flow')}</flow-update>`;
+if (dir('propose-file') !== null) { const [p, ...c] = dir('propose-file').split('|'); reply += `\n<file-update path="${p.trim()}">\n${c.join('|')}</file-update>`; }
+if (dir('propose-output') !== null) reply += `\n<output-update>${dir('propose-output')}</output-update>`;
+if (dir('propose-run') !== null) reply += `\n<run-request>${dir('propose-run')}</run-request>`;
+if (dir('ask-back') !== null) reply = `Antes de proponer algo: ${dir('ask-back')}`;
 for (const r of [...scope.matchAll(/\[\[mock:remember\s+([^\]]+)\]\]/g)]) if (!correcting) reply += `\n<remember>${r[1]}</remember>`;
 await finish(reply);

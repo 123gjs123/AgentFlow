@@ -1,5 +1,5 @@
 // Conversations and visibility: step chats (session reuse, context resend only on change, proposals + apply,
-// memory, improve mode, lost session recovery), the general chat router (ask a step / the flow, run a step / the
+// memory, read-only chat tools, lost session recovery), the general chat router (ask a step / the flow, propose running a step / the
 // flow, fallback) with WebSocket streaming, and the context box: the preview must be EXACTLY what the CLI receives.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -48,34 +48,39 @@ test('chat de step: primera vez envía <step-context>, después reanuda la sesi�
   assert.equal(s.argOf(s.callsSince(n)[0], '--allowedTools'), 'Read,Grep,Glob,WebFetch,WebSearch,Skill');
 });
 
-test('chat de step: propuestas <step-update> (aplicar cambia el step; inválidas no se aplican) y <remember>', async () => {
+test('chat de step: propuestas <step-update> y <remember> (nada se aplica hasta confirmar; inválidas no se aplican)', async () => {
   const a = role('Editable', 'tarea vieja');
   const f = await s.flow('Propuestas', [a]);
   const [, r] = await chat(f.id, a.id, 'mejorá la tarea [[mock:propose {"task":"tarea nueva","model":"sonnet","memory":[]}]] [[mock:remember usar Gherkin]]');
-  assert.equal(r.proposals.length, 1);
-  assert.deepEqual(r.remembered, ['usar Gherkin']);
-  assert.ok(!r.text.includes('<step-update>'));
+  assert.deepEqual(r.proposals.map((p) => p.kind), ['step', 'memory']);
+  assert.ok(!r.text.includes('<step-update>') && !r.text.includes('<remember>'));
+  let g = await s.getFlow(f.id);
+  assert.equal(g.steps[0].task, 'tarea vieja', 'sin confirmar no cambia');
+  assert.deepEqual(g.steps[0].memory, [], 'la memoria también espera confirmación');
+  await s.uiOk('POST', `/api/flows/${f.id}/chat/${a.id}/apply`, { messageId: r.id, proposalId: r.proposals[1].id });
   const applied = await s.uiOk('POST', `/api/flows/${f.id}/chat/${a.id}/apply`, { messageId: r.id, proposalId: r.proposals[0].id });
   const st = applied.steps[0];
   assert.equal(st.task, 'tarea nueva');
   assert.equal(st.model, 'sonnet');
   assert.equal(st.memory[0].text, 'usar Gherkin', 'campos no permitidos (memory) no se pisan');
+  assert.equal((await s.ui('POST', `/api/flows/${f.id}/chat/${a.id}/apply`, { messageId: r.id, proposalId: r.proposals[0].id })).status, 409, 'no se aplica dos veces');
   const [, bad] = await chat(f.id, a.id, 'otra [[mock:propose-invalid]]');
   assert.equal((await s.ui('POST', `/api/flows/${f.id}/chat/${a.id}/apply`, { messageId: bad.id, proposalId: bad.proposals[0].id })).status, 400);
   const msgs = await s.uiOk('GET', `/api/flows/${f.id}/chat/${a.id}`);
   assert.equal(msgs.find((m) => m.id === r.id).proposals[0].applied, true);
 });
 
-test('modo mejora: agrega Edit/Write, acceptEdits y --add-dir con la carpeta de la skill', async () => {
-  const a = skill('Con skill', 'qa-test-architect', 'x');
+test('el chat nunca escribe por su cuenta: solo herramientas de lectura (aunque el step tenga Edit/Write/Bash), Edit/Write bloqueadas, la carpeta de la skill legible', async () => {
+  const a = skill('Con skill', 'qa-test-architect', 'x', { allowedTools: 'Read Edit Write Bash(git status:*) mcp__claude_ai_Atlassian_Rovo__createJiraIssue mcp__claude_ai_Atlassian_Rovo__getJiraIssue', permissionMode: 'acceptEdits' });
   const f = await s.flow('Mejora', [a]);
   const n = s.calls().length;
   await chat(f.id, a.id, 'mejorá la skill', { improve: true });
   const c = s.callsSince(n)[0];
-  assert.match(s.argOf(c, '--allowedTools'), /Edit,Write$/);
-  assert.equal(s.argOf(c, '--permission-mode'), 'acceptEdits');
+  assert.equal(s.argOf(c, '--allowedTools'), 'Read,mcp__claude_ai_Atlassian_Rovo__getJiraIssue');
+  assert.match(s.argOf(c, '--disallowedTools'), /Edit/);
+  assert.equal(s.argOf(c, '--permission-mode'), undefined, 'sin acceptEdits');
   assert.equal(path.resolve(s.argOf(c, '--add-dir')), path.resolve(s.dirs.home, '.claude', 'skills', 'qa-test-architect'));
-  assert.match(c.prompt, /modo mejora ACTIVO/);
+  assert.match(c.append, /NUNCA cambias nada por tu cuenta/);
 });
 
 test('sesión perdida (expirada/borrada) → se reintenta una vez con sesión nueva y el contexto completo', async () => {
@@ -124,14 +129,18 @@ test('chat general: el enrutador (haiku, sin tools) deriva a un step, al flujo, 
   assert.equal(msgs.find((m) => m.role === 'assistant').routedTo, 'Flujo general');
   n = s.calls().length;
   msgs = await chat(f.id, '_global', `corré los tests [[mock:route run_step ${b.id} SBK-5]]`);
-  const started = msgs.find((m) => m.role === 'assistant');
-  const runId = started.text.match(/\((r_\w+)\)/)[1];
+  const proposed = msgs.find((m) => m.role === 'assistant');
+  assert.match(proposed.text, /¿Ejecuto el step \*\*Tests\*\*/);
+  assert.deepEqual(proposed.proposals[0].patch, { step: b.id, stepName: 'Tests', input: 'SBK-5' });
+  assert.deepEqual(await s.uiOk('GET', `/api/flows/${f.id}/runs`), [], 'no ejecuta hasta confirmar');
+  const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/chat/_global/apply`, { messageId: proposed.id, proposalId: proposed.proposals[0].id });
   const run = await s.waitRun(f.id, runId);
   assert.equal(run.trigger, 'chat');
   assert.deepEqual(Object.keys(run.steps), [b.id]);
   assert.equal(run.steps[b.id].output, 'tests ok SBK-5');
   msgs = await chat(f.id, '_global', 'ejecutá todo [[mock:route run_flow flow REQ-1]]');
-  const all = await s.waitRun(f.id, msgs.find((m) => m.role === 'assistant').text.match(/\((r_\w+)\)/)[1]);
+  const pf = msgs.find((m) => m.role === 'assistant');
+  const all = await s.waitRun(f.id, (await s.uiOk('POST', `/api/flows/${f.id}/chat/_global/apply`, { messageId: pf.id, proposalId: pf.proposals[0].id })).runId);
   assert.equal(Object.keys(all.steps).length, 2);
   msgs = await chat(f.id, '_global', 'algo [[mock:route ask s_inexistente]]');
   assert.equal(msgs.find((m) => m.role === 'router').decision.target, 'flow');

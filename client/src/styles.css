@@ -120,6 +120,9 @@ textarea.code { font-size: 12px; line-height: 1.5; tab-size: 2; }
 .proc .events { padding: 0 8px 8px; }
 .proposal { border: 1px solid #7c9cff55; border-radius: 8px; padding: 8px; margin-top: 6px; background: #7c9cff0d; }
 .proposal-head { font-weight: 600; margin-bottom: 4px; }
+.proposal-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.proposal.discarded { opacity: .55; }
+.proposal .diff a { cursor: pointer; }
 .diff .label, .ev-body .label { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .diff pre.old { border-color: #f06a6a55; text-decoration: line-through; opacity: .7; max-height: 120px; }
 .diff pre.new { border-color: #3fb97a77; }

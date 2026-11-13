@@ -754,6 +754,8 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     const onAbort = () => done({ action: 'stop' });
     function done(d) {
       if (!pendingReviews.has(key)) return;
+      // a deliverable corrected in the break's chat (spec 25) is what continues when the reviewer approves
+      if (d.action === 'continue' && p.edit) d = { ...d, action: 'edit', output: p.edit.output, json: p.edit.json };
       pendingReviews.delete(key);
       controller.signal.removeEventListener('abort', onAbort);
       run.pauses = run.pauses.filter((x) => x !== p);
@@ -762,7 +764,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
       emit({ type: 'run.resumed', flowId, runId: run.id, stepId: step.id, action: d.action });
       resolve(d);
     }
-    pendingReviews.set(key, { when, resolve: done });
+    pendingReviews.set(key, { when, resolve: done, pause: p });
     controller.signal.addEventListener('abort', onAbort, { once: true });
   });
 
@@ -1043,7 +1045,6 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   if (!isFlow) {
     const rel = P.relatedMemory(flow, step, message);
     if (rel.length) parts.push(`<related-memory>\n${rel.map((r) => `- [${r.step}] ${r.text}`).join('\n')}\n</related-memory>`);
-    if (improve) parts.push('<mode>modo mejora ACTIVO: puedes editar los archivos de la skill/agente de este step.</mode>');
     if (runId) {
       const run = getRunLive(flowId, runId);
       if (run) parts.push(P.runReviewBlock(step, run, (run.pauses || []).find((p) => p.stepId === key), run.steps?.[key]));
@@ -1052,15 +1053,15 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   if (origin === 'global') parts.push('(Este mensaje llegó desde el chat general y fue enrutado a ti.)');
   parts.push(message);
 
-  let allowedTools = [isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...access.tools].filter(Boolean).join(' ');
+  // Spec 25: a chat converses and proposes; it never changes anything itself. Only read tools, whatever the step's
+  // access is (edit/dev steps keep Edit/Write/Bash for RUNS, not for chats); write tools are explicitly disallowed.
+  let allowedTools = readOnlyTools([isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...access.tools].filter(Boolean).join(' '));
   const addDirs = [...access.addDirs];
-  let permissionMode;
-  if (improve && step) {
-    const ref = step.kind === 'skill' ? findSkill(step.skillRef, flow.cwd) : step.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;
-    if (ref) addDirs.push(path.dirname(ref.path));
-    allowedTools = `${allowedTools || ''} Edit Write`;
-    permissionMode = 'acceptEdits';
-  }
+  const permissionMode = undefined;
+  const disallowedTools = CHAT_DISALLOWED;
+  // The skill/agent files are readable (to discuss and propose <file-update> changes); `improve` is kept for API compatibility.
+  const ref = step?.kind === 'skill' ? findSkill(step.skillRef, flow.cwd) : step?.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;
+  if (ref) { addDirs.push(path.dirname(ref.path)); if (!/\bRead\b/.test(allowedTools)) allowedTools = `${allowedTools} Read Grep Glob`.trim(); }
 
   const keys = [key, ...(mirrorKey ? [mirrorKey] : [])];
   const onEvent = (ev) => {
@@ -1076,22 +1077,21 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     effort: step?.effort || undefined,
     agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
     resume: sessionId || undefined,
-    allowedTools, addDirs, permissionMode,
+    allowedTools, disallowedTools, addDirs, permissionMode,
     cwd: flowCwd(flow), signal: controller.signal, onEvent,
   });
   // Resumed session may have been deleted/expired: retry once fresh with the full context.
   if (r.isError && sessionId && !controller.signal.aborted && /session|conversation/i.test(r.error || '')) {
     onEvent({ kind: 'hook_log', text: 'Sesión anterior no disponible; iniciando una nueva.' });
     parts[0] = block.text;
-    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: isFlow ? P.flowChatSystem() : P.stepChatSystem(), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, addDirs, permissionMode, cwd: flowCwd(flow), signal: controller.signal, onEvent });
+    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: isFlow ? P.flowChatSystem() : P.stepChatSystem(), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, disallowedTools, addDirs, permissionMode, cwd: flowCwd(flow), signal: controller.signal, onEvent });
   }
   if (activeChats.get(ck) === controller) activeChats.delete(ck);
 
   const tags = P.extractTags(r.text);
   asst.text = tags.clean || (r.isError ? `⚠️ ${r.error || 'Error'}` : '');
   asst.status = r.isError ? 'error' : 'done';
-  asst.proposals = tags.updates.map((u) => ({ id: store.uid('p_'), patch: u, applied: false }));
-  for (const m of tags.remember) { addMemory(flowId, isFlow ? '_flow' : key, m, 'chat'); asst.remembered.push(m); }
+  asst.proposals = tags.proposals.map((p) => prepareProposal(flow, step, key, p));
   store.updateChatMsg(flowId, key, asst.id, (m) => Object.assign(m, asst));
 
   const updated = controller.signal.aborted ? null : store.updateFlow(flowId, (f) => {
@@ -1119,29 +1119,145 @@ export async function stepChat(flowId, key, message, opts = {}) {
   }
 }
 
-export async function applyProposal(flowId, key, messageId, proposalId) {
+// ---------- proposals (spec 25): every change a chat wants is confirmed by the user ----------
+const WRITE_TOOL = /^(Edit|Write|MultiEdit|NotebookEdit|Bash)\b|^mcp__.*(create|edit|update|add|transition|delete|remove|set|write|post|send|upload|move|assign|link)/i;
+export const CHAT_DISALLOWED = 'Edit Write MultiEdit NotebookEdit';
+/** Keeps only read tools of a tools list ("Read Bash(git status:*) mcp__x__createIssue" → "Read"). */
+export function readOnlyTools(list) {
+  const tokens = String(list || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || [];
+  return [...new Set(tokens.filter((t) => !WRITE_TOOL.test(t)))].join(' ');
+}
+const STEP_FIELDS = ['role', 'task', 'context', 'allowedTools', 'model', 'effort', 'permissionMode', 'hooks', 'name', 'command', 'shell'];
+const SOURCE_KINDS = ['file', 'folder', 'url', 'jira', 'confluence'];
+function cleanAddContext(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((c) => c && SOURCE_KINDS.includes(c.type)).slice(0, 20).map((c) => {
+    const o = { id: store.uid('cs_'), type: c.type };
+    for (const k of ['label', 'path', 'url', 'ref', 'note']) if (typeof c[k] === 'string' && c[k].trim()) o[k] = c[k].slice(0, k === 'note' ? 500 : 2000);
+    return o;
+  }).filter((c) => c.path || c.url || c.ref);
+}
+function applyStepPatch(s, patch) {
+  for (const k of STEP_FIELDS) if (k in patch && typeof patch[k] === 'string') s[k] = k === 'shell' && !['powershell', 'bash', 'cmd'].includes(patch[k]) ? s[k] : patch[k];
+  const o = patch.output;
+  if (o && typeof o === 'object') s.output = { ...(s.output || {}), ...(['text', 'json'].includes(o.format) ? { format: o.format } : {}), ...(typeof o.schema === 'string' ? { schema: o.schema } : o.schema && typeof o.schema === 'object' ? { schema: JSON.stringify(o.schema, null, 2) } : {}) };
+  const add = cleanAddContext(patch.addContext);
+  if (add.length) s.contextSources = [...(s.contextSources || []), ...add];
+}
+function applyVars(f, v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return;
+  f.vars = { ...(f.vars || {}) };
+  for (const [k, val] of Object.entries(v)) if (/^[\w.-]{1,60}$/.test(k)) f.vars[k] = typeof val === 'string' ? val : JSON.stringify(val);
+}
+/** Where a step's chat may write files (only with the user's confirmation): its skill folder or its agent file. */
+function fileTarget(flow, step, p) {
+  const ref = step?.kind === 'skill' ? findSkill(step.skillRef, flow.cwd) : step?.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;
+  if (!ref) return { error: 'Solo los steps de tipo Skill o Agente pueden cambiar archivos (los de su skill o su agente).' };
+  const root = step.kind === 'skill' ? path.dirname(ref.path) : null;
+  const target = path.resolve(root || path.dirname(ref.path), p);
+  if (root ? !(target === root || target.startsWith(root + path.sep)) : target !== path.resolve(ref.path)) {
+    return { error: `Fuera de lo permitido: ${step.kind === 'skill' ? `solo archivos dentro de ${root}` : `solo el archivo del agente ${ref.path}`}.` };
+  }
+  return { target };
+}
+/** Turns a parsed tag into a stored proposal (with what is needed to show the change). */
+function prepareProposal(flow, step, key, p) {
+  const base = { id: store.uid('p_'), kind: p.kind || 'step', applied: false };
+  if (p.kind === 'file') {
+    const t = fileTarget(flow, step, p.path);
+    let current = null;
+    if (t.target) { try { current = fs.readFileSync(t.target, 'utf8'); } catch {} }
+    return { ...base, path: p.path, target: t.target || null, error: t.error || null, content: p.content, current: current === null ? null : current.slice(0, 60000) };
+  }
+  if (p.kind === 'output') {
+    const json = step?.output?.format === 'json' ? P.extractJson(p.output).json : undefined;
+    return { ...base, output: p.output, ...(json !== undefined ? { json } : {}) };
+  }
+  if (p.kind === 'memory') return { ...base, text: p.text, scope: key === '_global' ? '_flow' : key };
+  if (p.kind === 'run') {
+    const q = p.patch || {};
+    const ref = String(q.step || '').trim();
+    const target = !ref || /^(flujo|flow)$/i.test(ref) ? null : /^(este|this)$/i.test(ref) ? step : flow.steps.find((x) => x.id === ref || x.name.toLowerCase() === ref.toLowerCase());
+    if (q.__invalid || (ref && !/^(flujo|flow)$/i.test(ref) && !target)) return { ...base, patch: q.__invalid ? q : { __invalid: `Step no encontrado: ${ref}` } };
+    return { ...base, patch: { step: target?.id || null, stepName: target?.name || null, input: typeof q.input === 'string' ? q.input : '' } };
+  }
+  return { ...base, patch: p.patch };
+}
+export function findProposal(flowId, key, messageId, proposalId) {
   const msg = store.getChat(flowId, key).find((m) => m.id === messageId);
   const p = msg?.proposals?.find((x) => x.id === proposalId);
-  if (!p || p.patch.__invalid) throw new Error('Propuesta inválida');
-  const allowed = ['role', 'task', 'context', 'allowedTools', 'model', 'effort', 'permissionMode', 'hooks', 'name', 'command', 'shell'];
-  const flow = store.updateFlow(flowId, (f) => {
-    const s = f.steps.find((x) => x.id === key);
-    if (s) {
-      for (const k of allowed) if (k in p.patch && typeof p.patch[k] === 'string') s[k] = k === 'shell' && !['powershell', 'bash', 'cmd'].includes(p.patch[k]) ? s[k] : p.patch[k];
-      const o = p.patch.output;
-      if (o && typeof o === 'object') s.output = { ...(s.output || {}), ...(['text', 'json'].includes(o.format) ? { format: o.format } : {}), ...(typeof o.schema === 'string' ? { schema: o.schema } : o.schema && typeof o.schema === 'object' ? { schema: JSON.stringify(o.schema, null, 2) } : {}) };
-    }
-    // Flow variables (spec 24): merged, string values only.
-    const v = p.patch.vars;
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      f.vars = { ...(f.vars || {}) };
-      for (const [k, val] of Object.entries(v)) if (/^[\w.-]{1,60}$/.test(k)) f.vars[k] = typeof val === 'string' ? val : JSON.stringify(val);
-    }
-    bumpRev(f);
-  });
-  store.updateChatMsg(flowId, key, messageId, (m) => { const q = m.proposals.find((x) => x.id === proposalId); if (q) q.applied = true; });
-  flowChanged(flow);
-  return flow;
+  if (!p) throw Object.assign(new Error('Propuesta no encontrada'), { status: 404, code: 'PROPOSAL_NOT_FOUND' });
+  return p;
+}
+const markProposal = (flowId, key, messageId, proposalId, fields) => store.updateChatMsg(flowId, key, messageId, (m) => { const q = m.proposals.find((x) => x.id === proposalId); if (q) Object.assign(q, fields); });
+export function discardProposal(flowId, key, messageId, proposalId) {
+  const p = findProposal(flowId, key, messageId, proposalId);
+  if (p.applied) throw Object.assign(new Error('Ya está aplicada'), { status: 409, code: 'ALREADY_APPLIED' });
+  markProposal(flowId, key, messageId, proposalId, { discarded: true });
+  return { discarded: true };
+}
+/** Applies a confirmed proposal. Runs ('run') are started by the caller (index.js: requirements gate first). */
+export async function applyProposal(flowId, key, messageId, proposalId, { runId = null } = {}) {
+  const p = findProposal(flowId, key, messageId, proposalId);
+  const bad = (msg) => Object.assign(new Error(msg), { status: 400, code: 'BAD_PROPOSAL' });
+  if (p.patch?.__invalid) throw bad('Propuesta inválida');
+  if (p.applied) throw Object.assign(new Error('Ya está aplicada'), { status: 409, code: 'ALREADY_APPLIED' });
+  const kind = p.kind || 'step';
+  let result;
+  if (kind === 'step' || kind === 'flow') {
+    let missing = [];
+    const flow = store.updateFlow(flowId, (f) => {
+      if (kind === 'step') {
+        const s = f.steps.find((x) => x.id === key);
+        if (!s) throw bad('Esta propuesta es para un step que ya no existe');
+        applyStepPatch(s, p.patch);
+      } else {
+        if (typeof p.patch.description === 'string') f.description = p.patch.description;
+        const add = cleanAddContext(p.patch.addContext);
+        if (add.length) f.contextSources = [...(f.contextSources || []), ...add];
+        for (const [ref, patch] of Object.entries(p.patch.steps && typeof p.patch.steps === 'object' ? p.patch.steps : {})) {
+          const s = f.steps.find((x) => x.id === ref || x.name.toLowerCase() === String(ref).toLowerCase());
+          if (s && patch && typeof patch === 'object') applyStepPatch(s, patch); else missing.push(ref);
+        }
+      }
+      applyVars(f, p.patch.vars);
+      bumpRev(f);
+    });
+    flowChanged(flow);
+    result = missing.length ? { ...flow, warnings: [`Steps no encontrados: ${missing.join(', ')}`] } : flow;
+  } else if (kind === 'file') {
+    if (p.error || !p.target) throw bad(p.error || 'Archivo no permitido');
+    const flow = store.getFlow(flowId);
+    const t = fileTarget(flow, flow.steps.find((x) => x.id === key), p.path); // re-check: the step may have changed
+    if (t.error || t.target !== p.target) throw bad(t.error || 'El destino del archivo cambió: pide la propuesta de nuevo');
+    let prev = null; try { prev = fs.readFileSync(t.target, 'utf8'); } catch {}
+    fs.mkdirSync(path.dirname(t.target), { recursive: true });
+    fs.writeFileSync(t.target, p.content);
+    markProposal(flowId, key, messageId, proposalId, { prev: prev === null ? null : prev.slice(0, 60000) });
+    result = { written: t.target };
+  } else if (kind === 'memory') {
+    result = addMemory(flowId, p.scope || key, p.text, 'chat');
+  } else if (kind === 'output') {
+    if (!runId) throw bad('El entregable solo se corrige desde un break (falta la ejecución)');
+    result = setPauseOutput(flowId, runId, key, { output: p.output, json: p.json });
+  } else throw bad(`Tipo de propuesta desconocido: ${kind}`);
+  markProposal(flowId, key, messageId, proposalId, { applied: true, appliedAt: now() });
+  return result;
+}
+export const markRunProposal = (flowId, key, messageId, proposalId, runId) => markProposal(flowId, key, messageId, proposalId, { applied: true, appliedAt: now(), runId });
+
+/** Spec 25: the deliverable corrected in the chat of a break ("after"); it is used when the reviewer approves. */
+export function setPauseOutput(flowId, runId, stepId, { output, json }) {
+  const a = activeRuns.get(runId);
+  const pr = a && a.flowId === flowId ? pendingReviews.get(`${runId}:${stepId}`) : null;
+  if (!pr || pr.when !== 'after') throw Object.assign(new Error('Ese step no está en un break "después" de esta ejecución'), { status: 409, code: 'NOT_PAUSED' });
+  pr.pause.edit = { output: String(output), ...(json !== undefined ? { json } : {}) };
+  pr.pause.output = clipS(String(output), 20000);
+  if (json !== undefined) pr.pause.json = json;
+  pr.pause.edited = true;
+  store.saveRun(a.run);
+  emit({ type: 'run.paused', flowId, runId, stepId, step: pr.pause.step, when: 'after', edited: true });
+  return { runId, stepId, edited: true };
 }
 
 /** General chat: route the message to a step / the flow, or trigger runs. */
@@ -1177,9 +1293,13 @@ export async function globalChat(flowId, message) {
   store.updateChatMsg(flowId, key, routing.id, (m) => Object.assign(m, routing));
   emit({ type: 'chat.done', flowId, key, message: routing });
 
+  // Spec 25: the chat never runs anything by itself: it proposes the run; the user confirms ("Ejecutar") or keeps talking.
   if (decision.action === 'run_flow' || (decision.action === 'run_step' && targetStep)) {
-    const runId = startRun(flowId, { input: decision.input || '', only: decision.action === 'run_step' ? targetStep.id : null, trigger: 'chat' });
-    const m = store.appendChat(flowId, key, { id: store.uid('c_'), role: 'assistant', text: `Ejecución iniciada (${runId}). Sigue el progreso en el canvas y en la pestaña Actividad.`, at: now(), status: 'done', routedTo: targetName });
+    const only = decision.action === 'run_step' ? targetStep : null;
+    const input = String(decision.input || '');
+    const proposal = { id: store.uid('p_'), kind: 'run', applied: false, patch: { step: only?.id || null, stepName: only?.name || null, input } };
+    const text = `¿Ejecuto ${only ? `el step **${only.name}**` : `el flujo **${flow.name}**`}${input ? ` con este input?\n\n> ${input.replace(/\n/g, '\n> ')}` : ' sin input?'}\n\nConfírmalo con **Ejecutar**, o dime qué cambiar (input, step, variables) y lo ajusto.`;
+    const m = store.appendChat(flowId, key, { id: store.uid('c_'), role: 'assistant', text, at: now(), status: 'done', routedTo: targetName, proposals: [proposal] });
     emit({ type: 'chat.message', flowId, key, message: m });
     return m;
   }

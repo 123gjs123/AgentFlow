@@ -8,7 +8,7 @@ import * as P from './prompt.js';
 import { parseSchema } from './schema.js';
 import { findAgent, findSkill } from './catalog.js';
 import { buildArgs, lastInit } from './claude.js';
-import { cliOptions, ancestorsOf, evalAssertion, cwdProblem, cwdWarning } from './engine.js';
+import { cliOptions, ancestorsOf, evalAssertion, cwdProblem, cwdWarning, readOnlyTools, CHAT_DISALLOWED } from './engine.js';
 import { resolveContext, contextAccess } from './sources.js';
 
 const est = (n) => Math.ceil(n / 4);
@@ -126,6 +126,10 @@ export async function previewStep(flowId, stepId, { draft = null, target = 'run'
       { id: 'chatSystem', label: 'Instrucciones del chat (fijas)', source: 'app', toModel: 'system', text: system },
       { id: 'stepContext', label: `Bloque <step-context> ${result.chat.willResend ? '(se reenvía completo en el próximo mensaje)' : '(sin cambios: no se reenvía)'}`, source: 'config del step + última ejecución + memoria', toModel: 'user', text: block.text },
       { id: 'relatedMemory', label: 'Memoria relacionada de otros steps', source: 'según tu mensaje', toModel: 'user', text: 'Hasta 6 hechos de la memoria de otros steps que coincidan con las palabras de tu mensaje (se calcula al enviar).' },
+      // spec 25: the chat converses and proposes; it never writes (whatever the step's access for runs)
+      { id: 'chatAccess', label: 'Herramientas del chat (solo lectura)', source: 'step.allowedTools sin escritura', toModel: 'cli', text: `Pre-aprobadas: ${readOnlyTools([step.allowedTools, ...contextAccess(flow, step).tools].filter(Boolean).join(' ')) || 'ninguna'}
+Bloqueadas (--disallowedTools): ${CHAT_DISALLOWED}
+El chat no cambia nada por su cuenta: cada cambio (step, flujo, archivos de la skill o del agente, entregable, memoria, ejecuciones) llega como propuesta y se aplica solo si la confirmas.` },
     ];
   }
 

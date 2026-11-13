@@ -177,6 +177,8 @@ ext.get('/flows/:flow/runs/:runId/events', wrap((req) => {
   const flow = extFlow(req.params.flow);
   return engine.runEvents(flow, extRun(flow, req.params.runId), Number(req.query.after) || 0);
 }));
+// Spec 25: chats only propose. Proposals made through the API wait for confirmation in the app (chat of that step/flow).
+const pendingOf = (ans) => { const p = (ans.proposals || []).filter((x) => !x.applied && !x.discarded).map((x) => ({ id: x.id, kind: x.kind || 'step' })); return p.length ? { pendingProposals: p, note: 'Hay propuestas pendientes de confirmar en el chat de la app (nada se aplicó).' } : {}; };
 ext.post('/flows/:flow/ask', wrap(async (req) => {
   const flow = extFlow(req.params.flow);
   const body = typeof req.body === 'object' && req.body ? req.body : { message: String(req.body || '') };
@@ -187,10 +189,10 @@ ext.post('/flows/:flow/ask', wrap(async (req) => {
     const s = flow.steps.find((x) => x.id === body.step || x.name.toLowerCase() === String(body.step).toLowerCase());
     if (!s) throw fail(404, `Step no encontrado: ${body.step}`);
     ans = await engine.stepChat(flow.id, s.id, message, { origin: 'api' });
-    return { answer: ans.text, routedTo: s.name, status: ans.status, remembered: ans.remembered };
+    return { answer: ans.text, routedTo: s.name, status: ans.status, ...pendingOf(ans) };
   }
   ans = await engine.globalChat(flow.id, message);
-  return { answer: ans.text, routedTo: ans.routedTo || 'Flujo general', status: ans.status };
+  return { answer: ans.text, routedTo: ans.routedTo || 'Flujo general', status: ans.status, ...pendingOf(ans) };
 }));
 app.use('/api/ext', ext);
 
@@ -455,7 +457,26 @@ app.delete('/api/flows/:id/chat/:key', wrap((req) => {
   if (key === '_global') store.clearChat(id, '_flow');
   return f;
 }));
-app.post('/api/flows/:id/chat/:key/apply', wrap((req) => engine.applyProposal(req.params.id, req.params.key, req.body.messageId, req.body.proposalId)));
+// Spec 25: chats only propose; the user confirms each proposal here (or discards it).
+app.post('/api/flows/:id/chat/:key/apply', wrap(async (req, res) => {
+  const { id, key } = req.params;
+  const { messageId, proposalId } = req.body || {};
+  const p = engine.findProposal(id, key, messageId, proposalId);
+  if (p.kind === 'run') {
+    if (p.patch?.__invalid) throw fail(400, typeof p.patch.__invalid === 'string' ? p.patch.__invalid : 'Propuesta inválida', 'BAD_PROPOSAL');
+    if (p.applied) throw fail(409, 'Ya se ejecutó', 'ALREADY_APPLIED');
+    const flow = need(id);
+    const only = p.patch.step || null;
+    if (only && !flow.steps.some((s) => s.id === only)) throw fail(400, 'Ese step ya no existe', 'BAD_PROPOSAL');
+    const blocked = await gate(flow, res, only);
+    if (blocked) return blocked;
+    const runId = engine.startRun(id, { input: uiInput(p.patch.input), only, trigger: 'chat', breakpoints: true });
+    engine.markRunProposal(id, key, messageId, proposalId, runId);
+    return { runId };
+  }
+  return engine.applyProposal(id, key, messageId, proposalId, { runId: typeof req.body?.runId === 'string' ? req.body.runId : null });
+}));
+app.post('/api/flows/:id/chat/:key/discard', wrap((req) => engine.discardProposal(req.params.id, req.params.key, req.body?.messageId, req.body?.proposalId)));
 
 // ----- export / import (spec 09) -----
 app.get('/api/flows/:id/export', wrap((req, res) => {

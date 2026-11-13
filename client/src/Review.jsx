@@ -59,6 +59,7 @@ function PauseCard({ flowId, runId, p, onDone, flow, reloadFlow }) {
         </>
       ) : (
         <>
+          {p.edited && <div className="changed-bar small" data-testid="output-edited">✏ Entregable corregido en el chat: es el que reciben los steps siguientes al aprobar.</div>}
           <div className="muted small">Salida a validar:</div>
           <pre className="review-out mono small">{p.output || '(sin texto)'}</pre>
           {p.json !== undefined && <><div className="muted small">JSON</div><pre className="review-out mono small">{show(p.json)}</pre></>}
@@ -67,10 +68,10 @@ function PauseCard({ flowId, runId, p, onDone, flow, reloadFlow }) {
       )}
       {chat && !mode && (
         <div className="pause-chat" data-testid="pause-chat">
-          <div className="pause-chat-head muted small"><span>Chat del step con esta ejecución: ve {p.when === 'before' ? 'lo que va a recibir' : 'lo que recibió y lo que produjo'}. Pídele cambios (filtro, tarea, comando, variables) y aplícalos.</span></div>
+          <div className="pause-chat-head muted small"><span>Chat del step con esta ejecución: ve {p.when === 'before' ? 'lo que va a recibir' : 'lo que recibió y lo que produjo'}. Discute con él, pídele que evalúe, que cambie el step (filtro, tarea, comando, variables, skill) o que corrija el entregable: cada cambio llega como propuesta y se aplica solo si lo confirmas.</span></div>
           <Chat flowId={flowId} chatKey={p.stepId} runId={runId} step={step} vars={flow?.vars} compact
             placeholder={p.when === 'before' ? 'Ej: antes de ejecutar, cambia el filtro para que solo traiga…' : 'Ej: la salida no trae lo que espero: el filtro debería…'}
-            onApplied={() => { setChanged((n) => n + 1); reloadFlow?.(); }} />
+            onApplied={(q) => { if (q.kind === 'output') onDone(); else if (['step', 'flow', 'file', undefined].includes(q.kind)) { setChanged((n) => n + 1); reloadFlow?.(); } }} />
         </div>
       )}
       {changed > 0 && <div className="changed-bar small" data-testid="changed-bar">✔ {changed === 1 ? 'Se aplicó 1 cambio' : `Se aplicaron ${changed} cambios`} al step o a las variables. {p.when === 'before' ? 'Se ejecutará con la definición nueva.' : 'Re-ejecútalo para ver el resultado con los cambios.'}</div>}

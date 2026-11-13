@@ -283,13 +283,27 @@ External runs ignore breaks unless they ask for them:
 
 ### Memory, chats and hooks
 
-- **Memory.** Each step has its own memory and the flow has a general one. Steps add facts with `<remember>fact</remember>`; you can also add or remove them by hand. Step memory goes into that step's system prompt.
-- **Step chat.** A persistent Claude session for one box.
+- **Memory.** Each step has its own memory and the flow has a general one. During runs, steps add facts with `<remember>fact</remember>`; in chats, saving to memory is a proposal you confirm. You can also add or remove facts by hand. Step memory goes into that step's system prompt.
+- **Chats are conversations; nothing changes until you confirm.** Every chat discusses with you, asks when something is unclear, and evaluates what you ask directly. When it wants to change something, it sends a **proposal**:
+  - **Aplicar** (or **Ejecutar**, **Guardar**, **Usar esta salida**) applies it;
+  - **Descartar** drops it;
+  - or keep talking, and it sends a new, complete proposal.
+
+  | Proposal | Who can make it | What it changes |
+  |---|---|---|
+  | Step change | step chat | role, task, context, tools, model, command, output format, flow variables, added context sources |
+  | Flow change | flow chat (or general chat routed to the flow) | description, variables, context sources, several steps by name |
+  | File change | chat of a Skill or Agent step | the skill's files (inside its folder) or the agent's file; the full new content is shown next to the current one |
+  | Deliverable | step chat inside a break (after) | the output the next steps receive when you approve |
+  | Memory | any chat | adds a fact to the step's or the flow's memory |
+  | Run | any chat | runs the flow or a step (requirements are checked first) |
+
+  Chats only get **read** tools, even when the step has edit, dev or Atlassian-write access (that access is for runs). Write tools are explicitly blocked.
+- **Step chat.** A persistent Claude session for one box, talking **as** that box: with its role, as its agent (`--agent`), or applying its skill (it reads the skill's `SKILL.md`).
   - It receives the box's configuration, last run and memory. The context block is only re-sent when it changes.
-  - It can propose configuration changes (`<step-update>{…}</step-update>`) that you apply with a button.
-  - In **improve mode** it can edit the skill or agent file itself.
   - If the session expired, it starts a new one with the full context.
-- **General chat.** A router (Haiku, no tools) decides whether a step answers, the whole flow answers, or a step or the flow is run, and shows why.
+- **General chat.** A router (Haiku, no tools) decides whether a step or the whole flow answers, and shows why. If you ask to run something, it proposes the run (step or flow and input) and waits for **Ejecutar**.
+- **External `ask`** (API, `afs ask`, MCP `ask_flow`) returns the answer plus `pendingProposals`. Nothing is applied: the proposals wait in the app's chat.
 - **Chat keys.** Enter sends; Alt+Enter (or Shift+Enter) inserts a new line. The **Enviar** button works too.
 - **Hooks.** Per-step JavaScript functions:
   - `onStart(ctx)`: change the input or skip the step;
@@ -628,7 +642,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **182 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **190 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

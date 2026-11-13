@@ -225,8 +225,8 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
       )}
 
       {tab === 'chat' && (
-        <Chat flowId={flow.id} chatKey={step.id} step={step} allowImprove={step.kind === 'skill' || step.kind === 'agent'} onOpenStep={onOpenStep}
-          placeholder={`Chat en el contexto de "${step.name}": pregunta qué hizo, por qué, pídele que mejore su rol/tarea/hooks (te propone el cambio y lo aplicas), o activa "modo mejora" para que edite la skill/agente.`} />
+        <Chat flowId={flow.id} chatKey={step.id} step={step} vars={flow.vars} onOpenStep={onOpenStep}
+          placeholder={`Conversa con "${step.name}" (habla con su rol, agente o skill): pregúntale, pídele que evalúe algo o que mejore su tarea, su contexto, su skill o su agente. Discutan lo que haga falta: cada cambio llega como propuesta y solo se aplica cuando pulsas Aplicar.`} />
       )}
 
       {tab === 'activity' && (
@@ -285,8 +285,8 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
         ))}
       </div>
       {tab === 'chat' && (
-        <Chat flowId={flow.id} chatKey="_global" onOpenStep={onOpenStep}
-          placeholder="Habla en lenguaje natural. Un enrutador (Haiku) decide qué step, agente, skill o rol responde —o si debe ejecutar algo— y verás por qué. La respuesta queda también en el chat de ese step." />
+        <Chat flowId={flow.id} chatKey="_global" vars={flow.vars} onOpenStep={onOpenStep}
+          placeholder="Habla en lenguaje natural. Un enrutador (Haiku) decide qué step, agente, skill o rol responde —o si conviene ejecutar algo, que te propone para que confirmes— y verás por qué. La respuesta queda también en el chat de ese step." />
       )}
       {tab === 'settings' && (
         <div className="panel-body pad">

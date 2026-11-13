@@ -16,7 +16,6 @@ const md = (t) => ({ __html: DOMPurify.sanitize(marked.parse(t || '', { breaks: 
 export default function Chat({ flowId, chatKey, placeholder, step, allowImprove, onOpenStep, runId, vars, onApplied, compact }) {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
-  const [improve, setImprove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const live = useRef({}); // messageId -> streaming text
@@ -53,7 +52,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     const t = text.trim();
     if (!t) return;
     setBusy(true); setErr('');
-    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey}`, { message: t, improve, ...(runId ? { runId } : {}) }); setText(''); }
+    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey}`, { message: t, ...(runId ? { runId } : {}) }); setText(''); }
     catch (e) { setErr(e.message); }
     setBusy(false);
   }
@@ -61,8 +60,20 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     if (!confirm('¿Borrar esta conversación y empezar una sesión nueva? (la memoria se conserva)')) return;
     await api.del(`/api/flows/${flowId}/chat/${chatKey}`); setMsgs([]);
   }
+  // proposals of a routed answer live in the target step's chat; run proposals of the general chat live here
+  const ownerKey = (msg) => (chatKey === '_global' && msg.routedKey ? msg.routedKey : chatKey);
+  const mark = (msg, p, fields) => setMsgs((l) => l.map((x) => (x.id === msg.id ? { ...x, proposals: x.proposals.map((q) => (q.id === p.id ? { ...q, ...fields } : q)) } : x)));
   async function apply(msg, p) {
-    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey === '_global' ? msg.routedKey : chatKey}/apply`, { messageId: findOrigin(msg), proposalId: p.id }); setMsgs((l) => l.map((x) => (x.id === msg.id ? { ...x, proposals: x.proposals.map((q) => (q.id === p.id ? { ...q, applied: true } : q)) } : x))); onApplied?.(p); }
+    setErr('');
+    try {
+      await pendingSave.flush();
+      const r = await api.post(`/api/flows/${flowId}/chat/${ownerKey(msg)}/apply`, { messageId: findOrigin(msg), proposalId: p.id, ...(runId ? { runId } : {}) });
+      mark(msg, p, { applied: true, ...(r?.runId ? { runId: r.runId } : {}) });
+      onApplied?.(p, r);
+    } catch (e) { setErr(e.message); }
+  }
+  async function discard(msg, p) {
+    try { await api.post(`/api/flows/${flowId}/chat/${ownerKey(msg)}/discard`, { messageId: findOrigin(msg), proposalId: p.id }); mark(msg, p, { discarded: true }); }
     catch (e) { setErr(e.message); }
   }
   // proposals shown in the global chat live in the target step's chat; find that message by proposal id
@@ -72,7 +83,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     <div className={`chat${compact ? ' chat-compact' : ''}`}>
       <div className="chat-list">
         {!msgs.length && <div className="muted small pad">{placeholder}</div>}
-        {msgs.map((m) => <Msg key={m.id} m={m} step={step} vars={vars} onApply={apply} onOpenStep={onOpenStep} />)}
+        {msgs.map((m) => <Msg key={m.id} m={m} step={step} vars={vars} onApply={apply} onDiscard={discard} onOpenStep={onOpenStep} inBreak={!!runId} />)}
         <div ref={endRef} />
       </div>
       {err && <div className="error-bar">{err}</div>}
@@ -96,11 +107,6 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
             if (!busy && text.trim()) send();
           }} />
         <div className="chat-actions">
-          {allowImprove && (
-            <label className="toggle" title="Permite que el agente edite los archivos de la skill/agente de este step (Edit/Write, acceptEdits)">
-              <input type="checkbox" checked={improve} onChange={(e) => setImprove(e.target.checked)} /> modo mejora
-            </label>
-          )}
           <button className="ghost" onClick={reset} title="Nueva sesión">↺</button>
           {running && !compact && <button className="ghost danger" onClick={() => api.post(`/api/flows/${flowId}/stop`)}>Detener</button>}
           <button className="primary" disabled={busy || !text.trim()} onClick={send}>Enviar</button>
@@ -110,7 +116,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
   );
 }
 
-function Msg({ m, step, vars, onApply, onOpenStep }) {
+function Msg({ m, step, vars, onApply, onDiscard, onOpenStep, inBreak }) {
   const [showProc, setShowProc] = useState(false);
   if (m.role === 'user') return <div className="msg user"><div className="bubble">{m.text}</div></div>;
   if (m.role === 'router') {
@@ -137,7 +143,7 @@ function Msg({ m, step, vars, onApply, onOpenStep }) {
       )}
       {running && m.streaming ? <div className="bubble md" dangerouslySetInnerHTML={md(m.streaming)} /> : null}
       {!running && m.text ? <div className={`bubble md ${m.status === 'error' ? 'err' : ''}`} dangerouslySetInnerHTML={md(m.text)} /> : null}
-      {m.proposals?.map((p) => <Proposal key={p.id} p={p} step={step} vars={vars} onApply={() => onApply(m, p)} canApply={!m.routedKey || m.routedKey !== '_flow'} />)}
+      {m.proposals?.map((p) => <Proposal key={p.id} p={p} step={step} vars={vars} inBreak={inBreak} onApply={() => onApply(m, p)} onDiscard={() => onDiscard(m, p)} />)}
       {m.remembered?.length > 0 && (
         <div className="remembered">🧷 Guardado en memoria: {m.remembered.map((r, i) => <span key={i} className="chip">{r}</span>)}</div>
       )}
@@ -146,23 +152,78 @@ function Msg({ m, step, vars, onApply, onOpenStep }) {
 }
 
 const txt = (v) => (v === undefined || v === null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
-function Proposal({ p, step, vars, onApply, canApply }) {
-  if (p.patch.__invalid) return <div className="proposal err">Propuesta con JSON inválido:<pre>{p.patch.__invalid}</pre></div>;
-  // Flow variables are shown one by one (old → new); everything else as a field of the step.
-  const rows = Object.entries(p.patch).flatMap(([k, v]) => (k === 'vars' && v && typeof v === 'object'
-    ? Object.entries(v).map(([n, val]) => ({ key: `vars.${n}`, label: `variable del flujo "${n}"`, old: vars?.[n], val }))
-    : [{ key: k, label: k, old: step?.[k], val: v }]));
+const srcText = (c) => `${c.type}: ${c.label ? `${c.label} — ` : ''}${c.path || c.url || c.ref || ''}`;
+/** Rows "label / old / new" of a step patch (also used per step inside a flow proposal). */
+function stepRows(patch, step, vars, prefix = '') {
+  return Object.entries(patch || {}).flatMap(([k, v]) => {
+    if (k === 'vars' && v && typeof v === 'object') return Object.entries(v).map(([n, val]) => ({ key: `${prefix}vars.${n}`, label: `variable del flujo "${n}"`, old: vars?.[n], val }));
+    if (k === 'addContext' && Array.isArray(v)) return [{ key: `${prefix}ctx`, label: `${prefix}agregar contexto`, val: v.map(srcText).join('\n') }];
+    return [{ key: prefix + k, label: prefix + k, old: step?.[k], val: v }];
+  });
+}
+const TITLES = { step: '✏️ Cambio propuesto al step', flow: '✏️ Cambio propuesto al flujo', file: '📝 Cambio propuesto a un archivo', output: '📦 Entregable corregido', memory: '🧷 Guardar en memoria', run: '▶ Ejecución propuesta' };
+
+/**
+ * A proposal from a chat (spec 25): nothing changes until the user presses the button. The conversation can go on:
+ * a refined proposal comes as a new one; old ones can be discarded.
+ */
+function Proposal({ p, step, vars, inBreak, onApply, onDiscard }) {
+  const kind = p.kind || 'step';
+  const [showOld, setShowOld] = useState(false);
+  if (p.patch?.__invalid) return <div className="proposal err">Propuesta inválida:<pre>{txt(p.patch.__invalid)}</pre></div>;
+  let body; let action = 'Aplicar'; let blocked = '';
+  if (kind === 'step') body = stepRows(p.patch, step, vars).map((r) => <Diff key={r.key} {...r} />);
+  else if (kind === 'flow') {
+    const { steps, ...rest } = p.patch || {};
+    body = [
+      ...stepRows(rest, null, vars).map((r) => <Diff key={r.key} {...r} />),
+      ...Object.entries(steps || {}).flatMap(([name, patch]) => stepRows(patch, null, vars, `${name} · `).map((r) => <Diff key={r.key} {...r} />)),
+    ];
+  } else if (kind === 'file') {
+    blocked = p.error || '';
+    body = (
+      <div className="diff">
+        <div className="label">{p.target || p.path}{p.current === null ? ' (archivo nuevo)' : ''}</div>
+        {p.current !== null && p.current !== undefined && <><a className="small" onClick={() => setShowOld(!showOld)}>{showOld ? 'ocultar versión actual' : 'ver versión actual'}</a>{showOld && <pre className="old">{p.current}</pre>}</>}
+        <pre className="new">{p.content}</pre>
+      </div>
+    );
+  } else if (kind === 'output') {
+    if (!inBreak) blocked = 'Se aplica desde la ventana del break.';
+    action = 'Usar esta salida';
+    body = <div className="diff"><pre className="new">{p.output}</pre>{p.json !== undefined && <div className="muted small">Incluye los datos JSON del bloque.</div>}</div>;
+  } else if (kind === 'memory') {
+    action = 'Guardar';
+    body = <div className="diff"><pre className="new">{p.text}</pre></div>;
+  } else if (kind === 'run') {
+    action = 'Ejecutar';
+    body = <div className="diff"><div className="label">{p.patch?.stepName ? `step “${p.patch.stepName}”` : 'flujo completo'}</div>{p.patch?.input ? <pre className="new">{p.patch.input}</pre> : <div className="muted small">sin input</div>}</div>;
+  }
+  const done = p.applied || p.discarded;
   return (
-    <div className="proposal">
-      <div className="proposal-head">✏️ Cambio propuesto {p.applied && <span className="chip ok">aplicado</span>}</div>
-      {rows.map((r) => (
-        <div key={r.key} className="diff">
-          <div className="label">{r.label}</div>
-          {txt(r.old) ? <pre className="old">{txt(r.old)}</pre> : null}
-          <pre className="new">{txt(r.val)}</pre>
+    <div className={`proposal${p.discarded ? ' discarded' : ''}`} data-kind={kind}>
+      <div className="proposal-head">{TITLES[kind] || TITLES.step}
+        {p.applied && <span className="chip ok">{kind === 'run' ? `ejecutado${p.runId ? ` (${p.runId})` : ''}` : 'aplicado'}</span>}
+        {p.discarded && <span className="chip">descartado</span>}
+      </div>
+      {body}
+      {blocked && <div className="muted small">⚠ {blocked}</div>}
+      {!done && (
+        <div className="proposal-actions">
+          <button className="primary small" disabled={!!blocked} onClick={onApply}>{action}</button>
+          <button className="ghost small" onClick={onDiscard}>Descartar</button>
+          <span className="muted small">o sigue conversando para ajustarla</span>
         </div>
-      ))}
-      {!p.applied && canApply && <button className="primary small" onClick={onApply}>Aplicar</button>}
+      )}
+    </div>
+  );
+}
+function Diff({ label, old, val }) {
+  return (
+    <div className="diff">
+      <div className="label">{label}</div>
+      {txt(old) ? <pre className="old">{txt(old)}</pre> : null}
+      <pre className="new">{txt(val)}</pre>
     </div>
   );
 }

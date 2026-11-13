@@ -274,20 +274,39 @@ export function runUserPrompt(flow, step, input, upstream, data, rctx = {}) {
   return userSections(flow, step, input, upstream, data, rctx).map((s) => s.text).join('\n\n');
 }
 
+/**
+ * Conversation rules shared by every chat (spec 25): the chat discusses, asks and evaluates; it never changes anything
+ * by itself. Every change is a PROPOSAL the user confirms with "Aplicar" (or discards), after as many turns as needed.
+ */
+const CONVERSATION_RULES = `## Cómo conversar (obligatorio)
+- Esto es una conversación de ida y vuelta. NUNCA cambias nada por tu cuenta: ni el step, ni el flujo, ni archivos, ni la memoria, ni ejecutas nada. Todo cambio va como PROPUESTA (los bloques de abajo) y solo se aplica cuando el usuario pulsa "Aplicar".
+- Si el pedido es ambiguo o falta información, PREGUNTA antes de proponer (una o dos preguntas concretas). Si hay alternativas razonables, preséntalas y recomienda una.
+- Si el usuario pide ajustes a una propuesta, emite una NUEVA propuesta completa que reemplaza a la anterior (no un parche sobre la anterior) y di qué cambió.
+- Si el usuario pide una evaluación o una opinión (de una salida, un ticket, un documento, un caso), hazla directamente con tu criterio y tus herramientas de lectura; propone cambios solo si los pide o si son claramente necesarios, y pregunta si los quiere.
+- Explica cada propuesta antes del bloque: qué cambia, por qué y qué efecto tendrá. Nunca pongas valores de secretos (tokens, contraseñas) en una propuesta.
+- Para guardar un hecho duradero en memoria: <remember>hecho</remember> (también es una propuesta: el usuario la confirma).`;
+
 /** Static system prompt for a step chat (kept stable so the resumed session stays coherent). */
 export function stepChatSystem() {
   return `# Chat de step
-Eres la interfaz conversacional de UN step de un flujo de agentes de IA. En cada mensaje recibirás un bloque <step-context> con la configuración vigente del step (nombre, tipo, rol, tarea, contexto, herramientas, hooks, última ejecución y memoria). Responde SIEMPRE dentro del alcance de ese step: su rol, su skill/agente y su tarea.
+Eres UN step de un flujo de agentes de IA y conversas con el usuario COMO ese step: con su rol (si es un Rol), como su agente (si es un Agente) o aplicando su skill (si es una Skill: lee su archivo SKILL.md indicado en el contexto y sigue sus instrucciones). En cada mensaje recibirás un bloque <step-context> con la configuración vigente del step (nombre, tipo, rol, tarea, contexto, herramientas, hooks, última ejecución y memoria). Responde dentro del alcance de ese step.
 
-- Explica qué haces y por qué. Puedes usar herramientas cuando aporten (lectura por defecto).
-- La memoria relacionada de otros steps (<related-memory>) es solo referencia: úsala si es pertinente y dilo.
-- Para proponer cambios a la configuración del step, emite UN bloque exactamente así (solo los campos que cambian; JSON válido):
-<step-update>{"role":"...","task":"...","context":"...","allowedTools":"...","model":"...","effort":"...","permissionMode":"...","hooks":"...","command":"...","shell":"powershell|bash|cmd","output":{"format":"text|json","schema":"<JSON Schema como texto>"},"vars":{"nombre":"valor"}}</step-update>
-  El usuario lo aplica con un botón. Explica el cambio antes del bloque. "command"/"shell" solo para steps de tipo Comando (el texto COMPLETO del comando, no un fragmento). "vars" cambia o agrega variables del flujo (afectan a todos los steps que las usan; dilo). Nunca pongas valores de secretos en "vars".
-- Si llega un bloque <run-review>, el usuario está revisando una ejecución REAL de este step en un break: basa tu análisis y tus propuestas en esa entrada y esa salida concretas (qué recibió, qué produjo, qué error dio) y en lo que el usuario dice que debería pasar. Después de aplicar, el usuario re-ejecuta el step con los cambios.
-- Para guardar un hecho duradero en la memoria de este step: <remember>hecho</remember>. Si el usuario te pide recordar/tener en cuenta algo de forma permanente, SIEMPRE emite ese tag.
-- Si el usuario activó "modo mejora", puedes editar directamente los archivos de la skill o del agente indicados en el contexto; describe el cambio.
-- Responde en el idioma del usuario.`;
+${CONVERSATION_RULES}
+
+## Propuestas que puedes hacer
+- Cambios al step (solo los campos que cambian; JSON válido):
+<step-update>{"role":"...","task":"...","context":"...","allowedTools":"...","model":"...","effort":"...","permissionMode":"...","hooks":"...","command":"...","shell":"powershell|bash|cmd","output":{"format":"text|json","schema":"<JSON Schema como texto>"},"vars":{"nombre":"valor"},"addContext":[{"type":"file|folder|url|jira|confluence","path":"...","url":"...","ref":"...","label":"..."}]}</step-update>
+  "command"/"shell" solo para steps de tipo Comando (el texto COMPLETO del comando). "vars" cambia o agrega variables del flujo (afectan a todos los steps que las usan: dilo). "addContext" agrega fuentes de consulta al step (documentos, carpetas, páginas, Jira, Confluence).
+- Cambios a los archivos de su skill o de su agente (los indicados en el contexto), con el contenido COMPLETO del archivo:
+<file-update path="ruta del archivo">contenido completo nuevo</file-update>
+- Cambios al entregable (la salida) SOLO cuando hay un bloque <run-review> de un break "después": la salida corregida completa (si el step devuelve JSON, incluye el bloque \`\`\`json):
+<output-update>salida corregida completa</output-update>
+- Ejecutar este step (o el flujo) cuando el usuario lo pida o lo acepte: <run-request>{"step":"este"|"flujo","input":"..."}</run-request>
+
+## Revisión de una ejecución
+Si llega un bloque <run-review>, el usuario está revisando una ejecución REAL de este step en un break: basa tu análisis en esa entrada y esa salida concretas (qué recibió, qué produjo, qué error dio) y en lo que el usuario dice que debería pasar. Después de aplicar cambios al step, el usuario lo re-ejecuta con los cambios; si corriges el entregable, se usará al aprobar.
+
+Responde en el idioma del usuario.`;
 }
 
 export function stepContextBlock(flow, step, attached = []) {
@@ -355,15 +374,27 @@ export function relatedMemory(flow, step, message, limit = 6) {
 
 export function flowChatSystem() {
   return `# Chat general del flujo
-Eres el asistente de un flujo de agentes de IA. Recibirás un <flow-context> con los steps (tipo, rol, tarea, estado, memoria) y la memoria general. Responde sobre el flujo en conjunto, explica qué hace cada step y cómo se relacionan. Guarda hechos generales duraderos con <remember>hecho</remember>. Responde en el idioma del usuario.`;
+Eres el asistente de un flujo de agentes de IA. Recibirás un <flow-context> con los steps (id, tipo, rol, tarea, estado, memoria, contexto), las variables, el contexto adjunto y la memoria general. Responde sobre el flujo en conjunto, explica qué hace cada step y cómo se relacionan, evalúa lo que te pidan y ayuda a mejorarlo.
+
+${CONVERSATION_RULES}
+
+## Propuestas que puedes hacer
+- Cambios al flujo (solo lo que cambia; JSON válido). "steps" usa el nombre o el id del step y admite los mismos campos que un cambio de step (role, task, context, allowedTools, model, effort, command, shell, output, addContext):
+<flow-update>{"description":"...","vars":{"nombre":"valor"},"addContext":[{"type":"file|folder|url|jira|confluence","path":"...","url":"...","ref":"...","label":"..."}],"steps":{"Nombre del step":{"task":"..."}}}</flow-update>
+- Ejecutar el flujo o un step cuando el usuario lo pida o lo acepte: <run-request>{"step":"flujo"|"<nombre o id del step>","input":"..."}</run-request>
+
+Responde en el idioma del usuario.`;
 }
 
+const srcList = (list) => (list || []).filter((c) => !c.disabled).map((c) => `${c.label || c.type}: ${c.path || c.url || c.ref || ''}`).join('; ');
 export function flowContextBlock(flow) {
   const steps = flow.steps.map((s) => {
     const { up } = neighbors(flow, s);
-    return `- [${s.id}] ${s.name} (${KIND_LABEL[s.kind]}${s.agentRef ? `: ${s.agentRef}` : ''}${s.skillRef ? `: ${s.skillRef}` : ''}) ← ${up.map((u) => u.name).join(', ') || 'inicio'}\n  Rol: ${clip(s.role, 300) || '—'}\n  Tarea: ${clip(s.task, 300) || '—'}\n  Última ejecución: ${s.lastRun ? `${s.lastRun.status}: ${clip(s.lastRun.output, 600)}` : 'nunca'}\n  Memoria: ${(s.memory || []).map((m) => m.text).join(' | ') || '—'}`;
+    const cmd = s.kind === 'command' ? `\n  Comando (${s.shell || 'powershell'}): ${clip(s.command, 400)}` : '';
+    const cx = srcList(s.contextSources) ? `\n  Contexto: ${srcList(s.contextSources)}` : '';
+    return `- [${s.id}] ${s.name} (${KIND_LABEL[s.kind]}${s.agentRef ? `: ${s.agentRef}` : ''}${s.skillRef ? `: ${s.skillRef}` : ''}) ← ${up.map((u) => u.name).join(', ') || 'inicio'}\n  Rol: ${clip(s.role, 300) || '—'}\n  Tarea: ${clip(s.task, 300) || '—'}${cmd}\n  Última ejecución: ${s.lastRun ? `${s.lastRun.status}: ${clip(s.lastRun.output, 600)}` : 'nunca'}\n  Memoria: ${(s.memory || []).map((m) => m.text).join(' | ') || '—'}${cx}`;
   }).join('\n');
-  const body = `Flujo: ${flow.name}\n${flow.description || ''}\nVariables: ${JSON.stringify(flow.vars || {})}\n\nSteps:\n${steps || '(sin steps)'}\n\nMemoria general:\n${memList(flow.memory)}`;
+  const body = `Flujo: ${flow.name}\n${flow.description || ''}\nVariables: ${JSON.stringify(flow.vars || {})}\nContexto del flujo: ${srcList(flow.contextSources) || '(ninguno)'}\n\nSteps:\n${steps || '(sin steps)'}\n\nMemoria general:\n${memList(flow.memory)}`;
   return { text: `<flow-context>\n${body}\n</flow-context>`, hash: crypto.createHash('sha1').update(body).digest('hex') };
 }
 
@@ -386,17 +417,27 @@ export function routerPrompt(flow, history, message) {
 }
 
 // ---------- tag parsing ----------
+const FENCE = /^```(?:json)?\s*|\s*```$/g;
 export function extractTags(text) {
-  const remember = [...String(text).matchAll(/<remember>([\s\S]*?)<\/remember>/g)].map((m) => m[1].trim()).filter(Boolean);
-  const updates = [];
-  for (const m of String(text).matchAll(/<step-update>([\s\S]*?)<\/step-update>/g)) {
-    try { updates.push(JSON.parse(m[1].trim().replace(/^```(?:json)?|```$/g, ''))); } catch { updates.push({ __invalid: m[1].trim() }); }
-  }
-  const clean = String(text)
-    .replace(/<remember>[\s\S]*?<\/remember>/g, '')
-    .replace(/<step-update>[\s\S]*?<\/step-update>/g, '')
+  const t = String(text);
+  const json = (raw) => { try { return JSON.parse(raw.trim().replace(FENCE, '').trim()); } catch { return { __invalid: raw.trim() }; } };
+  const all = (re) => [...t.matchAll(re)];
+  const remember = all(/<remember>([\s\S]*?)<\/remember>/g).map((m) => m[1].trim()).filter(Boolean);
+  const updates = all(/<step-update>([\s\S]*?)<\/step-update>/g).map((m) => json(m[1]));
+  // Spec 25: every change a chat wants to make is a proposal the user confirms ("Aplicar") or discards.
+  const proposals = [
+    ...updates.map((patch) => ({ kind: 'step', patch })),
+    ...all(/<flow-update>([\s\S]*?)<\/flow-update>/g).map((m) => ({ kind: 'flow', patch: json(m[1]) })),
+    ...all(/<file-update\s+path\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\/file-update>/g).map((m) => ({ kind: 'file', path: m[1].trim(), content: m[2].replace(/^\r?\n/, '') })),
+    ...all(/<output-update>([\s\S]*?)<\/output-update>/g).map((m) => ({ kind: 'output', output: m[1].trim() })),
+    ...all(/<run-request>([\s\S]*?)<\/run-request>/g).map((m) => ({ kind: 'run', patch: json(m[1]) })),
+    ...remember.map((text) => ({ kind: 'memory', text })),
+  ];
+  const clean = t
+    .replace(/<(remember|step-update|flow-update|output-update|run-request)>[\s\S]*?<\/\1>/g, '')
+    .replace(/<file-update\s+path\s*=\s*"[^"]+"\s*>[\s\S]*?<\/file-update>/g, '')
     .trim();
-  return { remember, updates, clean };
+  return { remember, updates, proposals, clean };
 }
 
 /** Pulls the last ```json block (or a bare JSON answer) out of a step's text. */
