@@ -13,7 +13,7 @@ const md = (t) => ({ __html: DOMPurify.sanitize(marked.parse(t || '', { breaks: 
  * Chat bound to a key: a step id, '_flow' or '_global'.
  * Shows the internal process (tools/thinking) of each answer, proposals to apply and remembered facts.
  */
-export default function Chat({ flowId, chatKey, placeholder, step, allowImprove, onOpenStep, runId, vars, onApplied, compact }) {
+export default function Chat({ flowId, chatKey, placeholder, step, onOpenStep, runId, vars, onApplied, compact, locked }) {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -83,12 +83,13 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     <div className={`chat${compact ? ' chat-compact' : ''}`}>
       <div className="chat-list">
         {!msgs.length && <div className="muted small pad">{placeholder}</div>}
-        {msgs.map((m) => <Msg key={m.id} m={m} step={step} vars={vars} onApply={apply} onDiscard={discard} onOpenStep={onOpenStep} inBreak={!!runId} />)}
+        {msgs.map((m) => <Msg key={m.id} m={m} step={step} vars={vars} onApply={apply} onDiscard={discard} onOpenStep={onOpenStep} inBreak={!!runId} locked={!!locked} />)}
         <div ref={endRef} />
       </div>
       {err && <div className="error-bar">{err}</div>}
+      {locked && <div className="chat-locked small" data-testid="chat-locked">⏵ {locked}</div>}
       <div className="chat-input">
-        <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Escribe… (Enter envía · Alt+Enter nueva línea)" rows={3}
+        <textarea value={text} disabled={!!locked} onChange={(e) => setText(e.target.value)} placeholder="Escribe… (Enter envía · Alt+Enter nueva línea)" rows={3}
           onKeyDown={(e) => {
             if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
             // Alt+Enter (or Shift+Enter) = new line; Enter alone = send.
@@ -104,19 +105,19 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
             }
             if (e.shiftKey) return;
             e.preventDefault();
-            if (!busy && text.trim()) send();
+            if (!busy && !locked && text.trim()) send();
           }} />
         <div className="chat-actions">
           <button className="ghost" onClick={reset} title="Nueva sesión">↺</button>
-          {running && !compact && <button className="ghost danger" onClick={() => api.post(`/api/flows/${flowId}/stop`)}>Detener</button>}
-          <button className="primary" disabled={busy || !text.trim()} onClick={send}>Enviar</button>
+          {running && <button className="ghost danger" title="Cancela solo esta respuesta del chat (nunca una ejecución)" onClick={() => api.post(`/api/flows/${flowId}/chat/${chatKey}/cancel`)}>Cancelar respuesta</button>}
+          <button className="primary" disabled={busy || !!locked || !text.trim()} onClick={send}>Enviar</button>
         </div>
       </div>
     </div>
   );
 }
 
-function Msg({ m, step, vars, onApply, onDiscard, onOpenStep, inBreak }) {
+function Msg({ m, step, vars, onApply, onDiscard, onOpenStep, inBreak, locked }) {
   const [showProc, setShowProc] = useState(false);
   if (m.role === 'user') return <div className="msg user"><div className="bubble">{m.text}</div></div>;
   if (m.role === 'router') {
@@ -143,7 +144,7 @@ function Msg({ m, step, vars, onApply, onDiscard, onOpenStep, inBreak }) {
       )}
       {running && m.streaming ? <div className="bubble md" dangerouslySetInnerHTML={md(m.streaming)} /> : null}
       {!running && m.text ? <div className={`bubble md ${m.status === 'error' ? 'err' : ''}`} dangerouslySetInnerHTML={md(m.text)} /> : null}
-      {m.proposals?.map((p) => <Proposal key={p.id} p={p} step={step} vars={vars} inBreak={inBreak} onApply={() => onApply(m, p)} onDiscard={() => onDiscard(m, p)} />)}
+      {m.proposals?.map((p) => <Proposal key={p.id} p={p} step={step} vars={vars} inBreak={inBreak} locked={locked} onApply={() => onApply(m, p)} onDiscard={() => onDiscard(m, p)} />)}
       {m.remembered?.length > 0 && (
         <div className="remembered">🧷 Guardado en memoria: {m.remembered.map((r, i) => <span key={i} className="chip">{r}</span>)}</div>
       )}
@@ -167,7 +168,7 @@ const TITLES = { step: '✏️ Cambio propuesto al step', flow: '✏️ Cambio p
  * A proposal from a chat (spec 25): nothing changes until the user presses the button. The conversation can go on:
  * a refined proposal comes as a new one; old ones can be discarded.
  */
-function Proposal({ p, step, vars, inBreak, onApply, onDiscard }) {
+function Proposal({ p, step, vars, inBreak, locked, onApply, onDiscard }) {
   const kind = p.kind || 'step';
   const [showOld, setShowOld] = useState(false);
   if (p.patch?.__invalid) return <div className="proposal err">Propuesta inválida:<pre>{txt(p.patch.__invalid)}</pre></div>;
@@ -210,7 +211,7 @@ function Proposal({ p, step, vars, inBreak, onApply, onDiscard }) {
       {blocked && <div className="muted small">⚠ {blocked}</div>}
       {!done && (
         <div className="proposal-actions">
-          <button className="primary small" disabled={!!blocked} onClick={onApply}>{action}</button>
+          <button className="primary small" disabled={!!blocked || locked} title={locked ? 'El flujo se está ejecutando' : undefined} onClick={onApply}>{action}</button>
           <button className="ghost small" onClick={onDiscard}>Descartar</button>
           <span className="muted small">o sigue conversando para ajustarla</span>
         </div>

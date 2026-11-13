@@ -949,6 +949,27 @@ export function stopRuns(flowId) {
   for (const [k, c] of activeChats) if (k.startsWith(flowId + ':')) { c.abort(); n++; }
   return n;
 }
+/**
+ * Spec 25 (C9): a running flow follows its defined process; nobody stops it to talk. A HUMAN can converse with (and
+ * apply changes to) a step only while the flow is stopped, or while that step is paused in a break. Returns the run
+ * paused at that step ({runId}) when that is the case, null when the flow is idle, or a 409 problem.
+ */
+export function interactionProblem(flowId, key) {
+  const active = [...activeRuns.values()].filter((r) => r.flowId === flowId);
+  if (!active.length) return null;
+  const step = key && key !== '_flow' && key !== '_global' ? key : null;
+  const paused = step && active.find((r) => (r.run.pauses || []).some((p) => p.stepId === step));
+  if (paused) return { runId: paused.run.id };
+  return { status: 409, code: 'FLOW_RUNNING', error: step
+    ? 'El flujo se está ejecutando y sigue su proceso: puedes conversar con este step cuando el flujo esté detenido o cuando el step esté en un break.'
+    : 'El flujo se está ejecutando y sigue su proceso: el chat del flujo vuelve a estar disponible cuando termine (los steps en break sí se pueden conversar desde su ventana de revisión).' };
+}
+/** Cancels only the answer a chat is generating (never a run). '_global' cancels the chats of the flow. */
+export function stopChat(flowId, key) {
+  let n = 0;
+  for (const [k, c] of activeChats) if (key === '_global' ? k.startsWith(flowId + ':') : k === `${flowId}:${key}`) { c.abort(); n++; }
+  return n;
+}
 /** Cancel one run; other runs of the same flow keep going (EXT-12). */
 export function stopRun(flowId, runId) {
   const r = activeRuns.get(runId);
@@ -1016,13 +1037,15 @@ export function runEvents(flow, run, after = 0, max = 500) {
 }
 
 // ---------- chats ----------
-async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null, runId = null }) {
+async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null, runId = null, external = false }) {
   const flow = store.getFlow(flowId);
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   const isFlow = key === '_flow';
   const step = isFlow ? null : flow.steps.find((s) => s.id === key);
   if (!isFlow && !step) throw new Error('Step no encontrado');
 
+  // A human talking to a step paused in a break talks about THAT execution (spec 24/25).
+  if (!external && !runId && !isFlow) { const ip = interactionProblem(flowId, key); if (ip?.runId) runId = ip.runId; }
   const userMsg = store.appendChat(flowId, key, { id: store.uid('c_'), role: 'user', text: message, at: now(), origin });
   emit({ type: 'chat.message', flowId, key, message: userMsg });
   const asst = { id: store.uid('c_'), role: 'assistant', text: '', at: now(), origin, events: [], status: 'running', proposals: [], remembered: [] };
@@ -1092,6 +1115,11 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   asst.text = tags.clean || (r.isError ? `⚠️ ${r.error || 'Error'}` : '');
   asst.status = r.isError ? 'error' : 'done';
   asst.proposals = tags.proposals.map((p) => prepareProposal(flow, step, key, p));
+  // External callers (API/afs/MCP ask) follow the defined process: facts to remember are saved as before; other
+  // proposals are only reported (nothing changes the flow definition from outside).
+  if (external) {
+    for (const p of asst.proposals.filter((x) => x.kind === 'memory')) { addMemory(flowId, p.scope || key, p.text, 'api'); asst.remembered.push(p.text); Object.assign(p, { applied: true, appliedAt: now() }); }
+  }
   store.updateChatMsg(flowId, key, asst.id, (m) => Object.assign(m, asst));
 
   const updated = controller.signal.aborted ? null : store.updateFlow(flowId, (f) => {
@@ -1261,7 +1289,7 @@ export function setPauseOutput(flowId, runId, stepId, { output, json }) {
 }
 
 /** General chat: route the message to a step / the flow, or trigger runs. */
-export async function globalChat(flowId, message) {
+export async function globalChat(flowId, message, { external = false } = {}) {
   const key = '_global';
   const flow = store.getFlow(flowId);
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
@@ -1294,6 +1322,13 @@ export async function globalChat(flowId, message) {
   emit({ type: 'chat.done', flowId, key, message: routing });
 
   // Spec 25: the chat never runs anything by itself: it proposes the run; the user confirms ("Ejecutar") or keeps talking.
+  // An external caller (API/afs/MCP ask) is a trigger: it runs directly, as defined.
+  if (external && (decision.action === 'run_flow' || (decision.action === 'run_step' && targetStep))) {
+    const runId = startRun(flowId, { input: decision.input || '', only: decision.action === 'run_step' ? targetStep.id : null, trigger: 'chat' });
+    const m = store.appendChat(flowId, key, { id: store.uid('c_'), role: 'assistant', text: `Ejecución iniciada (${runId}).`, at: now(), status: 'done', routedTo: targetName, runId });
+    emit({ type: 'chat.message', flowId, key, message: m });
+    return m;
+  }
   if (decision.action === 'run_flow' || (decision.action === 'run_step' && targetStep)) {
     const only = decision.action === 'run_step' ? targetStep : null;
     const input = String(decision.input || '');
@@ -1317,7 +1352,7 @@ export async function globalChat(flowId, message) {
   };
   bus.on('msg', relay);
   try {
-    const ans = await chatTurn({ flowId, key: targetKey, message: decision.message || message, origin: 'global', mirrorKey: key });
+    const ans = await chatTurn({ flowId, key: targetKey, message: decision.message || message, origin: external ? 'api' : 'global', mirrorKey: key, external });
     Object.assign(mirror, { text: ans.text, status: ans.status, proposals: ans.proposals, remembered: ans.remembered, originMessageId: ans.id });
   } catch (e) {
     Object.assign(mirror, { text: `⚠️ ${e.message}`, status: 'error' });

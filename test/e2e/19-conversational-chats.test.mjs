@@ -144,8 +144,7 @@ test('break: el entregable se corrige conversando; "Usar esta salida" no contin�
   const p = m.proposals[0];
   assert.equal(p.kind, 'output');
   assert.deepEqual(p.json, { casos: ['a', 'neg-1'] });
-  assert.equal((await apply(f.id, 's_gen', m, 0)).status, 400, 'sin la ejecución no se aplica');
-  assert.equal((await apply(f.id, 's_gen', m, 0, { runId })).status, 200);
+  assert.equal((await apply(f.id, 's_gen', m, 0)).status, 200, 'la ejecución en pausa en ese step se adjunta sola');
   let run = await s.uiOk('GET', `/api/flows/${f.id}/runs/${runId}`);
   assert.equal(run.status, 'paused', 'sigue en pausa hasta aprobar');
   assert.equal(run.pauses[0].edited, true);
@@ -155,6 +154,9 @@ test('break: el entregable se corrige conversando; "Usar esta salida" no contin�
   assert.equal(run.status, 'success');
   assert.equal(run.steps.s_gen.reviewed.action, 'edit');
   assert.deepEqual(run.steps.s_gen.json, { casos: ['a', 'neg-1'] });
+  // with the flow stopped there is no execution to correct: an output proposal is rejected
+  const late = await chat(f.id, 's_gen', '[[mock:propose-output otra salida]]');
+  assert.equal((await apply(f.id, 's_gen', late)).status, 400);
   assert.match(run.steps.s_use.output, /neg-1/, 'el siguiente recibe el entregable corregido');
 });
 
@@ -169,6 +171,57 @@ test('chat general: una respuesta enrutada al flujo trae propuestas aplicables d
   assert.equal(mirror.proposals[0]?.kind, 'flow');
   assert.equal((await s.ui('POST', `/api/flows/${f.id}/chat/_flow/apply`, { messageId: mirror.originMessageId, proposalId: mirror.proposals[0].id })).status, 200);
   assert.equal((await s.getFlow(f.id)).description, 'nueva');
+});
+
+// ---------- C9: a running flow follows its process; humans talk to a step only when stopped or in a break ----------
+test('con el flujo en ejecución: chats y propuestas se rechazan (409) sin frenar nada; "cancelar respuesta" nunca detiene la ejecución', async () => {
+  const a = role('Lento', '[[mock:sleep 3]] [[mock:say listo]]', { id: 's_l' });
+  const f = await s.flow('Corriendo', [a]);
+  const idle = await chat(f.id, 's_l', '[[mock:propose {"task":"otra"}]]');
+  const runId = (await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '' })).runId;
+  await sleep(300);
+  for (const key of ['s_l', '_flow', '_global']) {
+    const r = await s.ui('POST', `/api/flows/${f.id}/chat/${key}`, { message: 'hola' });
+    assert.equal(r.status, 409, key);
+    assert.equal(r.body.code, 'FLOW_RUNNING');
+  }
+  assert.equal((await apply(f.id, 's_l', idle)).status, 409, 'tampoco se aplican cambios mientras corre');
+  await s.uiOk('POST', `/api/flows/${f.id}/chat/s_l/cancel`, {});
+  const run = await s.waitRun(f.id, runId);
+  assert.equal(run.status, 'success', 'la ejecución siguió su proceso');
+  assert.equal((await apply(f.id, 's_l', idle)).status, 200, 'detenido: se aplica');
+});
+
+test('en un break: solo el step en pausa conversa (con esa ejecución adjunta aunque se escriba desde su panel); el resto espera', async () => {
+  const a = cmd('Pausa', 'Write-Output "salida real 42"', { id: 's_p', breakpoint: 'after' });
+  const b = role('Otro', 'x', { id: 's_o' });
+  const f = await s.flow('Break solo', [a, b], [['s_p', 's_o']]);
+  const runId = (await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '' })).runId;
+  await s.waitRun(f.id, runId, 30000, (r) => r.status === 'paused');
+  const n = s.calls().length;
+  const m = await chat(f.id, 's_p', '¿qué salió? [[mock:propose-run {"step":"este"}]]');
+  assert.match(s.callsSince(n)[0].prompt, /<run-review>[\s\S]*salida real 42/, 'adjunta la ejecución en pausa');
+  assert.equal((await apply(f.id, 's_p', m)).status, 409, 'no se lanza otra ejecución desde un break');
+  assert.equal((await s.ui('POST', `/api/flows/${f.id}/chat/s_o`, { message: 'hola' })).status, 409, 'otro step: no');
+  assert.equal((await s.ui('POST', `/api/flows/${f.id}/chat/_flow`, { message: 'hola' })).status, 409, 'chat del flujo: no');
+  await s.uiOk('POST', `/api/flows/${f.id}/runs/${runId}/resume`, { action: 'continue' });
+  assert.equal((await s.waitRun(f.id, runId)).status, 'success');
+});
+
+test('trigger externo (ask por API): sigue el proceso definido sin esperar a nadie: ejecuta directo, guarda memoria directo, y los cambios al flujo solo se informan', async () => {
+  const a = cmd('Tests', 'Write-Output "tests ok {{input}}"', { id: 's_x' });
+  const b = role('Experto', 'x', { id: 's_e' });
+  const f = await s.flow('Externo', [a, b], [['s_x', 's_e']]);
+  const r1 = await s.ext('POST', `/flows/${f.id}/ask`, { message: `corré los tests [[mock:route run_step s_x EXT-1]]` });
+  assert.equal(r1.status, 200);
+  const runId = r1.body.answer.match(/\((r_\w+)\)/)[1];
+  assert.equal((await s.waitRun(f.id, runId)).steps.s_x.output, 'tests ok EXT-1');
+  const r2 = await s.ext('POST', `/flows/${f.id}/ask`, { message: 'anotá esto [[mock:remember el ambiente es PPD]] [[mock:propose {"task":"cambiada"}]]', step: 'Experto' });
+  assert.deepEqual(r2.body.remembered, ['el ambiente es PPD']);
+  assert.deepEqual(r2.body.pendingProposals.map((p) => p.kind), ['step']);
+  const g = await s.getFlow(f.id);
+  assert.equal(g.steps.find((x) => x.id === 's_e').memory[0].text, 'el ambiente es PPD');
+  assert.equal(g.steps.find((x) => x.id === 's_e').task, 'x', 'la definición no cambia desde fuera');
 });
 
 // ---------- UI ----------

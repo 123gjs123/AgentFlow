@@ -178,7 +178,7 @@ ext.get('/flows/:flow/runs/:runId/events', wrap((req) => {
   return engine.runEvents(flow, extRun(flow, req.params.runId), Number(req.query.after) || 0);
 }));
 // Spec 25: chats only propose. Proposals made through the API wait for confirmation in the app (chat of that step/flow).
-const pendingOf = (ans) => { const p = (ans.proposals || []).filter((x) => !x.applied && !x.discarded).map((x) => ({ id: x.id, kind: x.kind || 'step' })); return p.length ? { pendingProposals: p, note: 'Hay propuestas pendientes de confirmar en el chat de la app (nada se aplicó).' } : {}; };
+const pendingOf = (ans) => { const p = (ans.proposals || []).filter((x) => !x.applied && !x.discarded).map((x) => ({ id: x.id, kind: x.kind || 'step' })); return p.length ? { pendingProposals: p, note: 'Propuestas de cambio al flujo: no se aplican desde fuera; quedan en el chat de la app para que una persona las revise con el flujo detenido.' } : {}; };
 ext.post('/flows/:flow/ask', wrap(async (req) => {
   const flow = extFlow(req.params.flow);
   const body = typeof req.body === 'object' && req.body ? req.body : { message: String(req.body || '') };
@@ -188,10 +188,10 @@ ext.post('/flows/:flow/ask', wrap(async (req) => {
   if (body.step) {
     const s = flow.steps.find((x) => x.id === body.step || x.name.toLowerCase() === String(body.step).toLowerCase());
     if (!s) throw fail(404, `Step no encontrado: ${body.step}`);
-    ans = await engine.stepChat(flow.id, s.id, message, { origin: 'api' });
-    return { answer: ans.text, routedTo: s.name, status: ans.status, ...pendingOf(ans) };
+    ans = await engine.stepChat(flow.id, s.id, message, { origin: 'api', external: true });
+    return { answer: ans.text, routedTo: s.name, status: ans.status, remembered: ans.remembered, ...pendingOf(ans) };
   }
-  ans = await engine.globalChat(flow.id, message);
+  ans = await engine.globalChat(flow.id, message, { external: true });
   return { answer: ans.text, routedTo: ans.routedTo || 'Flujo general', status: ans.status, ...pendingOf(ans) };
 }));
 app.use('/api/ext', ext);
@@ -442,6 +442,8 @@ app.post('/api/flows/:id/chat/:key', wrap((req) => {
   const message = String(req.body?.message || '').trim();
   if (!message) throw new Error('Mensaje vacío');
   { const qp = quarantineProblem(store.getFlow(id)); if (qp) throw fail(qp.status, qp.error, qp.code); }
+  // Spec 25 (C9): while the flow runs it follows its process; a human talks to a step only when stopped or in a break.
+  { const ip = engine.interactionProblem(id, key); if (ip?.status) throw fail(ip.status, ip.error, ip.code); }
   const p = key === '_global' ? engine.globalChat(id, message) : engine.stepChat(id, key, message, { improve: !!req.body?.improve, runId: typeof req.body?.runId === 'string' ? req.body.runId : null });
   p.catch((e) => console.error('chat error', e));
   return { accepted: true };
@@ -462,6 +464,9 @@ app.post('/api/flows/:id/chat/:key/apply', wrap(async (req, res) => {
   const { id, key } = req.params;
   const { messageId, proposalId } = req.body || {};
   const p = engine.findProposal(id, key, messageId, proposalId);
+  const ip = engine.interactionProblem(id, key);
+  if (ip?.status) throw fail(ip.status, ip.error, ip.code);
+  if (ip?.runId && p.kind === 'run') throw fail(409, 'El flujo está en un break: termina o detén esa ejecución antes de lanzar otra.', 'FLOW_RUNNING');
   if (p.kind === 'run') {
     if (p.patch?.__invalid) throw fail(400, typeof p.patch.__invalid === 'string' ? p.patch.__invalid : 'Propuesta inválida', 'BAD_PROPOSAL');
     if (p.applied) throw fail(409, 'Ya se ejecutó', 'ALREADY_APPLIED');
@@ -474,8 +479,10 @@ app.post('/api/flows/:id/chat/:key/apply', wrap(async (req, res) => {
     engine.markRunProposal(id, key, messageId, proposalId, runId);
     return { runId };
   }
-  return engine.applyProposal(id, key, messageId, proposalId, { runId: typeof req.body?.runId === 'string' ? req.body.runId : null });
+  return engine.applyProposal(id, key, messageId, proposalId, { runId: typeof req.body?.runId === 'string' ? req.body.runId : ip?.runId || null });
 }));
+// Cancels only the chat's answer in progress: never a run (the flow keeps its process).
+app.post('/api/flows/:id/chat/:key/cancel', wrap((req) => { need(req.params.id); return { stopped: engine.stopChat(req.params.id, req.params.key) }; }));
 app.post('/api/flows/:id/chat/:key/discard', wrap((req) => engine.discardProposal(req.params.id, req.params.key, req.body?.messageId, req.body?.proposalId)));
 
 // ----- export / import (spec 09) -----

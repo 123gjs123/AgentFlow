@@ -302,8 +302,12 @@ External runs ignore breaks unless they ask for them:
 - **Step chat.** A persistent Claude session for one box, talking **as** that box: with its role, as its agent (`--agent`), or applying its skill (it reads the skill's `SKILL.md`).
   - It receives the box's configuration, last run and memory. The context block is only re-sent when it changes.
   - If the session expired, it starts a new one with the full context.
-- **General chat.** A router (Haiku, no tools) decides whether a step or the whole flow answers, and shows why. If you ask to run something, it proposes the run (step or flow and input) and waits for **Ejecutar**.
-- **External `ask`** (API, `afs ask`, MCP `ask_flow`) returns the answer plus `pendingProposals`. Nothing is applied: the proposals wait in the app's chat.
+- **General chat.** A router (Haiku, no tools) decides whether a step or the whole flow answers, and shows why. If you ask it in the app to run something, it proposes the run (step or flow and input) and waits for **Ejecutar**.
+- **When a person can talk to a step.** A running flow follows its defined process and nobody stops it to talk.
+  - While a run is active, you can only converse with a step that is **paused in a break**. The chat sees that execution and its changes apply to it ("Re-ejecutar con los cambios").
+  - Every other chat is disabled until the run ends; the API answers `409 FLOW_RUNNING`.
+  - **Cancelar respuesta** in a chat cancels only that answer, never a run.
+- **External triggers follow the process.** External `ask` (API, `afs ask`, MCP `ask_flow`) never waits for a person: it runs what it is asked to run and saves facts to memory directly. Changes to the flow definition are not applied from outside: they come back as `pendingProposals` and wait in the app's chat.
 - **Chat keys.** Enter sends; Alt+Enter (or Shift+Enter) inserts a new line. The **Enviar** button works too.
 - **Hooks.** Per-step JavaScript functions:
   - `onStart(ctx)`: change the input or skip the step;
@@ -642,7 +646,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **190 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **193 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

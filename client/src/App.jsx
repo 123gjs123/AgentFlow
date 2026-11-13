@@ -498,11 +498,11 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
             {edgeObj ? (
               <EdgePanel key={edgeObj.id} flow={flow} edge={edgeObj} onChange={(p) => patchEdge(edgeObj.id, p)} onDelete={() => { onDeleteEdges([edgeObj.id]); setSelectedEdge(null); }} onClose={() => setSelectedEdge(null)} />
             ) : step ? (
-              <StepPanel key={step.id} onDuplicate={() => duplicateStep(step.id)} onSaveLib={() => saveToLibrary(step.id)} flow={flow} step={step} catalog={catalog} live={live[step.id]} tab={stepTab} setTab={setStepTab}
+              <StepPanel key={step.id} onDuplicate={() => duplicateStep(step.id)} onSaveLib={() => saveToLibrary(step.id)} flow={flow} step={step} catalog={catalog} live={live[step.id]} running={anyRunning} tab={stepTab} setTab={setStepTab}
                 onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onProbe={probe}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             ) : (
-              <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
+              <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} running={anyRunning} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             )}
           </aside>

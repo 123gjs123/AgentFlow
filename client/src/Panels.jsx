@@ -89,7 +89,7 @@ function Field({ label, hint, children, div }) {
   return <Tag className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</Tag>;
 }
 
-export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
+export function StepPanel({ flow, step, catalog, live, running, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
   const [runInput, setRunInput] = useState('');
   const [runEvents, setRunEvents] = useState(null);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
@@ -226,6 +226,8 @@ export function StepPanel({ flow, step, catalog, live, tab, setTab, onChange, on
 
       {tab === 'chat' && (
         <Chat flowId={flow.id} chatKey={step.id} step={step} vars={flow.vars} onOpenStep={onOpenStep}
+          runId={live?.status === 'paused' ? live.runId : undefined}
+          locked={running && live?.status !== 'paused' ? 'El flujo se está ejecutando y sigue su proceso: puedes conversar con este step cuando esté detenido o en un break.' : ''}
           placeholder={`Conversa con "${step.name}" (habla con su rol, agente o skill): pregúntale, pídele que evalúe algo o que mejore su tarea, su contexto, su skill o su agente. Discutan lo que haga falta: cada cambio llega como propuesta y solo se aplica cuando pulsas Aplicar.`} />
       )}
 
@@ -264,7 +266,7 @@ function insertIntoSuccess(code, snippet) {
   return code.slice(0, at) + snippet + code.slice(at);
 }
 
-export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) {
+export function FlowPanel({ flow, running, tab, setTab, onChange, onOpenStep, onReset }) {
   const [varsText, setVarsText] = useState(JSON.stringify(flow.vars || {}, null, 2));
   const [varsErr, setVarsErr] = useState('');
   const [runs, setRuns] = useState([]);
@@ -286,6 +288,7 @@ export function FlowPanel({ flow, tab, setTab, onChange, onOpenStep, onReset }) 
       </div>
       {tab === 'chat' && (
         <Chat flowId={flow.id} chatKey="_global" vars={flow.vars} onOpenStep={onOpenStep}
+          locked={running ? 'El flujo se está ejecutando y sigue su proceso. El chat vuelve cuando termine; los steps en break se conversan desde su ventana de revisión.' : ''}
           placeholder="Habla en lenguaje natural. Un enrutador (Haiku) decide qué step, agente, skill o rol responde —o si conviene ejecutar algo, que te propone para que confirmes— y verás por qué. La respuesta queda también en el chat de ese step." />
       )}
       {tab === 'settings' && (
