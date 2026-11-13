@@ -71,6 +71,23 @@ test('comando con salida JSON (output.format json) se valida igual', async () =>
   assert.equal(run.steps[b.id].code, 'INVALID_JSON');
 });
 
+test('PowerShell: tildes y ñ llegan en UTF-8 (salida y errores de sintaxis), stdin y códigos de salida se conservan', { skip: process.platform !== 'win32' }, async () => {
+  const ok = cmd('Tildes', "Write-Output 'búsqueda ñandú'; $input | Measure-Object -Line | Select-Object -ExpandProperty Lines");
+  const parse = cmd('Sintaxis', "Write-Output 'x' ; $a = 'sin cerrar");
+  const native = cmd('Nativo', 'cmd /c exit 3');
+  const ex = cmd('Exit', 'Write-Output a; exit 5');
+  const raw = cmd('ConsoleIn', '$o = [Console]::In.ReadToEnd(); Write-Output "leí: $($o.Trim())"');
+  const f = await s.flow('Utf8', [ok, parse, native, ex, raw]);
+  const run = await s.runUi(f.id, 'l1\nl2');
+  assert.equal(run.steps[ok.id].status, 'success', run.steps[ok.id].error);
+  assert.match(run.steps[ok.id].output, /búsqueda ñandú\s+2/);
+  assert.match(run.steps[raw.id].output, /leí: l1\s+l2/);
+  assert.equal(run.steps[parse.id].status, 'error');
+  assert.doesNotMatch(run.steps[parse.id].error, /�/, 'sin caracteres rotos');
+  assert.match(run.steps[native.id].error, /exit 1/);
+  assert.match(run.steps[ex.id].error, /exit 5/);
+});
+
 test('aserciones deterministas: todas pasan', async () => {
   const assertions = [
     { type: 'contains', value: 'resultado' },

@@ -71,6 +71,16 @@ const BASH = (() => {
   return 'bash';
 })();
 
+// Windows PowerShell 5.1 writes redirected output in the OEM code page (850 in Spanish Windows): "búsqueda" arrived as
+// "b�squeda", and so did its own error messages ("En l�nea"). The wrapper switches the console to UTF-8 and then runs the
+// script (passed in AFS_PS_SCRIPT, so no quoting) as a script block, so even parse errors are reported in UTF-8. The
+// appended `if (-not $?) { exit 1 }` keeps -Command's exit code (1 when the last statement failed); `exit N` still wins.
+const PS_UTF8_WRAP = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $OutputEncoding = [Text.Encoding]::UTF8; "
+  + "try { $__afs = [scriptblock]::Create($env:AFS_PS_SCRIPT + [Environment]::NewLine + 'if (-not $?) { exit 1 }') } "
+  + "catch { $e = $_.Exception; if ($e.InnerException) { $e = $e.InnerException }; [Console]::Error.WriteLine($e.Message); exit 1 }; ";
+// A wrapper that mentions $input makes PowerShell drain stdin into it: pipe it only when the script uses $input, so
+// [Console]::In.ReadToEnd() keeps working otherwise.
+const psWrap = (cmd) => PS_UTF8_WRAP + (/\$input\b/i.test(cmd) ? '$input | & $__afs' : '& $__afs');
 export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed = false, onSpawn, onExit } = {}) {
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve({ code: -1, stdout: '', stderr: 'aborted', aborted: true });
@@ -80,8 +90,10 @@ export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed
     // cmd.exe does not understand the \" escaping Node applies to arguments: pass the line verbatim as /s /c "<cmd>"
     // (cmd strips the outer quotes), the same way Node's own `shell: true` does.
     else if (shell === 'cmd') { file = 'cmd.exe'; args = ['/d', '/s', ...(delayed ? ['/v:on'] : []), '/c', `"${cmd}"`]; }
-    else { file = process.platform === 'win32' ? 'powershell.exe' : 'pwsh'; args = ['-NoProfile', '-NonInteractive', '-Command', cmd]; }
-    const child = spawn(file, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, windowsVerbatimArguments: shell === 'cmd' });
+    else if (process.platform === 'win32') { file = 'powershell.exe'; args = ['-NoProfile', '-NonInteractive', '-Command', psWrap(cmd)]; }
+    else { file = 'pwsh'; args = ['-NoProfile', '-NonInteractive', '-Command', cmd]; }
+    const psEnv = file === 'powershell.exe' ? { AFS_PS_SCRIPT: cmd } : {};
+    const child = spawn(file, args, { cwd, env: { ...process.env, ...env, ...psEnv }, windowsHide: true, windowsVerbatimArguments: shell === 'cmd' });
     if (child.pid) { try { onSpawn?.(child.pid); } catch {} }
     let stdout = '', stderr = ''; let settled = false; let grace = null;
     const settle = (r) => { if (settled) return; settled = true; clearTimeout(grace); try { onExit?.(child.pid); } catch {} resolve(r); };
