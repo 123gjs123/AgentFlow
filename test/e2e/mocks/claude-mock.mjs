@@ -36,7 +36,10 @@ if (resume && STATE && !fs.existsSync(statePath(`session-${resume}`))) {
 const sessionId = resume || crypto.randomUUID();
 if (STATE) fs.writeFileSync(statePath(`session-${sessionId}`), '1');
 
-out({ type: 'system', subtype: 'init', session_id: sessionId, model, tools: ['Read', 'Grep', 'Bash', 'Skill', 'ToolSearch'], mcp_servers: [{ name: 'mock-mcp', status: 'connected' }], permissionMode: opt('--permission-mode') || 'default' });
+// MCP servers the CLI "loaded": [[mock:mcp name=status,name=status]] replaces the default list
+const mcpDir = (prompt.match(/\[\[mock:mcp\s+([^\]]*)\]\]/) || [])[1];
+const mcpServers = mcpDir !== undefined ? mcpDir.split(',').filter(Boolean).map((x) => { const [name, status = 'connected'] = x.split('='); return { name: name.trim(), status: status.trim() }; }) : [{ name: 'mock-mcp', status: 'connected' }, { name: 'claude.ai Atlassian Rovo', status: 'connected' }];
+out({ type: 'system', subtype: 'init', session_id: sessionId, model, tools: ['Read', 'Grep', 'Bash', 'Skill', 'ToolSearch'], mcp_servers: mcpServers, permissionMode: opt('--permission-mode') || 'default' });
 if (prompt.trim() === '.') { await sleep(30000); process.exit(0); } // catalog probe: the server kills us after init
 
 const usage = { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5, cache_creation_input_tokens: 0 };

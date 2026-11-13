@@ -646,7 +646,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **194 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **195 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.
@@ -671,6 +671,7 @@ Coverage per suite, the mock directives and how to add a test: [test/e2e/README.
 | The page says it needs the "enlace con la clave" | Open the link printed by `npm start`, or run `start.cmd` / `node bin/afs.js ui`. The browser remembers it afterwards. |
 | The flow selector does nothing, or "El servidor no responde" | The server is not running: `npm start`. The page reconnects by itself. |
 | `PERMISSION_DENIED` | The step tried a tool outside its access list. Add it under *Acceso*, or enable "Permitir permisos denegados". |
+| `MCP_UNAVAILABLE` | The step is allowed to use a connector (for example Atlassian for Jira) that the Claude Code CLI running the flows did not load. Check `claude mcp list`: claude.ai connectors you see in the IDE or on the web are not always loaded by `claude -p`. Connect it to the CLI, or declare an MCP requirement so the flow warns before running. |
 | `EMPTY_OUTPUT` | The step returned nothing. Check *Actividad*, or enable "Permitir salida vacía". |
 | `NON_UPSTREAM_REF` | A `{{steps.X}}` reference points to a box that is not before this one. Connect them, or enable "allow non-upstream". |
 | A box shows "no enrutado" | None of its input arrows passed: check the arrow conditions or the `<route>` choices in the source step's output. |

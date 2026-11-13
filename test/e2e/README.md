@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (194 tests)
+## Qué cubre (195 tests)
 
 | Archivo | Qué prueba |
 |---|---|

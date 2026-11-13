@@ -152,6 +152,23 @@ test('juez IA: aprueba/rechaza con umbral, usa haiku sin herramientas, la salida
   assert.equal(run.steps[ok.id].attempts.length, 1, 'el juez no cuenta como intento');
 });
 
+test('conector MCP que el step necesita y el CLI no cargó: aviso al arrancar y, si el step falla, MCP_UNAVAILABLE como causa', async () => {
+  const RA = 'mcp__claude_ai_Atlassian_Rovo';
+  const tools = `Read ${RA}__getJiraIssue ${RA}__searchJiraIssuesUsingJql`;
+  const fails = role('Lee Jira', '[[mock:mcp playwright=connected,plugin:finance:slack=needs-auth]] [[mock:deny mcp__playwright__browser_navigate]] [[mock:say no pude leer el ticket]]', { allowedTools: tools });
+  const ok = role('No lo usa', '[[mock:mcp playwright=connected]] [[mock:say listo]]', { allowedTools: tools });
+  const fine = role('Conectado', '[[mock:say leído]]', { allowedTools: tools });
+  const f = await s.flow('MCP faltante', [fails, ok, fine]);
+  const run = await s.runUi(f.id);
+  const a = run.steps[fails.id];
+  assert.equal(a.code, 'MCP_UNAVAILABLE');
+  assert.match(a.error, /^El conector MCP "claude ai Atlassian Rovo" \(no configurado\) no está disponible en el Claude Code CLI[\s\S]*Se denegaron herramientas: mcp__playwright__browser_navigate/);
+  assert.ok(a.events.some((e) => e.kind === 'error' && /claude mcp list/.test(e.text || '')), 'se avisa en la actividad al arrancar');
+  assert.equal(run.steps[ok.id].status, 'success', 'si no lo necesitó, solo avisa');
+  assert.match(run.steps[ok.id].warnings.join(' '), /no está disponible/);
+  assert.ok(!(run.steps[fine.id].warnings || []).some((w) => /conector MCP/.test(w)), 'conectado: sin aviso');
+});
+
 test('éxito estricto: permisos denegados → PERMISSION_DENIED (o aviso con allowDenials); salida vacía → EMPTY_OUTPUT (o éxito con allowEmpty)', async () => {
   const d1 = role('Denegado', '[[mock:deny Bash]] [[mock:say no pude]]');
   const d2 = role('DenegadoOk', '[[mock:deny Bash]] [[mock:say no pude]]', { allowDenials: true });

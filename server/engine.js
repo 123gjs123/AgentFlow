@@ -313,8 +313,29 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   // Live child processes ({pid, at}): removed on exit, so recovery after a crash only kills what was really running.
   const trackPid = (pid) => { (rs.pids ||= []).push({ pid, at: now() }); try { store.saveRun(run); } catch {} };
   const untrackPid = (pid) => { if (rs.pids) rs.pids = rs.pids.filter((p) => (p?.pid ?? p) !== pid); };
+  // The step's allowed MCP tools need their connector in THIS Claude Code CLI session (claude.ai connectors used in the
+  // IDE or the web are not always loaded by `claude -p`). Missing ones are reported clearly instead of a misleading denial.
+  rs.mcpMissing = [];
+  const checkMcp = (ev) => {
+    if (!Array.isArray(ev.mcp) || rs.mcpChecked) return;
+    rs.mcpChecked = true;
+    const norm = (x) => String(x).replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toLowerCase();
+    const have = new Map(ev.mcp.map((m) => [norm(m.name), m.status]));
+    const wanted = [...new Set((String(step.allowedTools || '').match(/mcp__[^\s,()]+/g) || []).map((t) => t.slice(5).split('__')[0]))];
+    for (const srv of wanted) {
+      const st = have.get(norm(srv));
+      if (st === 'connected' || st === 'pending') continue;
+      rs.mcpMissing.push({ server: srv, status: st || 'no configurado' });
+    }
+    if (rs.mcpMissing.length) {
+      const msg = mcpMissingText(rs.mcpMissing);
+      rs.warnings.push(msg);
+      log({ kind: 'error', text: msg });
+    }
+  };
   const log = (ev) => {
     const e = { ...ev, t: now() };
+    if (ev.kind === 'init' && !ev.sub) checkMcp(ev);
     if (ev.kind === 'tool_use' && ev.id) { pending.set(ev.id, { name: ev.name, input: ev.input }); if (!isReadOnlyTool(ev.name)) writeCalls++; }
     if (ev.kind === 'queued' && rs.status === 'running') { rs.status = 'queued'; opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'queued' }); setLast({ status: 'queued' }); }
     if (ev.kind === 'tool_result' && pending.has(ev.id)) trackEffect(rs, pending.get(ev.id), ev);
@@ -516,6 +537,8 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         }
         // Strict success (VER-1)
         if (!error && rs.denials.length && !step.allowDenials) { error = `Se denegaron herramientas: ${[...new Set(rs.denials.map((d) => d.tool))].join(', ')}. Dale acceso en "Acceso" o marca "Permitir permisos denegados".`; code = 'PERMISSION_DENIED'; }
+        // the real cause first: the connector the step needed is not loaded in the CLI
+        if (error && rs.mcpMissing?.length) { error = `${mcpMissingText(rs.mcpMissing)} ${error}`; code = 'MCP_UNAVAILABLE'; }
         else if (rs.denials.length) rs.warnings.push(`Herramientas denegadas (permitido): ${[...new Set(rs.denials.map((d) => d.tool))].join(', ')}.`);
         if (!error && !step.allowEmpty && !String(output).trim() && json === undefined && !rs.files.length && !rs.actions.length) { error = 'El step no devolvió nada (salida vacía, sin JSON, archivos ni acciones).'; code = 'EMPTY_OUTPUT'; }
       }
@@ -1145,6 +1168,12 @@ export async function stepChat(flowId, key, message, opts = {}) {
     activeChats.delete(`${flowId}:${key}`);
     throw e;
   }
+}
+
+/** Spanish explanation of MCP connectors a step needs but the CLI session did not load. */
+export function mcpMissingText(list) {
+  const names = list.map((m) => `"${m.server.replace(/_/g, ' ')}" (${m.status})`).join(', ');
+  return `El conector MCP ${names} no está disponible en el Claude Code CLI que ejecuta los flujos: el step no puede usar sus herramientas (por ejemplo, leer o escribir en Jira). Revisa con "claude mcp list": los conectores de claude.ai que ves en el IDE o en la web no siempre los carga "claude -p". Conéctalo al CLI o declara el requisito MCP en el flujo para que avise antes de ejecutar.`;
 }
 
 // ---------- proposals (spec 25): every change a chat wants is confirmed by the user ----------
