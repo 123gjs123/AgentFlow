@@ -11,11 +11,13 @@ function PauseCard({ flowId, runId, p, onDone, flow, reloadFlow }) {
   const [chat, setChat] = useState(false);
   const [changed, setChanged] = useState(0); // changes applied from the chat during this pause (spec 24)
   const step = flow?.steps.find((x) => x.id === p.stepId);
+  const hasJson = p.json !== undefined || step?.output?.format === 'json';
   const [text, setText] = useState(p.output || '');
   const [json, setJson] = useState(p.json === undefined ? '' : JSON.stringify(p.json, null, 2));
   const [feedback, setFeedback] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [jsonAsText, setJsonAsText] = useState(false); // text typed in the JSON box: offer to use it as the output
   async function act(action, extra = {}) {
     setBusy(true); setErr('');
     try { await api.post(`/api/flows/${flowId}/runs/${runId}/resume`, { step: p.stepId, action, ...extra }); onDone(); }
@@ -24,7 +26,11 @@ function PauseCard({ flowId, runId, p, onDone, flow, reloadFlow }) {
   }
   function saveEdit() {
     let parsed;
-    if (json.trim()) { try { parsed = JSON.parse(json); } catch (e) { setErr(`JSON inválido: ${e.message}`); return; } }
+    if (json.trim()) {
+      try { parsed = JSON.parse(json); }
+      catch (e) { setErr(`Lo escrito en “Datos JSON” no es JSON (${e.message}). Si quieres reemplazar la salida con ese texto, va en el cuadro “Salida”.`); setJsonAsText(true); return; }
+    }
+    setJsonAsText(false);
     // Only send what changed: an untouched (possibly clipped) output must never replace the real one.
     const outChanged = text !== (p.output || '');
     if (outChanged && p.outputClipped) { setErr('La salida es muy larga y aquí se ve recortada: no se puede editar el texto completo. Edita solo el JSON o usa “Re-ejecutar con corrección”.'); return; }
@@ -47,10 +53,18 @@ function PauseCard({ flowId, runId, p, onDone, flow, reloadFlow }) {
         </>
       ) : mode === 'edit' ? (
         <>
-          <div className="muted small">Corrige la salida: los steps siguientes recibirán esta versión.</div>
-          <textarea rows={8} className="mono" value={text} onChange={(e) => setText(e.target.value)} />
-          <div className="muted small">JSON (opcional)</div>
-          <textarea rows={6} className="mono" value={json} onChange={(e) => setJson(e.target.value)} placeholder="{ }" />
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="muted small">Salida: corrígela o reemplázala; los steps siguientes recibirán esta versión (solo en esta ejecución).</div>
+            <button className="ghost small" onClick={() => setText('')} title="Borra la salida para escribir otra desde cero">Vaciar para reemplazar</button>
+          </div>
+          <textarea rows={8} className="mono" value={text} onChange={(e) => setText(e.target.value)} placeholder="Escribe la salida que deben recibir los steps siguientes" data-testid="edit-output" />
+          {(hasJson || json.trim()) && (
+            <>
+              <div className="muted small">Datos JSON {hasJson ? '(este step devuelve JSON: los steps siguientes que leen campos usan estos datos)' : '(opcional)'}</div>
+              <textarea rows={6} className="mono" value={json} onChange={(e) => { setJson(e.target.value); setJsonAsText(false); }} placeholder="{ }" data-testid="edit-json" />
+            </>
+          )}
+          {!hasJson && !json.trim() && <div className="muted small">Este step devuelve texto: solo hace falta la salida. <a onClick={() => setJson('{}')}>Agregar datos JSON</a></div>}
         </>
       ) : mode === 'retry' ? (
         <>
@@ -75,7 +89,7 @@ function PauseCard({ flowId, runId, p, onDone, flow, reloadFlow }) {
         </div>
       )}
       {changed > 0 && <div className="changed-bar small" data-testid="changed-bar">✔ {changed === 1 ? 'Se aplicó 1 cambio' : `Se aplicaron ${changed} cambios`} al step o a las variables. {p.when === 'before' ? 'Se ejecutará con la definición nueva.' : 'Re-ejecútalo para ver el resultado con los cambios.'}</div>}
-      {err && <div className="error-bar">{err}</div>}
+      {err && <div className="error-bar">{err}{jsonAsText && <> <button className="small" onClick={() => { setText(json); setJson(''); setJsonAsText(false); setErr(''); }}>Usarlo como salida</button></>}</div>}
       <div className="review-actions">
         {p.when === 'before' ? (
           <>

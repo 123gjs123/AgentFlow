@@ -128,3 +128,35 @@ test('UI: en el break, "Mejorar con chat" → aplicar → "Re-ejecutar con los c
   } catch (e) { await captureOnFailure(page, { name: t.name, passed: false }); throw e; }
   finally { await ui.close?.(); }
 });
+
+test('UI: reemplazar la salida de un step de texto en el break (sin cuadro JSON; texto en "Datos JSON" → "Usarlo como salida")', async (t) => {
+  const u = await openUi('break-edit-ui');
+  if (u.skipReason) { t.skip(u.skipReason); return; }
+  const pg = u.page;
+  try {
+    const a = cmd('Pull Jira', 'Write-Output "0 tickets"', { id: 's_pj', breakpoint: 'after', position: { x: 100, y: 100 } });
+    const b = cmd('Interpretar', '$input | ForEach-Object { "recibí: $_" }', { id: 's_in', position: { x: 100, y: 400 } });
+    const f = await u.s.flow('Reemplazar salida', [a, b], [['s_pj', 's_in']]);
+    await pg.goto(u.s.base + '/');
+    await pg.locator('header select').selectOption(f.id);
+    await pg.getByRole('button', { name: '▶ Ejecutar flujo' }).click();
+    await pg.getByRole('button', { name: 'Ejecutar', exact: true }).click();
+    await pg.getByText('Break: validar antes de seguir').waitFor();
+    await pg.getByRole('button', { name: '✎ Editar salida' }).click();
+    assert.equal(await pg.getByTestId('edit-json').count(), 0, 'un step de texto no muestra el cuadro JSON');
+    await pg.getByText('Agregar datos JSON').click();
+    await pg.getByTestId('edit-json').fill('JQL Ready: Key= SBK-949');
+    await pg.getByRole('button', { name: 'Guardar y seguir' }).click();
+    await pg.getByText(/no es JSON/).waitFor();
+    await pg.getByRole('button', { name: 'Usarlo como salida' }).click();
+    assert.equal(await pg.getByTestId('edit-output').inputValue(), 'JQL Ready: Key= SBK-949');
+    await pg.getByRole('button', { name: 'Guardar y seguir' }).click();
+    const runs = await u.s.uiOk('GET', `/api/flows/${f.id}/runs`);
+    const run = await u.s.waitRun(f.id, runs[0].id);
+    assert.equal(run.status, 'success');
+    assert.equal(run.steps.s_pj.output, 'JQL Ready: Key= SBK-949');
+    assert.match(run.steps.s_in.output, /recibí: JQL Ready: Key= SBK-949/);
+    assert.deepEqual(pg.errors, []);
+  } catch (e) { await captureOnFailure(pg, { name: t.name, passed: false }); throw e; }
+  finally { await u.close?.(); }
+});
