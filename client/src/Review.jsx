@@ -2,11 +2,15 @@
 import React, { useEffect, useState } from 'react';
 import { api } from './api.js';
 import { Modal } from './Help.jsx';
+import Chat from './Chat.jsx';
 
 const show = (v) => (v === undefined ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 
-function PauseCard({ flowId, runId, p, onDone }) {
+function PauseCard({ flowId, runId, p, onDone, flow, reloadFlow }) {
   const [mode, setMode] = useState(null); // 'edit' | 'retry'
+  const [chat, setChat] = useState(false);
+  const [changed, setChanged] = useState(0); // changes applied from the chat during this pause (spec 24)
+  const step = flow?.steps.find((x) => x.id === p.stepId);
   const [text, setText] = useState(p.output || '');
   const [json, setJson] = useState(p.json === undefined ? '' : JSON.stringify(p.json, null, 2));
   const [feedback, setFeedback] = useState('');
@@ -30,7 +34,10 @@ function PauseCard({ flowId, runId, p, onDone }) {
   }
   return (
     <div className="pause-card">
-      <h4>⏸ “{p.step}” — {p.when === 'before' ? 'antes de ejecutarse' : `después de ejecutarse${p.round ? ` (intento ${p.round + 1})` : ''}`}</h4>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <h4>⏸ “{p.step}” — {p.when === 'before' ? 'antes de ejecutarse' : `después de ejecutarse${p.round ? ` (intento ${p.round + 1})` : ''}`}</h4>
+        {!mode && <button className={chat ? 'primary small' : 'small'} onClick={() => setChat(!chat)} title="Conversa con el step sobre esta entrada y esta salida reales y aplica cambios a su definición">💬 {chat ? 'Ocultar chat' : 'Mejorar con chat'}</button>}
+      </div>
       {p.when === 'before' ? (
         <>
           <div className="muted small">Lo que va a recibir:</div>
@@ -58,24 +65,34 @@ function PauseCard({ flowId, runId, p, onDone }) {
           {p.routes?.length > 0 && <div className="muted small">Destinos elegidos: {p.routes.map((r) => r.to).join(', ')}</div>}
         </>
       )}
+      {chat && !mode && (
+        <div className="pause-chat" data-testid="pause-chat">
+          <div className="pause-chat-head muted small"><span>Chat del step con esta ejecución: ve {p.when === 'before' ? 'lo que va a recibir' : 'lo que recibió y lo que produjo'}. Pídele cambios (filtro, tarea, comando, variables) y aplícalos.</span></div>
+          <Chat flowId={flowId} chatKey={p.stepId} runId={runId} step={step} vars={flow?.vars} compact
+            placeholder={p.when === 'before' ? 'Ej: antes de ejecutar, cambia el filtro para que solo traiga…' : 'Ej: la salida no trae lo que espero: el filtro debería…'}
+            onApplied={() => { setChanged((n) => n + 1); reloadFlow?.(); }} />
+        </div>
+      )}
+      {changed > 0 && <div className="changed-bar small" data-testid="changed-bar">✔ {changed === 1 ? 'Se aplicó 1 cambio' : `Se aplicaron ${changed} cambios`} al step o a las variables. {p.when === 'before' ? 'Se ejecutará con la definición nueva.' : 'Re-ejecútalo para ver el resultado con los cambios.'}</div>}
       {err && <div className="error-bar">{err}</div>}
       <div className="review-actions">
         {p.when === 'before' ? (
           <>
             <button className="danger" disabled={busy} onClick={() => act('stop')}>■ Detener ejecución</button>
             <button disabled={busy} onClick={() => act('skip')}>Omitir este step</button>
-            <button className="primary" disabled={busy} onClick={() => act('continue')}>▶ Ejecutar y seguir</button>
+            <button className="primary" disabled={busy} onClick={() => act('continue', changed ? { reload: true } : {})}>{changed ? '▶ Ejecutar con los cambios' : '▶ Ejecutar y seguir'}</button>
           </>
         ) : mode === 'edit' ? (
           <><button className="ghost" onClick={() => setMode(null)}>Cancelar</button><button className="primary" disabled={busy} onClick={saveEdit}>Guardar y seguir</button></>
         ) : mode === 'retry' ? (
-          <><button className="ghost" onClick={() => setMode(null)}>Cancelar</button><button className="primary" disabled={busy || !feedback.trim()} onClick={() => act('retry', { feedback })}>↻ Re-ejecutar con la corrección</button></>
+          <><button className="ghost" onClick={() => setMode(null)}>Cancelar</button><button className="primary" disabled={busy || !feedback.trim()} onClick={() => act('retry', { feedback, ...(changed ? { reload: true } : {}) })}>↻ Re-ejecutar con la corrección</button></>
         ) : (
           <>
             <button className="danger" disabled={busy} onClick={() => act('stop')}>■ Detener ejecución</button>
+            {changed > 0 && <button className="primary" disabled={busy} onClick={() => act('retry', { reload: true })}>↻ Re-ejecutar con los cambios</button>}
             <button disabled={busy} onClick={() => setMode('retry')}>↻ Re-ejecutar con corrección</button>
             <button disabled={busy} onClick={() => setMode('edit')}>✎ Editar salida</button>
-            <button className="primary" disabled={busy} onClick={() => act('continue')}>✔ Aprobar y seguir</button>
+            <button className={changed ? '' : 'primary'} disabled={busy} onClick={() => act('continue')}>✔ Aprobar y seguir</button>
           </>
         )}
       </div>
@@ -85,14 +102,17 @@ function PauseCard({ flowId, runId, p, onDone }) {
 
 export default function ReviewModal({ flowId, runId, refresh, onClose }) {
   const [run, setRun] = useState(null);
+  const [flow, setFlow] = useState(null);
   const load = () => api.get(`/api/flows/${flowId}/runs/${runId}`).then(setRun).catch(() => {});
+  const loadFlow = () => api.get(`/api/flows/${flowId}`).then(setFlow).catch(() => {});
   useEffect(() => { load(); }, [runId, refresh]);
+  useEffect(() => { loadFlow(); }, [flowId]);
   if (!run) return null;
   const pauses = run.pauses || [];
   return (
     <Modal title="Break: validar antes de seguir" onClose={onClose} wide>
       {!pauses.length ? <p className="muted">La ejecución ya no está en pausa ({run.status}).</p>
-        : pauses.map((p) => <PauseCard key={`${p.stepId}:${p.at}`} flowId={flowId} runId={runId} p={p} onDone={() => { load(); }} />)}
+        : pauses.map((p) => <PauseCard key={`${p.stepId}:${p.at}`} flowId={flowId} runId={runId} p={p} flow={flow} reloadFlow={loadFlow} onDone={() => { load(); }} />)}
       <p className="muted small">Mientras está en pausa no corre el tiempo máximo de la ejecución. Puedes cerrar esta ventana y volver con “Revisar”.</p>
     </Modal>
   );

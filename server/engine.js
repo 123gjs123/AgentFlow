@@ -784,8 +784,21 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
         const worker = async () => {
           while (queue.length && !controller.signal.aborted) {
             const id = queue.shift();
-            const step = rflow.steps.find((s) => s.id === id);
+            let step = rflow.steps.find((s) => s.id === id);
             if (!step) continue;
+            // Spec 24: improved in a break (chat) → that step (and the flow variables) take the saved definition for this run.
+            let reloaded = false;
+            // the note goes into the new attempt's activity (executing resets the step's events)
+            const noteReload = () => { if (!reloaded) return; reloaded = false; run.steps[id]?.events?.unshift({ kind: 'hook_log', text: 'Se ejecutó con la definición del step y las variables actualizadas en el break.', t: now(), seq: ++run.eventSeq }); };
+            const reload = () => {
+              const cur = store.getFlow(flowId); const s = cur?.steps.find((x) => x.id === id);
+              if (!s) return;
+              const { lastRun, memory, chatSessionId, chatContextHash, ...def } = structuredClone(s);
+              const i = rflow.steps.findIndex((x) => x.id === id);
+              rflow.steps[i] = { ...rflow.steps[i], ...def }; step = rflow.steps[i];
+              rflow.vars = { ...(cur.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) }; run.vars = rflow.vars;
+              reloaded = true;
+            };
             const inEdges = rflow.edges.filter((e) => e.target === id);
             const bad = !only && inEdges.map((e) => e.source).find((u) => failed.has(u));
             if (bad) {
@@ -819,10 +832,12 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
             if (brk === 'before' || brk === 'both') {
               const d = await pauseAt(step, 'before', { inputs: upstream.map((u) => ({ step: u.name, via: u.via || undefined, output: clipS(u.output, 4000), json: u.json })), input: clipS(input, 4000) });
               if (d.action === 'stop') { controller.abort(); break; }
+              if (d.reload && d.action === 'continue') reload();
               if (d.action === 'skip') { skip(id, 'review', 'Omitido en el break (antes) por el revisor.'); data.set(id, { output: '', json: undefined, files: [], actions: [], routes: [] }); continue; }
             }
             const opts = { data, summaries, force: !!only, ancestors: only ? null : ancestorsOf(rflow, id) };
             let r = await exec(rflow, step, input, run, controller.signal, upstream, opts);
+            noteReload();
             for (const u of upstream) if (u.warning) r.warnings?.push(`Flecha desde "${u.name}": ${u.warning}.`);
             let rounds = 0;
             while ((brk === 'after' || brk === 'both') && r.status === 'success' && !controller.signal.aborted) {
@@ -830,7 +845,10 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
               if (d.action === 'retry') {
                 rounds++;
                 const prevUsage = r.usage;
-                r = await exec(rflow, step, input, run, controller.signal, upstream, { ...opts, force: true, feedback: String(d.feedback || 'Rehaz la salida corrigiendo lo necesario.').slice(0, 4000), previousOutput: r.output });
+                if (d.reload) reload();
+                const fb = d.reload && !String(d.feedback || '').trim() ? {} : { feedback: String(d.feedback || 'Rehaz la salida corrigiendo lo necesario.').slice(0, 4000), previousOutput: r.output };
+                r = await exec(rflow, step, input, run, controller.signal, upstream, { ...opts, force: true, ...fb });
+                noteReload();
                 r.reviewRounds = rounds;
                 r.usage = sumUsage(r.usage, prevUsage); // the run total keeps the cost of every attempt
                 continue;
@@ -899,7 +917,7 @@ export function resumeRun(flowId, runId, stepId, body = {}) {
   const action = body.action || 'continue';
   if (!REVIEW_ACTIONS[p.when].includes(action)) throw Object.assign(new Error(`Acción inválida en un break "${p.when}": usa ${REVIEW_ACTIONS[p.when].join(', ')}`), { status: 400, code: 'BAD_ACTION' });
   if (action === 'edit' && body.output === undefined && body.json === undefined) throw Object.assign(new Error('Para "edit" envía "output" y/o "json"'), { status: 400, code: 'BAD_ACTION' });
-  p.resolve({ action, output: body.output, json: body.json, feedback: body.feedback });
+  p.resolve({ action, output: body.output, json: body.json, feedback: body.feedback, reload: !!body.reload });
   return { runId, stepId: sid, action };
 }
 
@@ -996,7 +1014,7 @@ export function runEvents(flow, run, after = 0, max = 500) {
 }
 
 // ---------- chats ----------
-async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null }) {
+async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null, runId = null }) {
   const flow = store.getFlow(flowId);
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   const isFlow = key === '_flow';
@@ -1026,6 +1044,10 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     const rel = P.relatedMemory(flow, step, message);
     if (rel.length) parts.push(`<related-memory>\n${rel.map((r) => `- [${r.step}] ${r.text}`).join('\n')}\n</related-memory>`);
     if (improve) parts.push('<mode>modo mejora ACTIVO: puedes editar los archivos de la skill/agente de este step.</mode>');
+    if (runId) {
+      const run = getRunLive(flowId, runId);
+      if (run) parts.push(P.runReviewBlock(step, run, (run.pauses || []).find((p) => p.stepId === key), run.steps?.[key]));
+    }
   }
   if (origin === 'global') parts.push('(Este mensaje llegó desde el chat general y fue enrutado a ti.)');
   parts.push(message);
@@ -1084,8 +1106,17 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   return asst;
 }
 
-export function stepChat(flowId, key, message, opts = {}) {
-  return chatTurn({ flowId, key, message, ...opts });
+export async function stepChat(flowId, key, message, opts = {}) {
+  try { return await chatTurn({ flowId, key, message, ...opts }); }
+  catch (e) {
+    // An internal error must not leave the answer "running" forever: close it with the error.
+    for (const m of store.getChat(flowId, key).filter((x) => x.role === 'assistant' && x.status === 'running')) {
+      const done = store.updateChatMsg(flowId, key, m.id, (x) => Object.assign(x, { status: 'error', text: `⚠️ Error interno: ${e.message}` }));
+      emit({ type: 'chat.done', flowId, key, message: done || { ...m, status: 'error', text: `⚠️ Error interno: ${e.message}` } });
+    }
+    activeChats.delete(`${flowId}:${key}`);
+    throw e;
+  }
 }
 
 export async function applyProposal(flowId, key, messageId, proposalId) {
@@ -1095,7 +1126,17 @@ export async function applyProposal(flowId, key, messageId, proposalId) {
   const allowed = ['role', 'task', 'context', 'allowedTools', 'model', 'effort', 'permissionMode', 'hooks', 'name', 'command', 'shell'];
   const flow = store.updateFlow(flowId, (f) => {
     const s = f.steps.find((x) => x.id === key);
-    if (s) for (const k of allowed) if (k in p.patch) s[k] = p.patch[k];
+    if (s) {
+      for (const k of allowed) if (k in p.patch && typeof p.patch[k] === 'string') s[k] = k === 'shell' && !['powershell', 'bash', 'cmd'].includes(p.patch[k]) ? s[k] : p.patch[k];
+      const o = p.patch.output;
+      if (o && typeof o === 'object') s.output = { ...(s.output || {}), ...(['text', 'json'].includes(o.format) ? { format: o.format } : {}), ...(typeof o.schema === 'string' ? { schema: o.schema } : o.schema && typeof o.schema === 'object' ? { schema: JSON.stringify(o.schema, null, 2) } : {}) };
+    }
+    // Flow variables (spec 24): merged, string values only.
+    const v = p.patch.vars;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      f.vars = { ...(f.vars || {}) };
+      for (const [k, val] of Object.entries(v)) if (/^[\w.-]{1,60}$/.test(k)) f.vars[k] = typeof val === 'string' ? val : JSON.stringify(val);
+    }
     bumpRev(f);
   });
   store.updateChatMsg(flowId, key, messageId, (m) => { const q = m.proposals.find((x) => x.id === proposalId); if (q) q.applied = true; });

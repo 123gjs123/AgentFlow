@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (178 tests)
+## Qué cubre (182 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -59,6 +59,7 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `15-workspace-finally-access` | Spec 22: directorio de trabajo inexistente → CWD_MISSING (UI, API, dry run, vista previa) y aviso sin directorio solo en steps que escriben; "Al terminar" en éxito/error/detenido/caída del servidor, sin cambiar el resultado, no en steps sueltos, saneado y con 422 para raw externo; {{run.id}}/{{run.short}}/{{run.date}}; acceso de terminal restringida (git sin push, docker, sin web) |
 | `16-requirements-preflight` | Spec 23: comprobaciones de herramienta (instalada / falta / falla su chequeo), archivo, variable, URL y conector MCP; archivo de secretos desde plantilla (no sobrescribe, avisa mientras falten valores, CRLF); bloqueo 412 en UI, step suelto, API, afs y dry run, lo recomendado no bloquea; sugerencias; y en el navegador: aviso en la barra, ventana "Antes de ejecutar", crear desde plantilla y ejecutar |
 | `17-export-import` | Spec 09: exportar (formato, nombre, sin estado de la máquina ni secretos, opciones), ida y vuelta entre dos instalaciones, cuarentena (UI, step, API, dry run, chat, ask; un guardado no la quita; "Revisé, habilitar" la libera), flujo sin nada ejecutable sin revisión, archivos inválidos o más nuevos, saneo, CLI `afs export`/`afs import`, y en el navegador: descargar, importar, aviso y habilitar |
+| `18-break-chat` | Spec 24: chat dentro del break con la entrada y la salida reales (`<run-review>`), propuestas de comando, variables y formato de salida (con saneo), "re-ejecutar con los cambios" (después) y "ejecutar con los cambios" (antes), sin `reload` la ejecución conserva su copia; en el navegador: abrir el chat, aplicar y re-ejecutar |
 
 Cómo se simula cada origen en `07-integrations`:
 

@@ -258,6 +258,11 @@ Set **Config → Break** on a box: *before*, *after* or *both*. When a UI run re
   - **Stop**.
 - **Before**: you see what the box will receive, and choose **Run and continue**, **Skip** or **Stop**.
 - The run deadline **does not count** paused time.
+- **💬 Improve with chat** (both kinds of break): talk to the step about *this* execution. The chat sees what the step received and, after a run, what it produced, its error and the command it ran. Ask for a change, for example "the filter should only bring my team's apps". The step proposes it (task, role, command, output format or flow variables), you **Apply** it, then:
+  - after a run: **Re-run with the changes** runs the step again with the new definition and pauses again;
+  - before a run: **Run with the changes** runs it with the new definition.
+
+  Only that button loads the edited step and variables into the running execution. Any other edit made while a run is in progress applies from the next run on.
 
 External runs ignore breaks unless they ask for them:
 - with `breakpoints: true` (API), `--breaks` (`afs`) or `breakpoints` (MCP);
@@ -623,7 +628,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **178 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **182 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.

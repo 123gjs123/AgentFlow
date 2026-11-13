@@ -282,8 +282,9 @@ Eres la interfaz conversacional de UN step de un flujo de agentes de IA. En cada
 - Explica qué haces y por qué. Puedes usar herramientas cuando aporten (lectura por defecto).
 - La memoria relacionada de otros steps (<related-memory>) es solo referencia: úsala si es pertinente y dilo.
 - Para proponer cambios a la configuración del step, emite UN bloque exactamente así (solo los campos que cambian; JSON válido):
-<step-update>{"role":"...","task":"...","context":"...","allowedTools":"...","model":"...","effort":"...","permissionMode":"...","hooks":"..."}</step-update>
-  El usuario lo aplica con un botón. Explica el cambio antes del bloque.
+<step-update>{"role":"...","task":"...","context":"...","allowedTools":"...","model":"...","effort":"...","permissionMode":"...","hooks":"...","command":"...","shell":"powershell|bash|cmd","output":{"format":"text|json","schema":"<JSON Schema como texto>"},"vars":{"nombre":"valor"}}</step-update>
+  El usuario lo aplica con un botón. Explica el cambio antes del bloque. "command"/"shell" solo para steps de tipo Comando (el texto COMPLETO del comando, no un fragmento). "vars" cambia o agrega variables del flujo (afectan a todos los steps que las usan; dilo). Nunca pongas valores de secretos en "vars".
+- Si llega un bloque <run-review>, el usuario está revisando una ejecución REAL de este step en un break: basa tu análisis y tus propuestas en esa entrada y esa salida concretas (qué recibió, qué produjo, qué error dio) y en lo que el usuario dice que debería pasar. Después de aplicar, el usuario re-ejecuta el step con los cambios.
 - Para guardar un hecho duradero en la memoria de este step: <remember>hecho</remember>. Si el usuario te pide recordar/tener en cuenta algo de forma permanente, SIEMPRE emite ese tag.
 - Si el usuario activó "modo mejora", puedes editar directamente los archivos de la skill o del agente indicados en el contexto; describe el cambio.
 - Responde en el idioma del usuario.`;
@@ -303,13 +304,36 @@ export function stepContextBlock(flow, step, attached = []) {
     `Modelo: ${step.model || 'por defecto'} | Effort: ${step.effort || 'por defecto'} | Permisos: ${step.permissionMode || 'por defecto'} | Tools permitidas: ${step.allowedTools || '(ninguna extra)'}`,
     `Hooks (código):\n${clip(step.hooks, 3000) || '(ninguno)'}`,
     `Steps anteriores: ${up.map((s) => s.name).join(', ') || '—'} | Steps siguientes: ${down.map((s) => s.name).join(', ') || '—'}`,
-    `Última ejecución: ${lr ? `${lr.status} (${new Date(lr.endedAt || lr.startedAt).toISOString()})\nSalida:\n${clip(lr.output, 6000)}${lr.json !== undefined ? `\nDatos JSON:\n${clip(JSON.stringify(lr.json, null, 2), 4000)}` : ''}${lr.error ? `\nError: ${clip(lr.error, 1500)}` : ''}` : 'nunca'}`,
+    `Última ejecución: ${lr ? `${lr.status} ${lr.endedAt || lr.startedAt ? ` (${new Date(lr.endedAt || lr.startedAt).toISOString()})` : ''}\nSalida:\n${clip(lr.output, 6000)}${lr.json !== undefined ? `\nDatos JSON:\n${clip(JSON.stringify(lr.json, null, 2), 4000)}` : ''}${lr.error ? `\nError: ${clip(lr.error, 1500)}` : ''}` : 'nunca'}`,
     `Formato de salida: ${step.output?.format === 'json' ? 'JSON' : 'texto'} | Recibe de anteriores: ${step.input?.mode || 'full'}${step.pinned ? ' | 📌 salida fijada (no se ejecuta en el flujo)' : ''}`,
     `Memoria del step:\n${memList(step.memory)}`,
     `Memoria general del flujo:\n${memList(flow.memory)}`,
     `Variables: ${JSON.stringify(flow.vars || {})}`,
   ].join('\n\n');
   return { text: `<step-context>\n${body}\n</step-context>`, hash: crypto.createHash('sha1').update(body).digest('hex') };
+}
+
+/**
+ * The real input/output of one execution of a step, for the chat opened from a break (or from a run): what it received,
+ * what it produced, the error and the commands it ran. `pause` = the pending break, if any; `sr` = run.steps[stepId].
+ */
+export function runReviewBlock(step, run, pause, sr) {
+  const lines = [`Ejecución ${run.id} (${new Date(run.startedAt).toISOString()}) — estado del step: ${sr?.status || pause?.when || 'desconocido'}${pause ? ` · en pausa (${pause.when === 'before' ? 'antes de ejecutarse' : 'después de ejecutarse'})` : ''}`];
+  if (run.input) lines.push(`Input del flujo:\n${clip(run.input, 3000)}`);
+  const inputs = pause?.inputs || sr?.inputs;
+  if (inputs?.length) lines.push(`Lo que recibe de otros steps:\n${inputs.map((i) => `### ${i.step}${i.via ? ` (${i.via})` : ''}\n${clip(i.output || (i.json !== undefined ? JSON.stringify(i.json, null, 2) : ''), 4000) || '(vacío)'}`).join('\n')}`);
+  if (pause?.when !== 'before') {
+    const out = pause?.output ?? sr?.output;
+    const json = pause ? pause.json : sr?.json;
+    lines.push(`Salida producida:\n${clip(out, 8000) || '(vacía)'}`);
+    if (json !== undefined) lines.push(`Datos JSON:\n${clip(JSON.stringify(json, null, 2), 4000)}`);
+    if (sr?.error) lines.push(`Error: ${clip(sr.error, 2000)}`);
+  }
+  const cmds = (sr?.events || []).filter((e) => e.kind === 'tool_use' && /^shell:|^Bash$/.test(e.name || '')).slice(-3);
+  if (cmds.length) lines.push(`Comando ejecutado (las variables {{vars.x}} se pasan como $env:AFS_V0…; sus valores están en "Variables"):\n${cmds.map((e) => clip(e.input?.cmd || e.input?.command || JSON.stringify(e.input), 3000)).join('\n---\n')}`);
+  const errs = (sr?.events || []).filter((e) => e.isError || e.kind === 'error').slice(-3);
+  if (errs.length) lines.push(`Errores en la actividad:\n${errs.map((e) => clip(e.text || e.content, 1500)).join('\n')}`);
+  return `<run-review>\n${lines.join('\n\n')}\n</run-review>`;
 }
 
 /** Naive keyword relevance over other steps' memory. */

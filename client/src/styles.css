@@ -293,6 +293,11 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .lib-item .preset { flex: 1; }
 .pause-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
 .pause-card textarea { width: 100%; }
+.pause-chat { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; height: 440px; background: var(--bg); }
+.pause-chat-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.chat-compact { flex: 1; min-height: 0; }
+.chat-compact .chat-input textarea { width: 100%; }
+.changed-bar { margin-top: 8px; padding: 6px 10px; border-radius: 6px; background: color-mix(in srgb, var(--accent, #7c9cff) 15%, transparent); }
 
 /* arrow ends: visible grab points on the selected arrow (drag them to another dot to move the arrow) */
 .react-flow__edge .react-flow__edgeupdater { cursor: move; }

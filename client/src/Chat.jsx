@@ -13,7 +13,7 @@ const md = (t) => ({ __html: DOMPurify.sanitize(marked.parse(t || '', { breaks: 
  * Chat bound to a key: a step id, '_flow' or '_global'.
  * Shows the internal process (tools/thinking) of each answer, proposals to apply and remembered facts.
  */
-export default function Chat({ flowId, chatKey, placeholder, step, allowImprove, onOpenStep }) {
+export default function Chat({ flowId, chatKey, placeholder, step, allowImprove, onOpenStep, runId, vars, onApplied, compact }) {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
   const [improve, setImprove] = useState(false);
@@ -53,7 +53,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     const t = text.trim();
     if (!t) return;
     setBusy(true); setErr('');
-    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey}`, { message: t, improve }); setText(''); }
+    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey}`, { message: t, improve, ...(runId ? { runId } : {}) }); setText(''); }
     catch (e) { setErr(e.message); }
     setBusy(false);
   }
@@ -62,17 +62,17 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
     await api.del(`/api/flows/${flowId}/chat/${chatKey}`); setMsgs([]);
   }
   async function apply(msg, p) {
-    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey === '_global' ? msg.routedKey : chatKey}/apply`, { messageId: findOrigin(msg), proposalId: p.id }); setMsgs((l) => l.map((x) => (x.id === msg.id ? { ...x, proposals: x.proposals.map((q) => (q.id === p.id ? { ...q, applied: true } : q)) } : x))); }
+    try { await pendingSave.flush(); await api.post(`/api/flows/${flowId}/chat/${chatKey === '_global' ? msg.routedKey : chatKey}/apply`, { messageId: findOrigin(msg), proposalId: p.id }); setMsgs((l) => l.map((x) => (x.id === msg.id ? { ...x, proposals: x.proposals.map((q) => (q.id === p.id ? { ...q, applied: true } : q)) } : x))); onApplied?.(p); }
     catch (e) { setErr(e.message); }
   }
   // proposals shown in the global chat live in the target step's chat; find that message by proposal id
   function findOrigin(msg) { return msg.originMessageId || msg.id; }
 
   return (
-    <div className="chat">
+    <div className={`chat${compact ? ' chat-compact' : ''}`}>
       <div className="chat-list">
         {!msgs.length && <div className="muted small pad">{placeholder}</div>}
-        {msgs.map((m) => <Msg key={m.id} m={m} step={step} onApply={apply} onOpenStep={onOpenStep} />)}
+        {msgs.map((m) => <Msg key={m.id} m={m} step={step} vars={vars} onApply={apply} onOpenStep={onOpenStep} />)}
         <div ref={endRef} />
       </div>
       {err && <div className="error-bar">{err}</div>}
@@ -102,7 +102,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
             </label>
           )}
           <button className="ghost" onClick={reset} title="Nueva sesión">↺</button>
-          {running && <button className="ghost danger" onClick={() => api.post(`/api/flows/${flowId}/stop`)}>Detener</button>}
+          {running && !compact && <button className="ghost danger" onClick={() => api.post(`/api/flows/${flowId}/stop`)}>Detener</button>}
           <button className="primary" disabled={busy || !text.trim()} onClick={send}>Enviar</button>
         </div>
       </div>
@@ -110,7 +110,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, allowImprove,
   );
 }
 
-function Msg({ m, step, onApply, onOpenStep }) {
+function Msg({ m, step, vars, onApply, onOpenStep }) {
   const [showProc, setShowProc] = useState(false);
   if (m.role === 'user') return <div className="msg user"><div className="bubble">{m.text}</div></div>;
   if (m.role === 'router') {
@@ -137,7 +137,7 @@ function Msg({ m, step, onApply, onOpenStep }) {
       )}
       {running && m.streaming ? <div className="bubble md" dangerouslySetInnerHTML={md(m.streaming)} /> : null}
       {!running && m.text ? <div className={`bubble md ${m.status === 'error' ? 'err' : ''}`} dangerouslySetInnerHTML={md(m.text)} /> : null}
-      {m.proposals?.map((p) => <Proposal key={p.id} p={p} step={step} onApply={() => onApply(m, p)} canApply={!m.routedKey || m.routedKey !== '_flow'} />)}
+      {m.proposals?.map((p) => <Proposal key={p.id} p={p} step={step} vars={vars} onApply={() => onApply(m, p)} canApply={!m.routedKey || m.routedKey !== '_flow'} />)}
       {m.remembered?.length > 0 && (
         <div className="remembered">🧷 Guardado en memoria: {m.remembered.map((r, i) => <span key={i} className="chip">{r}</span>)}</div>
       )}
@@ -145,16 +145,21 @@ function Msg({ m, step, onApply, onOpenStep }) {
   );
 }
 
-function Proposal({ p, step, onApply, canApply }) {
+const txt = (v) => (v === undefined || v === null ? '' : typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+function Proposal({ p, step, vars, onApply, canApply }) {
   if (p.patch.__invalid) return <div className="proposal err">Propuesta con JSON inválido:<pre>{p.patch.__invalid}</pre></div>;
+  // Flow variables are shown one by one (old → new); everything else as a field of the step.
+  const rows = Object.entries(p.patch).flatMap(([k, v]) => (k === 'vars' && v && typeof v === 'object'
+    ? Object.entries(v).map(([n, val]) => ({ key: `vars.${n}`, label: `variable del flujo "${n}"`, old: vars?.[n], val }))
+    : [{ key: k, label: k, old: step?.[k], val: v }]));
   return (
     <div className="proposal">
-      <div className="proposal-head">✏️ Cambio propuesto al step {p.applied && <span className="chip ok">aplicado</span>}</div>
-      {Object.entries(p.patch).map(([k, v]) => (
-        <div key={k} className="diff">
-          <div className="label">{k}</div>
-          {step && step[k] ? <pre className="old">{String(step[k])}</pre> : null}
-          <pre className="new">{String(v)}</pre>
+      <div className="proposal-head">✏️ Cambio propuesto {p.applied && <span className="chip ok">aplicado</span>}</div>
+      {rows.map((r) => (
+        <div key={r.key} className="diff">
+          <div className="label">{r.label}</div>
+          {txt(r.old) ? <pre className="old">{txt(r.old)}</pre> : null}
+          <pre className="new">{txt(r.val)}</pre>
         </div>
       ))}
       {!p.applied && canApply && <button className="primary small" onClick={onApply}>Aplicar</button>}

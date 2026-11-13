@@ -61,7 +61,7 @@ const fail = (msg, code = 1) => { isError = true; return finish(msg, { exitCode:
 // ---- directives: last occurrence wins (history may contain older ones) ----
 // In chats only the user message counts (the step config inside <step-context> must not trigger its run directives).
 const isChat = /^# Chat (de step|general del flujo)/.test(append);
-const chatMsg = prompt.split(/<\/step-context>|<\/flow-context>|<\/related-memory>|<\/mode>|enrutado a ti\.\)/).pop();
+const chatMsg = prompt.split(/<\/step-context>|<\/flow-context>|<\/related-memory>|<\/mode>|<\/run-review>|enrutado a ti\.\)/).pop();
 const scope = isChat ? chatMsg : all;
 const dir = (name) => { const all2 = [...scope.matchAll(new RegExp(`\\[\\[mock:${name}(?:\\s+([\\s\\S]*?))?\\]\\]`, 'g'))]; return all2.length ? (all2[all2.length - 1][1] ?? '') : null; };
 

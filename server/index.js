@@ -440,7 +440,7 @@ app.post('/api/flows/:id/chat/:key', wrap((req) => {
   const message = String(req.body?.message || '').trim();
   if (!message) throw new Error('Mensaje vacío');
   { const qp = quarantineProblem(store.getFlow(id)); if (qp) throw fail(qp.status, qp.error, qp.code); }
-  const p = key === '_global' ? engine.globalChat(id, message) : engine.stepChat(id, key, message, { improve: !!req.body?.improve });
+  const p = key === '_global' ? engine.globalChat(id, message) : engine.stepChat(id, key, message, { improve: !!req.body?.improve, runId: typeof req.body?.runId === 'string' ? req.body.runId : null });
   p.catch((e) => console.error('chat error', e));
   return { accepted: true };
 }));
