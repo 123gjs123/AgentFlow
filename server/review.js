@@ -25,6 +25,9 @@ const norm = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 const tokens = (list) => String(list || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || [];
 const SEV = { block: 0, risk: 1, improve: 2 };
 const LONG_TASK = /\b(suite|regresi[oó]n|regression|testcafe|gherkin|playwright|cypress|selenium|k6|jmeter|pytest|jest|mocha|npm (run )?test|mvn|gradle|dotnet test|ejecut\w* (los )?(tests|casos|pruebas)|run (the )?tests|e2e)\b/i;
+const EXTERNAL_WRITE_RE = /\bgit\b[^\n]*\bpush\b|-Method\s+['"]?(Put|Patch|Delete)\b|-Method\s+['"]?Post\b(?![^\n]*\bsearch)|\bcurl\b[^\n]*(-X|--request)\s*['"]?(POST|PUT|PATCH|DELETE)\b|\bcurl\b[^\n]*\s(-d|--data(-raw|-binary|-urlencode)?|--json|-F|--form)\s|\bdocker\s+push\b|\bnpm\s+publish\b|\bkubectl\s+(apply|delete|create)\b|\bbb\.mjs\s+(open-pr|update-pr|reply)\b|\bgh\s+(pr|issue|release)\s+(create|merge|edit|close|comment)\b/i;
+// a step that really launches suites: a runner in its tools (generic `node` only when it runs tests/e2e)
+const RUNNER_TOOL = /^Bash\((npx|npm|yarn|pnpm|testcafe|gherkin|k6|mvn|gradle|dotnet|pytest|docker|node\b[^)]*(run-e2e|\btests?\b|testcafe|playwright|jest|mocha))/i;
 const READ_CMDS = ['ls', 'cat', 'head', 'tail', 'grep', 'wc', 'find', 'tasklist', 'ps', 'tee', 'sort', 'uniq', 'diff', 'git status', 'git log', 'git diff', 'git show', 'git branch', 'git rev-parse'];
 const SHELL_RULE = 'Ejecuta cada comando tal cual, sin "cd …&&" (el directorio de trabajo ya es la raíz), sin variables delante (VAR=x comando) y sin heredocs: esas formas no coinciden con los permisos y se deniegan.';
 const BG_RULE = 'Nunca uses la opción run_in_background ni termines tu respuesta con un comando en curso: si terminas, el comando muere con la sesión. Para corridas largas espera el resultado.';
@@ -76,14 +79,16 @@ export function runDigest(flow, run) {
     for (const e of ev) if (e.kind === 'tool_use') hist[e.name] = (hist[e.name] || 0) + 1;
     const denials = [];
     for (const d of s.denials || []) {
-      let inp = d.input; try { inp = JSON.parse(d.input).command ?? d.input; } catch {}
+      // the CLI's input is JSON cut at 300 chars: take the command even from a truncated string
+      let inp = d.input; try { inp = JSON.parse(d.input).command ?? d.input; } catch { const m = /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(String(d.input)); if (m) inp = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\'); }
       const k = `${d.tool}|${clip(inp, 160)}`;
       const hit = denials.find((x) => x.k === k); if (hit) hit.n++; else denials.push({ k, tool: d.tool, input: clip(inp, 160), n: 1 });
     }
     const bash = ev.filter((e) => e.kind === 'tool_use' && e.name === 'Bash');
     const background = bash.filter((e) => e.input?.run_in_background).map((e) => clip(e.input?.command, 160));
     const results = ev.filter((e) => e.kind === 'tool_result').map((e) => String(e.content ?? e.text ?? ''));
-    const timedOut = results.filter((t) => /Command timed out|timed out after|moved to the background|exceeded the maximum/i.test(t)).map((t) => clip(t, 200));
+    // only Bash's own limit (a 20 s search timeout of Grep is not this problem)
+    const timedOut = ev.filter((e) => e.kind === 'tool_result').map((e, i) => String(e.content ?? e.text ?? '')).filter((t) => /^Command timed out|Command was moved to the background|exceeded the maximum (bash )?timeout/i.test(t.trim())).map((t) => clip(t, 200));
     const errors = ev.filter((e) => e.isError || e.kind === 'error').slice(-3).map((e) => clip(e.text ?? e.content, 300));
     return {
       stepId: id, step: stepName(flow, id), stepHash: run.stepHashes?.[id] || null, status: s.status, code: s.code || null, skipReason: s.skipReason || null, durationMs: s.durationMs || null, attempts: (s.attempts || []).length,
@@ -150,8 +155,9 @@ export async function lintFlow(flow, { probes = true, fresh = false } = {}) {
     // R-WRITE-EXT: writes to external systems
     const mcpWrites = toks.filter((t) => POL.MCP_WRITE_RE.test(t) || (t.startsWith('mcp__') && t.slice(5).split('__').length === 1 && /atlassian/i.test(t)));
     const bashWrites = toks.filter((t) => /^Bash\((git push|curl|Invoke-RestMethod|node .*bb\.mjs)/i.test(t));
-    const cmdWrite = s.kind === 'command' ? (String(s.command || '').match(engine.COMMAND_WRITE_RE) || [])[0] : null;
-    const cmdExternal = cmdWrite && !/^(Remove-Item|rmdir|rm|del)/i.test(cmdWrite.trim());
+    // only what leaves the machine counts as an external write (a local branch or commit is not)
+    const cmdWrite = s.kind === 'command' ? (String(s.command || '').match(EXTERNAL_WRITE_RE) || [])[0] : null;
+    const cmdExternal = !!cmdWrite;
     if (mcpWrites.length || bashWrites.length || cmdExternal) {
       const what = [...mcpWrites, ...bashWrites, ...(cmdExternal ? [`comando: ${clip(cmdWrite, 60)}`] : [])];
       if (ext) {
@@ -167,7 +173,7 @@ export async function lintFlow(flow, { probes = true, fresh = false } = {}) {
       if (m) add({ rule: 'R-SECRET', severity: 'block', category: 'credentials', stepId: s.id, subject: k, title: `Hay algo que parece un secreto en «${k}»`, detail: 'Los prompts viajan al modelo y se guardan en el historial: cárgalo en ⚙ › Credenciales y úsalo con {{cred.nombre.campo}} desde un step de comando.', evidence: [{ type: 'def', stepId: s.id, quote: `${k}: ${m[0].slice(0, 6)}••••` }] });
     }
     // R-LONG-BASH: long suites inside an AI step hit the CLI's 10-minute Bash limit
-    if (isAi && toks.some((t) => /^Bash\b/.test(t)) && LONG_TASK.test(`${s.task} ${s.role}`) && !s.bashTimeoutMin && !(sys.bashMaxMs > 600000)) {
+    if (isAi && (toks.some((t) => RUNNER_TOOL.test(t)) || (toks.some((t) => /^Bash$/.test(t)) && LONG_TASK.test(`${s.task} ${s.role}`))) && LONG_TASK.test(`${s.task} ${s.role}`) && !s.bashTimeoutMin && !(sys.bashMaxMs > 600000)) {
       add({ rule: 'R-LONG-BASH', severity: 'risk', category: 'timeout', stepId: s.id, title: 'Corre suites largas y el CLI corta cada comando a los 10 min', detail: 'Claude Code corta un comando de Bash a los 10 minutos (o lo manda a segundo plano y la sesión termina sin el resultado). Sube el límite de Bash de este step y su tiempo máximo.', evidence: [{ type: 'def', stepId: s.id, quote: clip((`${s.task}`.match(LONG_TASK) || [''])[0], 80) }, { type: 'system', quote: `BASH_MAX_TIMEOUT_MS: ${sys.bashMaxMs || 'sin definir (10 min)'}` }], fix: { kind: 'flow', patch: { steps: { [s.id]: { bashTimeoutMin: 60, ...(Number(s.timeoutSec) >= 3600 ? {} : { timeoutSec: 7200 }), context: `${s.context ? `${s.context}\n` : ''}${BG_RULE}` } } }, label: 'Bash hasta 60 min, step hasta 2 h y regla de no dejar comandos en segundo plano' }, check: 'En el ensayo o la próxima corrida no aparece "Command timed out" ni un comando en segundo plano.' });
     }
   }
@@ -179,8 +185,10 @@ export async function lintFlow(flow, { probes = true, fresh = false } = {}) {
 
   // --- runs and rehearsals ---
   const digests = recentDigests(flow);
+  // once runs record step versions, older runs (without them) are noise: their step may have changed since
+  const versioned = digests.some((d) => d.steps.some((x) => x.stepHash));
   const byStep = new Map();
-  for (const d of digests) for (const s of d.steps) { if (!byStep.has(s.stepId)) byStep.set(s.stepId, []); byStep.get(s.stepId).push({ ...s, runId: d.runId, rehearsal: d.rehearsal, trigger: d.trigger }); }
+  for (const d of digests.filter((x) => !versioned || x.steps.some((y) => y.stepHash))) for (const s of d.steps) { if (!byStep.has(s.stepId)) byStep.set(s.stepId, []); byStep.get(s.stepId).push({ ...s, runId: d.runId, rehearsal: d.rehearsal, trigger: d.trigger }); }
   for (const [stepId, all] of byStep) {
     const s = flow.steps.find((x) => x.id === stepId);
     if (!s) continue;
@@ -269,9 +277,12 @@ const UNTRUSTED = (s) => `<untrusted-data>\n${String(s).replace(/<\/?untrusted-d
 /** Everything the reviewers see, bounded (40k chars) and with secrets masked. Priority: lint > failures > successes. */
 export function buildDossier(flow, lint, digests) {
   const sup = store.getSuppressed(flow.id);
+  // configuration first and whole (a long task must never hide allowedTools or the limits: real bug found on a real
+  // flow); long texts are clipped one by one
   const def = flow.steps.map((s) => {
-    const { lastRun, memory, chatSessionId, chatContextHash, position, pinned, ...d } = s;
-    return `### ${s.name} [${s.id}] (${s.kind}${s.skillRef ? `: ${s.skillRef}` : ''}${s.agentRef ? `: ${s.agentRef}` : ''})\n${clip(JSON.stringify(d, null, 1), 3500)}`;
+    const { lastRun, memory, chatSessionId, chatContextHash, position, pinned, role, task, context, command, hooks, ...cfg } = s;
+    const txt = [['role', role, 1500], ['task', task, 2500], ['context', context, 1200], ['command', command, 2500], ['hooks', hooks, 800]].filter(([, v]) => String(v || '').trim()).map(([k, v, n]) => `${k}:\n${clip(v, n)}`).join('\n');
+    return `### ${s.name} [${s.id}] (${s.kind}${s.skillRef ? `: ${s.skillRef}` : ''}${s.agentRef ? `: ${s.agentRef}` : ''})\nconfiguración: ${JSON.stringify(cfg)}\n${txt}`;
   }).join('\n\n');
   const edges = (flow.edges || []).map((e) => `${stepName(flow, e.source)} → ${stepName(flow, e.target)}${e.when?.type && e.when.type !== 'always' ? ` (si ${e.when.type})` : ''}`).join('\n');
   const pol = POL.effective(flow).map((p) => `- [${p.scope}] ${p.type}: ${p.text}${Object.keys(p.params || {}).length ? ` ${JSON.stringify(p.params)}` : ''}`).join('\n') || '(ninguna)';
