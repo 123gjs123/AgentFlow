@@ -155,7 +155,17 @@ export async function preflight(flow, { fresh = false, probe = false, only = nul
   for (const r of reqs) results.push(await checkRequirement(r, flow, { probe }));
   const value = { ok: results.every((r) => r.ok !== false || r.optional), results, blocking: results.filter((r) => r.ok === false && !r.optional), checkedAt: Date.now() };
   cache.set(flow.id, { at: Date.now(), key, value });
+  try { onChecked?.(flow.id); } catch {}
   return withCreds(value, creds);
+}
+let onChecked = null;
+/** Called after a real check (spec 27: the attention list refreshes its "blocked" item). */
+export const setOnChecked = (fn) => { onChecked = fn; };
+/** Last result for the flow's CURRENT requirements, however old; null when never checked. Never runs a check. */
+export function cachedPreflight(flow) {
+  const reqs = (flow.requirements || []).filter((r) => r && REQ_TYPES.includes(r.type) && !r.disabled);
+  const hit = cache.get(flow.id);
+  return hit && hit.key === JSON.stringify([reqs, flow.vars]) ? hit.value : null;
 }
 function withCreds(v, creds) {
   if (!creds.length) return v;

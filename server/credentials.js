@@ -100,16 +100,16 @@ export function deleteCredential(id) {
 /** Value of {{cred.name.field}} → {value, secret} | {error}. Only the engine calls this, only for commands. */
 export function resolveCredential(name, field) {
   const c = readAll().find((x) => x.name === name);
-  if (!c) return { error: `La credencial "${name}" no existe: cárgala en 🔑 Credenciales.` };
+  if (!c) return { error: `La credencial "${name}" no existe: cárgala en ⚙ Configuración › Credenciales.` };
   const f = TYPES[c.type]?.fields.find((x) => x.k === field);
   if (!f) return { error: `La credencial "${name}" (${c.type}) no tiene el campo "${field}": usa ${TYPES[c.type].fields.map((x) => x.k).join(', ')}.` };
   if (f.secret) {
-    if (!c.secrets?.[field]) return { error: `A la credencial "${name}" le falta "${f.label}": complétala en 🔑 Credenciales.` };
+    if (!c.secrets?.[field]) return { error: `A la credencial "${name}" le falta "${f.label}": complétala en ⚙ Configuración › Credenciales.` };
     try { return { value: open(c.secrets[field]), secret: true }; }
-    catch { return { error: `No se pudo descifrar "${name}.${field}" (¿cambió la clave ${KEY_FILE()}?): vuelve a cargarla en 🔑 Credenciales.` }; }
+    catch { return { error: `No se pudo descifrar "${name}.${field}" (¿cambió la clave ${KEY_FILE()}?): vuelve a cargarla en ⚙ Configuración › Credenciales.` }; }
   }
   const v = c.fields?.[field] || '';
-  if (!v) return { error: `A la credencial "${name}" le falta "${f.label}": complétala en 🔑 Credenciales.` };
+  if (!v) return { error: `A la credencial "${name}" le falta "${f.label}": complétala en ⚙ Configuración › Credenciales.` };
   return { value: v, secret: false };
 }
 

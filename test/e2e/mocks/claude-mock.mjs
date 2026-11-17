@@ -18,6 +18,7 @@ const readFile = (f) => { try { return f ? fs.readFileSync(f, 'utf8') : ''; } ca
 const statePath = (k) => path.join(STATE || '.', k.replace(/[^\w.-]/g, '_'));
 const bump = (k) => { if (!STATE) return 1; const f = statePath(`count-${k}`); const n = Number(readFile(f) || 0) + 1; fs.writeFileSync(f, String(n)); return n; };
 
+if (process.argv.includes('--version')) { process.stdout.write('9.9.9 (Claude Code mock)\n'); process.exit(0); }
 let prompt = '';
 for await (const c of process.stdin) prompt += c;
 

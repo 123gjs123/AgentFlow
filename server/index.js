@@ -21,6 +21,10 @@ import { exportFlow, importBundle, quarantineProblem, slug } from './bundle.js';
 import { parseSchema } from './schema.js';
 import { needsPreflight } from './preflight.js';
 import * as CRED from './credentials.js';
+import * as attention from './attention.js';
+import * as notify from './notify.js';
+import { checkSystem } from './system.js';
+import { cachedPreflight, setOnChecked } from './preflight.js';
 import { REQ_TYPES, preflight, preflightMessage, suggestRequirements, createFromTemplate, clearPreflightCache } from './preflight.js';
 import os from 'node:os';
 
@@ -209,7 +213,8 @@ const hasUiKey = (req) => { const k = store.getConfig().uiKey; return eqSecret(c
 const uiUrl = () => `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}/?k=${store.getConfig().uiKey}`;
 const NEED_KEY_PAGE = `<!doctype html><meta charset="utf-8"><title>Agent Flow Studio</title><body style="font:15px system-ui;background:#0f1115;color:#e6e8ef;padding:40px;max-width:640px">
 <h2>Agent Flow Studio</h2><p>Para abrir la interfaz usa el enlace con la clave que muestra la consola al arrancar (<code>npm start</code>), o ábrela con <code>start.cmd</code> o <code>afs ui</code>.</p>
-<p style="color:#8b92a7">Después de abrirla una vez, este navegador recuerda la clave y la dirección normal funciona.</p></body>`;
+<p style="color:#8b92a7">Después de abrirla una vez, este navegador recuerda la clave y la dirección normal funciona.</p>
+<p style="color:#8b92a7">¿Llegaste desde una notificación de Windows? Se abrió en un navegador que todavía no tiene la clave: abre Agent Flow Studio con <code>start.cmd</code> en ese navegador una vez.</p></body>`;
 app.use((req, res, next) => {
   if (!isLocalReq(req)) return res.status(403).json({ error: 'Solo accesible desde esta máquina', code: 'FORBIDDEN' });
   if (req.method === 'GET' && typeof req.query.k === 'string' && eqSecret(req.query.k, store.getConfig().uiKey)) {
@@ -563,12 +568,22 @@ app.post('/api/flows/:id/context-files', wrap((req) => {
 // ----- step library (spec 18) -----
 // ----- credentials (spec 26): values never leave the server -----
 app.get('/api/credentials', wrap(() => ({ types: CRED.TYPES, items: CRED.listCredentials() })));
-app.post('/api/credentials', wrap((req) => CRED.createCredential(req.body)));
-app.put('/api/credentials/:cid', wrap((req) => CRED.updateCredential(req.params.cid, req.body)));
-app.delete('/api/credentials/:cid', wrap((req) => CRED.deleteCredential(req.params.cid)));
+// credential changes refresh the "blocked" attention items (the event carries no names or values)
+const credChanged = (x) => { engine.bus.emit('msg', { type: 'credentials.changed' }); return x; };
+app.post('/api/credentials', wrap((req) => credChanged(CRED.createCredential(req.body))));
+app.put('/api/credentials/:cid', wrap((req) => credChanged(CRED.updateCredential(req.params.cid, req.body))));
+app.delete('/api/credentials/:cid', wrap((req) => credChanged(CRED.deleteCredential(req.params.cid))));
 app.post('/api/credentials/:cid/test', wrap((req) => CRED.testCredential(req.params.cid)));
 app.post('/api/credentials/env-keys', wrap((req) => ({ keys: CRED.envKeys(req.body?.file) })));
-app.post('/api/credentials/:cid/import-env', wrap((req) => CRED.importFromEnv(req.params.cid, req.body || {})));
+app.post('/api/credentials/:cid/import-env', wrap((req) => credChanged(CRED.importFromEnv(req.params.cid, req.body || {}))));
+
+// ----- "Necesita atención" + notifications + settings (spec 27). Navigation only: nothing here resumes/applies/trusts. -----
+app.get('/api/attention', wrap(() => ({ items: attention.list(), at: Date.now() })));
+app.post('/api/attention/dismiss', wrap((req) => attention.dismiss(String(req.body?.id || ''), String(req.body?.stateKey ?? ''))));
+app.get('/api/settings', wrap(() => ({ notify: notify.settings(), platform: process.platform, osSupported: notify.osSupported() })));
+app.put('/api/settings/notify', wrap((req) => ({ notify: notify.setSettings(req.body || {}) })));
+app.post('/api/settings/notify/test', wrap(() => notify.test()));
+app.get('/api/system/check', wrap(async (req) => checkSystem({ flow: req.query.flow ? store.getFlow(String(req.query.flow)) : null, fresh: req.query.fresh === '1' })));
 app.get('/api/library', wrap(() => store.listLibrary()));
 app.post('/api/library', wrap((req) => {
   const f = need(req.body?.flow);
@@ -682,6 +697,11 @@ server.listen(PORT, HOST, () => {
   // Only after owning the port: a second instance that fails to start must not touch the first one's runs.
   const recovered = engine.recoverStaleRuns();
   if (recovered) console.log(`${recovered} ejecución(es) interrumpidas por el reinicio marcadas como 'interrupted'.`);
+  // spec 27: attention list from disk (after the recovery), then notifications; no toast storm, one summary
+  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight });
+  setOnChecked((flowId) => engine.bus.emit('msg', { type: 'preflight.checked', flowId }));
+  notify.init({ getBaseUrl: () => `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}` });
+  notify.bootSummary(recovered);
   console.log(`Agent Flow Studio → ${uiUrl()}  (claude: ${claudeBin()})`);
   console.log('Abre ese enlace (lleva la clave de la interfaz); luego este navegador la recuerda.');
 });

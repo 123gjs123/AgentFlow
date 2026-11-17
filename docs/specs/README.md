@@ -34,6 +34,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 24 | [Chat inside a break](24-break-chat.md) | Implemented (2026-11-13; e2e: `test/e2e/18-*`) |
 | 25 | [Chats are conversations](25-conversational-chats.md) | Implemented (2026-11-13; e2e: `test/e2e/19-*`) |
 | 26 | [🔑 Credenciales](26-credentials.md) | Implemented (2026-11-17; e2e: `test/e2e/20-*`) |
+| 27 | [🔔 Necesita atención, notificaciones y ⚙ Configuración](27-attention-notifications-settings.md) | Implemented (2026-11-17; e2e: `test/e2e/21-*`, `22-*`) |
 
 **Status meanings**
 - **Implemented:** in `main` and verified end to end.

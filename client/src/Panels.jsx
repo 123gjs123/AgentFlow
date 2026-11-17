@@ -268,7 +268,7 @@ function insertIntoSuccess(code, snippet) {
   return code.slice(0, at) + snippet + code.slice(at);
 }
 
-export function FlowPanel({ flow, running, tab, setTab, onChange, onOpenStep, onReset }) {
+export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOpenStep, onReset }) {
   const [varsText, setVarsText] = useState(JSON.stringify(flow.vars || {}, null, 2));
   const [varsErr, setVarsErr] = useState('');
   const [runs, setRuns] = useState([]);
@@ -278,6 +278,8 @@ export function FlowPanel({ flow, running, tab, setTab, onChange, onOpenStep, on
   // Follow server-side changes (e.g. a hook's ctx.setVar) unless the user is editing the JSON or it holds an invalid draft.
   useEffect(() => { if (!varsFocus && !varsErr) setVarsText(JSON.stringify(flow.vars || {}, null, 2)); }, [flow.id, JSON.stringify(flow.vars || {})]);
   useEffect(() => { if (tab === 'runs') api.get(`/api/flows/${flow.id}/runs`).then(setRuns); }, [tab, flow.id]);
+  // "Ver ejecución" from 🔔 (spec 27): open that run's detail
+  useEffect(() => { if (focusRun?.runId) api.get(`/api/flows/${flow.id}/runs/${focusRun.runId}`).then(setRunDetail).catch(() => {}); }, [focusRun?.n]);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
 
   return (

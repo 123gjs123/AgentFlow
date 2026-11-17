@@ -97,7 +97,7 @@ export function importBundle(bundle, clean, { name } = {}) {
   // Credentials are never exported: name the ones this machine still has to load (spec 26).
   const have = credentialNames();
   const needed = [...new Set(credentialRefs(flow).map((r) => r.name))].filter((n) => !have.has(n));
-  if (needed.length) warnings.push(`Usa credenciales que no están cargadas en esta máquina: ${needed.join(', ')}. Cárgalas en 🔑 Credenciales (con el mismo nombre).`);
+  if (needed.length) warnings.push(`Usa credenciales que no están cargadas en esta máquina: ${needed.join(', ')}. Cárgalas en ⚙ Configuración › Credenciales (con el mismo nombre).`);
   const reasons = executableParts(flow);
   if (reasons.length) flow.quarantine = { since: Date.now(), from: { exportedAt: bundle.exportedAt || null, app: bundle.app || null, name: src.name || null }, reasons };
   return { flow, warnings, chats: bundle.chats && typeof bundle.chats === 'object' ? bundle.chats : null, runs: Array.isArray(bundle.runs) ? bundle.runs : null };

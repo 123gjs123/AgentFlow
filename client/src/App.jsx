@@ -8,13 +8,16 @@ import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
 import { PreflightModal } from './Requirements.jsx';
 import { ExportModal, importFile, QuarantineBanner } from './ExportImport.jsx';
-import { CredentialsModal } from './Credentials.jsx';
+import { SettingsModal } from './Settings.jsx';
+import { AttentionButton, AttentionDrawer, AttentionToasts, flowPrefix } from './Attention.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 // Per-tab memory: each browser tab keeps its own open flow (also in the URL, so reload and links work).
 const ss = { get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} } };
 const urlFlow = () => { try { return new URLSearchParams(location.search).get('flow'); } catch { return null; } };
+// ?open= from a desktop notification (spec 27): whitelist, read once at load (openFlow rewrites the URL).
+const URL_OPEN = (() => { try { const v = new URLSearchParams(location.search).get('open'); return ['review', 'attention'].includes(v) ? v : null; } catch { return null; } })();
 const rid = (p) => p + Math.random().toString(36).slice(2, 10);
 
 function newStep(kind, name) {
@@ -47,8 +50,19 @@ export default function App() {
   const [preflight, setPreflight] = useState(null); // {missing: n} for the header chip (spec 23)
   const [pfModal, setPfModal] = useState(null); // {retry: fn}
   const [exportOpen, setExportOpen] = useState(false);
-  const [credOpen, setCredOpen] = useState(null); // {name?} when open (spec 26)
-  useEffect(() => { const h = (e) => setCredOpen({ name: e.detail?.name || null }); window.addEventListener('afs:open-credentials', h); return () => window.removeEventListener('afs:open-credentials', h); }, []);
+  const [settings, setSettings] = useState(null); // {tab, name?} when ⚙ Configuración is open (spec 27)
+  useEffect(() => {
+    const cred = (e) => setSettings({ tab: 'credentials', name: e.detail?.name || null });
+    const open = (e) => setSettings({ tab: e.detail?.tab || 'credentials', name: e.detail?.name || null });
+    window.addEventListener('afs:open-credentials', cred); window.addEventListener('afs:open-settings', open);
+    return () => { window.removeEventListener('afs:open-credentials', cred); window.removeEventListener('afs:open-settings', open); };
+  }, []);
+  // 🔔 Necesita atención (spec 27): server-side list for ALL flows; toasts for new items of other flows.
+  const [attention, setAttention] = useState([]);
+  const [attOpen, setAttOpen] = useState(URL_OPEN === 'attention');
+  const [attToasts, setAttToasts] = useState([]);
+  const [focusRun, setFocusRun] = useState(null); // {runId, n}: open this run in Flujo › Ejecuciones
+  useEffect(() => { api.get('/api/attention').then((r) => setAttention(r.items || [])).catch(() => {}); }, []);
   const importInput = useRef(null);
   /** Import a .afsflow.json (spec 09): opens the new flow; quarantined ones show the review banner. */
   async function onImport(files) {
@@ -93,7 +107,7 @@ export default function App() {
     api.get('/api/flows').then((list) => {
       setFlows(list);
       const id = wanted.map((w) => list.find((f) => f.id === w)?.id).find(Boolean) || list[0]?.id;
-      if (id) openFlow(id);
+      if (id) openFlow(id, { review: URL_OPEN === 'review' });
     }).catch(() => {});
   }, []);
   useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
@@ -104,7 +118,8 @@ export default function App() {
     return () => clearTimeout(t);
   }, [flow?.id, JSON.stringify(flow?.requirements || []), JSON.stringify(flow?.vars || {}), pfModal]);
   // Tab title = flow name, to tell tabs apart.
-  useEffect(() => { document.title = flow ? `${flow.name} · Agent Flow Studio` : 'Agent Flow Studio'; }, [flow?.name]);
+  const attPending = attention.filter((i) => !i.dismissed);
+  useEffect(() => { const n = attPending.length; document.title = `${n ? `(${n}) ` : ''}${flow ? `${flow.name} · ` : ''}Agent Flow Studio`; }, [flow?.name, attPending.length]);
   // When the canvas is empty, show what is still attached to the flow (description, vars, chats, runs…).
   const noSteps = flow && flow.steps.length === 0;
   useEffect(() => {
@@ -128,7 +143,7 @@ export default function App() {
     if (id) openFlow(id);
   }), []);
 
-  async function openFlow(id) {
+  async function openFlow(id, { review = false, targetRun = null } = {}) {
     if (!id) return;
     // Save pending edits of the current flow first (the debounced save would otherwise write the NEW flow).
     try { await flushSave(); } catch (e) { if (!confirm(`No se pudieron guardar los últimos cambios (${e.message}). ¿Abrir el otro flujo igual? Se perderán.`)) return; clearTimeout(saveTimer.current); dirty.current = false; }
@@ -144,7 +159,19 @@ export default function App() {
     ls.set('afs.flow', id); ss.set('afs.flow', id);
     try { history.replaceState(null, '', `?flow=${encodeURIComponent(id)}`); } catch {}
     // A run of this flow may be waiting at a break (e.g. after reloading the page).
-    api.get(`/api/flows/${id}/runs`).then((runs) => { const p = (runs || []).find((r) => r.status === 'paused'); if (p) setPaused({ runId: p.id }); }).catch(() => {});
+    // (when 🔔 asked for a specific run, that one wins: never replace it with another paused run)
+    if (!targetRun) api.get(`/api/flows/${id}/runs`).then((runs) => { const p = (runs || []).find((r) => r.status === 'paused'); if (p) { setPaused({ runId: p.id }); if (review) setReviewOpen(true); } }).catch(() => {});
+  }
+
+  /** Inbox / toast navigation (spec 27, D48): takes you to the place; never resumes, applies or trusts anything. */
+  async function goTo(item) {
+    const t = item.target || {};
+    setAttOpen(false);
+    if (t.flowId && flowRef.current?.id !== t.flowId) await openFlow(t.flowId, { targetRun: t.open === 'review' ? t.runId : null });
+    if (t.open === 'settings') { setSettings({ tab: t.tab || 'credentials', name: t.name || null }); return; }
+    if (t.open === 'review' && t.runId) { setPaused({ runId: t.runId, nonce: Date.now() }); setReviewOpen(true); return; }
+    if (t.open === 'run' && t.runId) { setSelectedId(null); setSelectedEdge(null); setFlowTab('runs'); setFocusRun({ runId: t.runId, n: Date.now() }); return; }
+    if (t.open === 'preflight') setPfModal({});
   }
 
   // ---- persistence (debounced) ----
@@ -208,6 +235,7 @@ export default function App() {
   }, [mutate]);
   useEffect(() => {
     const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'a') { e.preventDefault(); setAttOpen((v) => !v); return; } // 🔔 Necesita atención
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       const t = e.target;
       // Inside a text field the browser's own undo applies (it undoes the typing there).
@@ -226,6 +254,13 @@ export default function App() {
     if (m.type === 'run.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
     if (m.type === 'chat.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
     if (m.type === 'flows.changed') { loadFlows().catch(() => {}); return; } // created / renamed / deleted in another tab
+    if (m.type === 'attention.changed') {
+      setAttention(m.items || []);
+      // a toast for what is NEW and not already in front of you (the open flow has its own break modal / run notice)
+      const fresh = (m.items || []).filter((i) => (m.added || []).includes(i.id) && !i.dismissed && i.flowId !== flowRef.current?.id);
+      if (fresh.length) setAttToasts((ts) => [...fresh.map((item) => ({ key: `${item.id}:${item.stateKey}`, item })), ...ts.filter((x) => !fresh.some((i) => x.key === `${i.id}:${i.stateKey}`))].slice(0, 6));
+      return;
+    }
     if (!cur || m.flowId !== cur.id) return;
     switch (m.type) {
       case 'flow.updated': {
@@ -424,7 +459,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         <div className="brand">⛓️ Agent Flow Studio</div>
         <select value={flow?.id || ''} onChange={(e) => openFlow(e.target.value)}>
           {!flow && <option value="">— sin flujos —</option>}
-          {flows.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+          {flows.map((f) => <option key={f.id} value={f.id}>{flowPrefix(attention, f.id)}{f.name}</option>)}
         </select>
         <span data-tour="flows" className="row">
           <button onClick={() => createFlow()}>+ Flujo</button>
@@ -432,7 +467,6 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           <button className="ghost" onClick={() => createFlow('demo')} title="Crea un flujo de ejemplo con tus skills de QA">Demo</button>
         </span>
         <button className="ghost" onClick={() => importInput.current?.click()} title="Importar un flujo (.afsflow.json)">⬆ Importar</button>
-        <button className="ghost" onClick={() => setCredOpen({})} title="Tokens y accesos que usan los flujos (Jira, Bitbucket, GitHub, Jenkins…), cifrados en esta máquina">🔑 Credenciales</button>
         <input ref={importInput} type="file" accept=".json,application/json" multiple style={{ display: 'none' }} onChange={(e) => { onImport([...e.target.files]); e.target.value = ''; }} />
         {flow && <button className="ghost" onClick={() => setExportOpen(true)} title="Exportar este flujo para compartirlo (.afsflow.json)">⬇ Exportar</button>}
         {flow && <button className="ghost" onClick={() => window.open(`?flow=${encodeURIComponent(flow.id)}`, '_blank')} title="Abrir este flujo en otra pestaña (cada pestaña puede tener su flujo; si dos editan el mismo, los cambios se combinan)">⧉</button>}
@@ -468,6 +502,8 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           </>
         )}
         {!flow && <div className="grow" />}
+        <AttentionButton items={attention} onClick={() => setAttOpen((v) => !v)} />
+        <button className="ghost icon-btn" onClick={() => setSettings({ tab: 'credentials' })} title="Configuración: credenciales, integraciones, Claude Code CLI, notificaciones" aria-label="Configuración" data-testid="settings-btn">⚙</button>
         <HelpMenu onTour={() => setTourStep(0)} onGuide={(sec) => setModal({ help: sec })} />
       </header>
 
@@ -506,7 +542,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
                 onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onProbe={probe}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             ) : (
-              <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} running={anyRunning} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
+              <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} running={anyRunning} focusRun={focusRun} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             )}
           </aside>
@@ -520,7 +556,9 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         </div>
       )}
       {exportOpen && flow && <ExportModal flow={flow} onClose={() => setExportOpen(false)} />}
-      {credOpen && <CredentialsModal focusName={credOpen.name} onClose={() => setCredOpen(null)} />}
+      {settings && <SettingsModal tab={settings.tab} setTab={(tab) => setSettings({ tab })} focusName={settings.name} flow={flow} onClose={() => setSettings(null)} />}
+      {attOpen && <AttentionDrawer items={attention} onClose={() => setAttOpen(false)} onGo={goTo} />}
+      <AttentionToasts toasts={attToasts} onGo={goTo} onClose={(key) => setAttToasts((ts) => ts.filter((x) => x.key !== key))} />
       {pfModal && flow && <PreflightModal flow={flow} onClose={() => setPfModal(null)} onReady={pfModal.retry} />}
       {paused && flow && <div className="review-bar">⏸ Ejecución en pausa{paused.step ? ` en “${paused.step}”` : ''}: valida la salida para seguir <button className="primary small" onClick={() => setReviewOpen(true)}>Revisar</button></div>}
       {paused && reviewOpen && flow && <ReviewModal key={paused.runId} refresh={paused.nonce || 0} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}

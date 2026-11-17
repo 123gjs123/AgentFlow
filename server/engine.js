@@ -1013,6 +1013,8 @@ export function stopRun(flowId, runId) {
   r.controller.abort();
   return true;
 }
+/** Runs waiting at a break (spec 27): any trigger (UI, chat, external with breakpoints). */
+export const pausedRuns = () => [...activeRuns.values()].filter((a) => a.run.pauses?.length).map((a) => ({ flowId: a.flowId, runId: a.run.id, trigger: a.run.trigger, pauses: a.run.pauses.map(({ stepId, step, when, at }) => ({ stepId, step, when, at })) }));
 export const isRunning = (flowId) => [...activeRuns.values()].some((r) => r.flowId === flowId);
 
 function killPid(pid) {
@@ -1032,6 +1034,8 @@ export function recoverStaleRuns() {
     for (const r of store.rawRuns(f.id)) {
       if (!['running', 'paused'].includes(r.status) || activeRuns.has(r.id)) continue;
       Object.assign(r, { status: 'interrupted', error: msg, endedAt: at });
+      // spec 27: say it was waiting for a person (the attention list explains it)
+      { const fl = store.getFlow(f.id); const ps = Object.entries(r.steps || {}).find(([, s]) => s.status === 'paused'); if (ps) r.interruptedAtBreak = fl?.steps.find((x) => x.id === ps[0])?.name || ps[0]; }
       for (const s of Object.values(r.steps || {})) {
         if (!['running', 'queued', 'paused'].includes(s.status)) continue;
         Object.assign(s, { status: 'interrupted', error: msg, code: 'INTERRUPTED', endedAt: at });

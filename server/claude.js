@@ -63,7 +63,7 @@ function normalize(msg, ctx) {
   switch (msg.type) {
     case 'system':
       if (msg.subtype === 'init') {
-        Object.assign(lastInit, { tools: msg.tools || [], mcpServers: msg.mcp_servers || [], model: msg.model, at: Date.now() });
+        Object.assign(lastInit, { tools: msg.tools || [], mcpServers: msg.mcp_servers || [], model: msg.model, apiKeySource: msg.apiKeySource ?? null, version: msg.claude_code_version || null, at: Date.now() });
         out.push({ kind: 'init', model: msg.model, sessionId: msg.session_id, tools: (msg.tools || []).length, mcp: (msg.mcp_servers || []).map((m) => ({ name: m.name, status: m.status })), permissionMode: msg.permissionMode });
       } else if (msg.subtype === 'thinking_tokens') {
         out.push({ kind: 'thinking_tokens', tokens: msg.estimated_tokens });

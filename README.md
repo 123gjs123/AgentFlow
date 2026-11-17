@@ -414,7 +414,7 @@ They are checked before every run. If something required is missing, the run doe
 
 ### 🔑 Credentials
 
-**🔑 Credenciales** (top bar) keeps the tokens your flows need in one place: Jira/Confluence, Bitbucket, GitHub, Jenkins, or any other secret.
+**⚙ Configuración › Credenciales** keeps the tokens your flows need in one place: Jira/Confluence, Bitbucket, GitHub, Jenkins, or any other secret.
 
 - **Stored safely.** Values are encrypted on this machine. The key lives in `~/.afs/credentials.key`, outside `data/`. The app never shows a value again, never exports it, and never puts it in an AI prompt.
 - **Used in commands.** Write `{{cred.<name>.<field>}}` in a command step or in "Al terminar", for example `{{cred.jira.url}}`, `{{cred.jira.user}}` and `{{cred.jira.token}}`.
@@ -424,6 +424,41 @@ They are checked before every run. If something required is missing, the run doe
 - **Probar conexión** checks the token with a harmless read (Jira `/myself`, GitHub `/user`…).
 - **Importar desde un .env** copies a value from an existing `.env` file. Only the key names reach the browser.
 - **Sharing.** Exported flows carry the references, not the values. Whoever imports a flow is told which credential names to load.
+
+### 🔔 Needs attention and notifications
+
+The **🔔** button in the top bar counts what is waiting for a person in **any** flow, not only the open one:
+
+| Item | Button | Clears when |
+|---|---|---|
+| ⏸ A break waiting for review (UI, chat or external run with breaks) | **Revisar ahora**: opens the flow and its review window | you decide in the break |
+| ✗ The latest run of a flow failed (also schedules and API runs) | **Ver ejecución**; **Revisar CLI** for `MCP_UNAVAILABLE`; **Abrir Credenciales** for `CREDENTIAL_MISSING` | a later complete run succeeds |
+| ⛔ An imported flow under review | **Revisar importación** | you enable it |
+| ⛔ A flow that cannot start: missing credential or requirement | **Abrir Credenciales** / **Ver qué falta** | the credential or requirement is in place |
+
+- The list only **takes you to the place**. Nothing is resumed, applied or trusted from it.
+- **Marcar visto** takes an item out of the count until its state changes, for example a new failure.
+- New items of other flows also show a toast with **Abrir**.
+- The tab title shows the count, for example "(2) …".
+- In the flow list, flows with something pending get a ⏸, ✗ or ⛔ prefix.
+- **Ctrl+Shift+A** opens the list.
+
+**Windows notifications** (⚙ Configuración › Notificaciones, off by default) are sent by the server. They reach you with no browser open, also for scheduled and external runs.
+- Only breaks and failures are notified, once per state.
+- A scheduled job that keeps failing notifies the first failure and when it works again.
+- Notifications that arrive together are combined into one, never dropped.
+- They show only the flow and step names, never run data.
+- They appear as "Windows PowerShell", so nothing needs to be installed. Clicking one opens the flow.
+
+### ⚙ Configuración
+
+| Tab | What it has |
+|---|---|
+| Credenciales | The tokens flows use (see above). |
+| Integraciones | How to invoke flows from outside (MCP, `afs`, HTTP, Jenkins, webhooks) and the external API token. |
+| Claude Code CLI | Installation check of this machine: CLI version, session (subscription or API key), MCP connectors the CLI really loads compared with the ones the open flow uses, certificates for a corporate TLS proxy, and data folder. Each problem says how to fix it. |
+| Notificaciones | Windows notifications on or off, and **Probar notificación**. |
+| De dónde salen los números | What 5h/7d, tokens and "≈ US$ equiv. API" mean and where they come from. The dollar figure is an estimate at API prices, not a charge. |
 
 ### Sharing flows: export and import
 
@@ -659,7 +694,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **202 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **219 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.
@@ -685,7 +720,7 @@ Coverage per suite, the mock directives and how to add a test: [test/e2e/README.
 | The flow selector does nothing, or "El servidor no responde" | The server is not running: `npm start`. The page reconnects by itself. |
 | `PERMISSION_DENIED` | The step tried a tool outside its access list. Add it under *Acceso*, or enable "Permitir permisos denegados". |
 | `MCP_UNAVAILABLE` | The step is allowed to use a connector (for example Atlassian for Jira) that the Claude Code CLI running the flows did not load. Check `claude mcp list`: claude.ai connectors you see in the IDE or on the web are not always loaded by `claude -p`. Connect it to the CLI, or declare an MCP requirement so the flow warns before running. |
-| `CREDENTIAL_MISSING` | A command uses `{{cred.x.y}}` but that credential or field is not loaded on this machine. Load it in 🔑 Credenciales (same name). |
+| `CREDENTIAL_MISSING` | A command uses `{{cred.x.y}}` but that credential or field is not loaded on this machine. Load it in ⚙ Configuración › Credenciales (same name). |
 | `EMPTY_OUTPUT` | The step returned nothing. Check *Actividad*, or enable "Permitir salida vacía". |
 | `NON_UPSTREAM_REF` | A `{{steps.X}}` reference points to a box that is not before this one. Connect them, or enable "allow non-upstream". |
 | A box shows "no enrutado" | None of its input arrows passed: check the arrow conditions or the `<route>` choices in the source step's output. |

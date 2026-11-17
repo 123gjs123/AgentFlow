@@ -355,3 +355,29 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .ok-text { color: #3fb950; }
 .error-text { color: #f85149; }
 .chip.warn { background: color-mix(in srgb, #f0b429 20%, transparent); }
+
+/* 🔔 Necesita atención + ⚙ Configuración (spec 27) */
+.att-btn { position: relative; }
+.att-count { position: absolute; top: -4px; right: -4px; min-width: 16px; padding: 0 4px; border-radius: 99px; font: 600 10px/16px var(--mono, monospace); background: var(--warn); color: #0b0d12; font-variant-numeric: tabular-nums; }
+.att-count.err { background: var(--err); color: #fff; }
+.drawer { position: fixed; top: 48px; right: 0; bottom: 0; width: 400px; max-width: 100vw; z-index: 55; background: var(--bg2); border-left: 1px solid var(--line); box-shadow: -8px 0 30px #0008; display: flex; flex-direction: column; overflow: auto; }
+.drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.pad-x { padding-left: 12px; padding-right: 12px; }
+.att-empty { padding: 24px 12px; text-align: center; }
+.att-list { list-style: none; margin: 0; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.att-item { border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--bg3); display: flex; flex-direction: column; gap: 4px; }
+.att-item.sev-err { border-left-color: var(--err); }
+.att-item.sev-warn { border-left-color: var(--warn); }
+.att-item.sev-info { border-left-color: var(--muted); }
+.att-item.seen { opacity: .6; }
+.att-item:focus-within { border-color: var(--accent); }
+.att-head { display: flex; align-items: baseline; gap: 8px; }
+.att-age { margin-left: auto; font-family: var(--mono, monospace); font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.att-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.toast-stack { position: fixed; right: 16px; bottom: 16px; z-index: 70; display: flex; flex-direction: column; gap: 8px; width: 340px; max-width: calc(100vw - 32px); }
+.toast-stack .att-item { box-shadow: 0 8px 30px #0008; }
+.settings { min-height: 460px; }
+.req-results { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.nums-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.nums-table th, .nums-table td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+@media (prefers-reduced-motion: reduce) { .drawer, .toast-stack .att-item { transition: none; animation: none; } }

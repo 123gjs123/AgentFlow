@@ -1,13 +1,13 @@
-// 🔑 Credenciales (spec 26): the tokens flows need, in one place. Values are encrypted on this machine and never come
+// Credenciales (spec 26; lives in ⚙ Configuración since spec 27): the tokens flows need, in one place. Values are encrypted on this machine and never come
 // back to the browser; flows use them only in commands as {{cred.<nombre>.<campo>}}.
 import React, { useEffect, useState } from 'react';
 import { api } from './api.js';
-import { Modal } from './Help.jsx';
 
 /** Opens the credentials window from anywhere (preflight rows, command editor). */
 export const openCredentials = (name) => window.dispatchEvent(new CustomEvent('afs:open-credentials', { detail: { name } }));
 
-export function CredentialsModal({ onClose, focusName }) {
+/** The credentials list + form (used by ⚙ Configuración › Credenciales). */
+export function CredentialsPanel({ focusName }) {
   const [data, setData] = useState(null);
   const [edit, setEdit] = useState(null); // {id?, type, name, fields, note}
   const [err, setErr] = useState('');
@@ -20,9 +20,9 @@ export function CredentialsModal({ onClose, focusName }) {
     });
   }, []);
   const toEdit = (c) => ({ id: c.id, type: c.type, name: c.name, note: c.note, fields: Object.fromEntries(Object.entries(c.fields).map(([k, v]) => [k, typeof v === 'object' ? '' : v])), secretSet: Object.fromEntries(Object.entries(c.fields).filter(([, v]) => typeof v === 'object').map(([k, v]) => [k, v.set])) });
-  if (!data) return <Modal title="🔑 Credenciales" onClose={onClose}>{err ? <div className="error-bar">{err}</div> : <p className="muted">Cargando…</p>}</Modal>;
+  if (!data) return err ? <div className="error-bar">{err}</div> : <p className="muted">Cargando…</p>;
   return (
-    <Modal title="🔑 Credenciales" onClose={onClose} wide>
+    <div data-testid="credentials-panel">
       <p className="muted small">Los tokens que usan tus flujos (Jira, Bitbucket, GitHub, Jenkins…). Se guardan cifrados en esta máquina, nunca se muestran ni se exportan y nunca llegan a un prompt de IA. En un step de comando se usan como <code>{'{{cred.nombre.campo}}'}</code>: el valor viaja en una variable de entorno y, si el comando lo imprime, la app lo tapa con ••••.</p>
       {err && <div className="error-bar">{err}</div>}
       {edit ? <CredentialForm types={data.types} value={edit} onCancel={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />
@@ -35,7 +35,7 @@ export function CredentialsModal({ onClose, focusName }) {
             <div className="review-actions"><button className="primary" onClick={() => setEdit({ type: 'jira', name: '', fields: {}, note: '' })}>+ Nueva credencial</button></div>
           </>
         )}
-    </Modal>
+    </div>
   );
 }
 

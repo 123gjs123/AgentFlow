@@ -62,7 +62,7 @@ test('credencial faltante: no arranca (UI, step suelto, API externa, dry run) co
   assert.equal(ui.status, 412);
   assert.equal(ui.body.missing[0].type, 'credential');
   assert.equal(ui.body.missing[0].label, 'Credencial jira2.url');
-  assert.match(ui.body.missing[0].help, /no existe: cárgala en 🔑 Credenciales/);
+  assert.match(ui.body.missing[0].help, /no existe: cárgala en ⚙ Configuración › Credenciales/);
   assert.equal((await s.ui('POST', `/api/flows/${f.id}/steps/s_j/run`, { input: '' })).status, 412);
   assert.equal((await s.ext('POST', `/flows/${f.id}/run`, { input: 'x' })).status, 412);
   const dry = await s.ext('POST', `/flows/${f.id}/run?dryRun=1`, { input: 'x' });
@@ -129,13 +129,13 @@ test('exportar nunca lleva credenciales; al importar en otra máquina avisa cuá
   assert.ok(imp.warnings.some((w) => /no están cargadas en esta máquina: otra-maquina\./.test(w)), JSON.stringify(imp.warnings));
 });
 
-test('UI: 🔑 Credenciales en la barra; alta de una credencial Jira con el token oculto; se ven sus referencias y nunca el valor', async (t) => {
+test('UI: ⚙ Configuración › Credenciales; alta de una credencial Jira con el token oculto; se ven sus referencias y nunca el valor', async (t) => {
   const u = await openUi('cred-ui');
   if (u.skipReason) { t.skip(u.skipReason); return; }
   const { page } = u;
   try {
     await page.goto(u.s.base + '/');
-    await page.getByRole('button', { name: '🔑 Credenciales' }).click();
+    await page.getByTestId('settings-btn').click(); // ⚙ Configuración › Credenciales (spec 27)
     await page.getByRole('button', { name: '+ Nueva credencial' }).click();
     await page.getByTestId('cred-name').fill('jira');
     await page.getByTestId('cred-field-url').fill('https://empresa.atlassian.net');
