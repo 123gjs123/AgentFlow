@@ -1296,6 +1296,8 @@ export function widensOf(cur, patch, prefix = '') {
   if ('allowedTools' in patch && added.length) w.push(`${prefix}herramientas nuevas que pueden cambiar cosas: ${added.join(' ')}`);
   if ('permissionMode' in patch && patch.permissionMode !== (cur?.permissionMode || '') && ['acceptEdits', 'dontAsk'].includes(patch.permissionMode)) w.push(`${prefix}permisos: ${patch.permissionMode}`);
   if (typeof patch.command === 'string' && patch.command !== (cur?.command || '')) w.push(`${prefix}cambia el comando que se ejecuta`);
+  // processes killed by name also close the person's own programs (seen in a real AI review)
+  if (/\b(Stop-Process|taskkill|pkill|killall)\b[^\n]*\b(chrome|msedge|firefox|node|code|powershell)\b|\bGet-Process\s+[\w,]*(chrome|msedge|node)[\w,]*\s*[^\n]*\|\s*Stop-Process/i.test(String(patch.command || ''))) w.push(`${prefix}⚠ mata procesos por nombre: también cerraría los tuyos`);
   if (typeof patch.hooks === 'string' && patch.hooks !== (cur?.hooks || '')) w.push(`${prefix}cambia el código de hooks`);
   return w;
 }
