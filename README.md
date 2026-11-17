@@ -412,6 +412,19 @@ Flujo → **✅ Requisitos para usar este flujo** lists what a person needs befo
 
 They are checked before every run. If something required is missing, the run does not start: the UI shows **"Antes de ejecutar este flujo…"** with the instructions, and the API, `afs` and MCP answer `PREFLIGHT_FAILED` with the list. A header chip warns when the open flow is missing something. Recommended items never block.
 
+### 🔑 Credentials
+
+**🔑 Credenciales** (top bar) keeps the tokens your flows need in one place: Jira/Confluence, Bitbucket, GitHub, Jenkins, or any other secret.
+
+- **Stored safely.** Values are encrypted on this machine. The key lives in `~/.afs/credentials.key`, outside `data/`. The app never shows a value again, never exports it, and never puts it in an AI prompt.
+- **Used in commands.** Write `{{cred.<name>.<field>}}` in a command step or in "Al terminar", for example `{{cred.jira.url}}`, `{{cred.jira.user}}` and `{{cred.jira.token}}`.
+  - The value is passed as an environment variable and never written in the command.
+  - If the command prints it, the output and the activity show `••••`.
+- **Checked before running.** A flow that uses a credential this machine does not have, or a field that is empty, does not start. "Antes de ejecutar…" shows **Credencial jira.token** with a **🔑 Cargar credencial** button.
+- **Probar conexión** checks the token with a harmless read (Jira `/myself`, GitHub `/user`…).
+- **Importar desde un .env** copies a value from an existing `.env` file. Only the key names reach the browser.
+- **Sharing.** Exported flows carry the references, not the values. Whoever imports a flow is told which credential names to load.
+
 ### Sharing flows: export and import
 
 **⬇ Exportar** downloads `<name>.afsflow.json`. It contains:
@@ -646,7 +659,7 @@ docs/specs/         product and technical specs (01–18), docs/DECISIONS.md
 
 ## Tests
 
-The functional end-to-end suite has **195 tests**, including regression tests for every code-review fix.
+The functional end-to-end suite has **202 tests**, including regression tests for every code-review fix.
 
 - It starts real isolated servers (temporary data and HOME, free port) with a **mock Claude CLI**, so it never uses your subscription or touches your flows.
 - It **executes the code generated for each external caller** against the server.
@@ -672,6 +685,7 @@ Coverage per suite, the mock directives and how to add a test: [test/e2e/README.
 | The flow selector does nothing, or "El servidor no responde" | The server is not running: `npm start`. The page reconnects by itself. |
 | `PERMISSION_DENIED` | The step tried a tool outside its access list. Add it under *Acceso*, or enable "Permitir permisos denegados". |
 | `MCP_UNAVAILABLE` | The step is allowed to use a connector (for example Atlassian for Jira) that the Claude Code CLI running the flows did not load. Check `claude mcp list`: claude.ai connectors you see in the IDE or on the web are not always loaded by `claude -p`. Connect it to the CLI, or declare an MCP requirement so the flow warns before running. |
+| `CREDENTIAL_MISSING` | A command uses `{{cred.x.y}}` but that credential or field is not loaded on this machine. Load it in 🔑 Credenciales (same name). |
 | `EMPTY_OUTPUT` | The step returned nothing. Check *Actividad*, or enable "Permitir salida vacía". |
 | `NON_UPSTREAM_REF` | A `{{steps.X}}` reference points to a box that is not before this one. Connect them, or enable "allow non-upstream". |
 | A box shows "no enrutado" | None of its input arrows passed: check the arrow conditions or the `<route>` choices in the source step's output. |

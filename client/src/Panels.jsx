@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { openCredentials } from './Credentials.jsx';
 import { api, pendingSave } from './api.js';
 import Chat from './Chat.jsx';
 import Events from './Events.jsx';
@@ -167,6 +168,7 @@ export function StepPanel({ flow, step, catalog, live, running, tab, setTab, onC
               <Field div label="Comando" hint="stdin = salida de los steps anteriores ($env:STEP_UPSTREAM, JSON en $env:STEP_UPSTREAM_JSON); input del flujo en $env:FLOW_INPUT">
                 <TplField flow={flow} step={step} command className="mono" rows={4} value={step.command} onChange={(v) => onChange({ command: v })} placeholder="npx playwright test --grep @sanity" />
               </Field>
+              <div className="muted small">Tokens: usa <code>{'{{cred.nombre.token}}'}</code> (y <code>.url</code>, <code>.user</code>) en vez de leer un .env; nunca quedan escritos en el comando ni en la salida. <a onClick={() => openCredentials()}>🔑 Credenciales</a></div>
               <Field label="Shell">
                 <select value={step.shell} onChange={set('shell')}><option value="powershell">PowerShell</option><option value="bash">bash</option><option value="cmd">cmd</option></select>
               </Field>

@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, pendingSave } from './api.js';
 import { Modal } from './Help.jsx';
+import { openCredentials } from './Credentials.jsx';
 
 const TYPES = [
   { type: 'tool', icon: '🧰', label: 'Herramienta', fields: [['name', 'Nombre (docker, git, python, kubectl, argo…)'], ['check', 'Comando de comprobación (opcional, p. ej. docker info)']] },
@@ -11,7 +12,8 @@ const TYPES = [
   { type: 'url', icon: '🌐', label: 'Servicio / red', fields: [['url', 'URL que debe responder (p. ej. el ambiente de QA, requiere VPN)']] },
   { type: 'mcp', icon: '🔌', label: 'Conector MCP', fields: [['server', 'Nombre del conector (p. ej. Atlassian)']] },
 ];
-const T = Object.fromEntries(TYPES.map((t) => [t.type, t]));
+const IMPLICIT = { credential: { icon: '🔐' } }; // shown in checks, not declared by hand (spec 26)
+const T = { ...Object.fromEntries(TYPES.map((t) => [t.type, t])), ...IMPLICIT };
 const rid = () => `rq_${Math.random().toString(36).slice(2, 9)}`;
 const mark = (ok) => (ok === true ? '✓' : ok === false ? '✗' : '?');
 
@@ -29,6 +31,7 @@ function ResultRow({ r, flowId, onCreated }) {
       <div><b>{mark(r.ok)} {T[r.type]?.icon} {r.label}</b>{r.optional && <span className="muted small"> (recomendado)</span>} <span className="muted small">— {r.detail}</span></div>
       {r.ok !== true && <div className="small req-help">{r.help}</div>}
       {r.canCreate && <button className="small" disabled={busy} onClick={create}>📄 Crear desde plantilla</button>}
+      {r.type === 'credential' && r.ok === false && <button className="small" onClick={() => openCredentials(String(r.id).replace(/^cred:/, '').split('.')[0])}>🔑 Cargar credencial</button>}
       {msg && <div className="small muted">{msg}</div>}
     </li>
   );

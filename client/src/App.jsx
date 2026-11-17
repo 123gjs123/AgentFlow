@@ -8,6 +8,7 @@ import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
 import { PreflightModal } from './Requirements.jsx';
 import { ExportModal, importFile, QuarantineBanner } from './ExportImport.jsx';
+import { CredentialsModal } from './Credentials.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -46,6 +47,8 @@ export default function App() {
   const [preflight, setPreflight] = useState(null); // {missing: n} for the header chip (spec 23)
   const [pfModal, setPfModal] = useState(null); // {retry: fn}
   const [exportOpen, setExportOpen] = useState(false);
+  const [credOpen, setCredOpen] = useState(null); // {name?} when open (spec 26)
+  useEffect(() => { const h = (e) => setCredOpen({ name: e.detail?.name || null }); window.addEventListener('afs:open-credentials', h); return () => window.removeEventListener('afs:open-credentials', h); }, []);
   const importInput = useRef(null);
   /** Import a .afsflow.json (spec 09): opens the new flow; quarantined ones show the review banner. */
   async function onImport(files) {
@@ -429,6 +432,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
           <button className="ghost" onClick={() => createFlow('demo')} title="Crea un flujo de ejemplo con tus skills de QA">Demo</button>
         </span>
         <button className="ghost" onClick={() => importInput.current?.click()} title="Importar un flujo (.afsflow.json)">⬆ Importar</button>
+        <button className="ghost" onClick={() => setCredOpen({})} title="Tokens y accesos que usan los flujos (Jira, Bitbucket, GitHub, Jenkins…), cifrados en esta máquina">🔑 Credenciales</button>
         <input ref={importInput} type="file" accept=".json,application/json" multiple style={{ display: 'none' }} onChange={(e) => { onImport([...e.target.files]); e.target.value = ''; }} />
         {flow && <button className="ghost" onClick={() => setExportOpen(true)} title="Exportar este flujo para compartirlo (.afsflow.json)">⬇ Exportar</button>}
         {flow && <button className="ghost" onClick={() => window.open(`?flow=${encodeURIComponent(flow.id)}`, '_blank')} title="Abrir este flujo en otra pestaña (cada pestaña puede tener su flujo; si dos editan el mismo, los cambios se combinan)">⧉</button>}
@@ -516,6 +520,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         </div>
       )}
       {exportOpen && flow && <ExportModal flow={flow} onClose={() => setExportOpen(false)} />}
+      {credOpen && <CredentialsModal focusName={credOpen.name} onClose={() => setCredOpen(null)} />}
       {pfModal && flow && <PreflightModal flow={flow} onClose={() => setPfModal(null)} onReady={pfModal.retry} />}
       {paused && flow && <div className="review-bar">⏸ Ejecución en pausa{paused.step ? ` en “${paused.step}”` : ''}: valida la salida para seguir <button className="primary small" onClick={() => setReviewOpen(true)}>Revisar</button></div>}
       {paused && reviewOpen && flow && <ReviewModal key={paused.runId} refresh={paused.nonce || 0} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}

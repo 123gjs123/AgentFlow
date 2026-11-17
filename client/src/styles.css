@@ -345,3 +345,13 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .quarantine-bar { background: #3a1d1d; color: #ffd0d0; border-bottom: 1px solid var(--err); padding: 8px 14px; }
 .quarantine-bar ul { margin: 6px 0 0 18px; }
 .col { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+
+/* 🔑 credentials (spec 26) */
+.cred-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.cred-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.cred-ref { cursor: copy; margin-right: 6px; }
+.cred-form { display: flex; flex-direction: column; gap: 8px; }
+.cred-form .field { display: flex; flex-direction: column; gap: 3px; }
+.ok-text { color: #3fb950; }
+.error-text { color: #f85149; }
+.chip.warn { background: color-mix(in srgb, #f0b429 20%, transparent); }

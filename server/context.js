@@ -188,6 +188,7 @@ El chat no cambia nada por su cuenta: cada cambio (step, flujo, archivos de la s
     result.totals = { ours: { chars: system.length + user.length, tokensEst: est(system.length + user.length) }, claudeCodeKnownChars: cc.knownChars };
     if (system.length + user.length > 100000) warn('LARGE_PROMPT', `El prompt de esta app ocupa ${(system.length + user.length).toLocaleString()} caracteres: considera modo "solo JSON", "resumen" o referencias.`, 'upstream');
     for (const s of usr.concat(sys)) for (const m of s.text.matchAll(/\{\{\s*steps\.([^{}]+?)\s*\}\}/g)) warn('UNRESOLVED_REF', `{{steps.${m[1]}}} no corresponde a ningún step: quedará tal cual en el prompt.`, s.id);
+    if (/credencial no disponible en prompts/.test(system + user)) warn('CRED_IN_PROMPT', 'Una credencial ({{cred…}}) no se inserta nunca en un prompt de IA: se usa solo en steps de comando. Si este step necesita datos de un servicio, tráelos con un step de comando antes.', 'task');
     for (const [k, v] of Object.entries(vars)) {
       const tokenLike = SECRET_NAME.test(k) || (typeof v === 'string' && v && v === store.getConfig().token);
       if (tokenLike) warn('SECRET_IN_PROMPT', `La variable "${k}" parece un secreto y se envía al modelo (sección Variables).`, 'vars');

@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as store from './store.js';
+import { credentialRefs, credentialNames } from './credentials.js';
 
 export const BUNDLE_FORMAT = 'agent-flow-studio/flow';
 export const BUNDLE_VERSION = 1;
@@ -93,6 +94,10 @@ export function importBundle(bundle, clean, { name } = {}) {
   };
   if (flow.cwd && !fs.existsSync(flow.cwd)) warnings.push(`El directorio de trabajo "${flow.cwd}" no existe en esta máquina: elige uno en Flujo → Directorio de trabajo.`);
   for (const k of Object.keys(flow.vars)) if (SECRET_NAME.test(k) && !flow.vars[k]) warnings.push(`La variable "${k}" viene vacía (no se exportan secretos): complétala.`);
+  // Credentials are never exported: name the ones this machine still has to load (spec 26).
+  const have = credentialNames();
+  const needed = [...new Set(credentialRefs(flow).map((r) => r.name))].filter((n) => !have.has(n));
+  if (needed.length) warnings.push(`Usa credenciales que no están cargadas en esta máquina: ${needed.join(', ')}. Cárgalas en 🔑 Credenciales (con el mismo nombre).`);
   const reasons = executableParts(flow);
   if (reasons.length) flow.quarantine = { since: Date.now(), from: { exportedAt: bundle.exportedAt || null, app: bundle.app || null, name: src.name || null }, reasons };
   return { flow, warnings, chats: bundle.chats && typeof bundle.chats === 'object' ? bundle.chats : null, runs: Array.isArray(bundle.runs) ? bundle.runs : null };

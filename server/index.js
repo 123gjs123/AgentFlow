@@ -19,6 +19,8 @@ import * as integ from './integrations.js';
 import { SOURCE_TYPES, checkSource } from './sources.js';
 import { exportFlow, importBundle, quarantineProblem, slug } from './bundle.js';
 import { parseSchema } from './schema.js';
+import { needsPreflight } from './preflight.js';
+import * as CRED from './credentials.js';
 import { REQ_TYPES, preflight, preflightMessage, suggestRequirements, createFromTemplate, clearPreflightCache } from './preflight.js';
 import os from 'node:os';
 
@@ -132,7 +134,7 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
     const warnings = [];
     if (!input) warnings.push('input vacío');
     for (const k of Object.keys(body.vars || {})) if (!(k in (flow.vars || {}))) warnings.push(`la variable "${k}" no existe en el flujo`);
-    const pf = (flow.requirements || []).length ? await preflight(flow) : { ok: true, blocking: [], results: [] };
+    const pf = needsPreflight(flow, only) ? await preflight(flow, { only }) : { ok: true, blocking: [], results: [] };
     return { dryRun: true, ok: pf.ok, preflight: { ok: pf.ok, missing: pf.blocking, results: pf.results }, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, wouldReplay, warnings };
   }
   let bodyHash = null;
@@ -290,8 +292,8 @@ async function gate(flow, res, only = null) {
     const { error } = parseSchema(s.output.schema);
     if (error) { res.status(422); return { error: `Step "${s.name}": el schema JSON de la salida no es válido (${error}). Corrígelo en el step → Salida.`, code: 'INVALID_SCHEMA', step: s.id }; }
   }
-  if (!(flow.requirements || []).length) return null;
-  const pf = await preflight(flow);
+  if (!needsPreflight(flow, only)) return null;
+  const pf = await preflight(flow, { only });
   if (pf.ok) return null;
   res.status(412);
   return { error: preflightMessage(pf), code: 'PREFLIGHT_FAILED', missing: pf.blocking };
@@ -559,6 +561,14 @@ app.post('/api/flows/:id/context-files', wrap((req) => {
 }));
 
 // ----- step library (spec 18) -----
+// ----- credentials (spec 26): values never leave the server -----
+app.get('/api/credentials', wrap(() => ({ types: CRED.TYPES, items: CRED.listCredentials() })));
+app.post('/api/credentials', wrap((req) => CRED.createCredential(req.body)));
+app.put('/api/credentials/:cid', wrap((req) => CRED.updateCredential(req.params.cid, req.body)));
+app.delete('/api/credentials/:cid', wrap((req) => CRED.deleteCredential(req.params.cid)));
+app.post('/api/credentials/:cid/test', wrap((req) => CRED.testCredential(req.params.cid)));
+app.post('/api/credentials/env-keys', wrap((req) => ({ keys: CRED.envKeys(req.body?.file) })));
+app.post('/api/credentials/:cid/import-env', wrap((req) => CRED.importFromEnv(req.params.cid, req.body || {})));
 app.get('/api/library', wrap(() => store.listLibrary()));
 app.post('/api/library', wrap((req) => {
   const f = need(req.body?.flow);

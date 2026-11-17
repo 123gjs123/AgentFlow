@@ -7,9 +7,10 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import * as P from './prompt.js';
 import { lastInit, probeInit } from './claude.js';
+import { credentialChecks, credentialRefs } from './credentials.js';
 
 export const REQ_TYPES = ['tool', 'file', 'env', 'url', 'mcp'];
-export const ICON = { tool: '🧰', file: '📄', env: '🔑', url: '🌐', mcp: '🔌' };
+export const ICON = { tool: '🧰', file: '📄', env: '🔑', url: '🌐', mcp: '🔌', credential: '🔐' };
 
 /** Known tools: default check and install help (Windows-first, with links). */
 export const KNOWN_TOOLS = {
@@ -143,17 +144,27 @@ export async function checkRequirement(req, flow, { probe = false } = {}) {
 
 const cache = new Map(); // flowId -> {at, key, results}
 /** All requirements of a flow (cached 30 s unless fresh). blocking = required ones that failed (ok === false). */
-export async function preflight(flow, { fresh = false, probe = false } = {}) {
+export async function preflight(flow, { fresh = false, probe = false, only = null } = {}) {
+  // Credentials used by the flow's commands (spec 26) are implicit requirements: always checked, never cached.
+  const creds = credentialChecks(flow, only);
   const reqs = (flow.requirements || []).filter((r) => r && REQ_TYPES.includes(r.type) && !r.disabled);
   const key = JSON.stringify([reqs, flow.vars]);
   const hit = cache.get(flow.id);
-  if (!fresh && hit && hit.key === key && Date.now() - hit.at < 30000) return hit.value;
+  if (!fresh && hit && hit.key === key && Date.now() - hit.at < 30000) return withCreds(hit.value, creds);
   const results = [];
   for (const r of reqs) results.push(await checkRequirement(r, flow, { probe }));
   const value = { ok: results.every((r) => r.ok !== false || r.optional), results, blocking: results.filter((r) => r.ok === false && !r.optional), checkedAt: Date.now() };
   cache.set(flow.id, { at: Date.now(), key, value });
-  return value;
+  return withCreds(value, creds);
 }
+function withCreds(v, creds) {
+  if (!creds.length) return v;
+  const results = [...creds, ...v.results];
+  const blocking = [...creds.filter((c) => c.ok === false), ...v.blocking];
+  return { ...v, ok: v.ok && !creds.some((c) => c.ok === false), results, blocking };
+}
+/** Whether a flow has anything to check before running (declared requirements or credentials used). */
+export const needsPreflight = (flow, only = null) => (flow.requirements || []).length > 0 || credentialRefs(flow, only).length > 0;
 export const clearPreflightCache = (flowId) => cache.delete(flowId);
 
 /** The message a caller gets when a run cannot start. */

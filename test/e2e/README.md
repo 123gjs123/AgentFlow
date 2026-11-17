@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (195 tests)
+## Qué cubre (202 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -61,6 +61,7 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `17-export-import` | Spec 09: exportar (formato, nombre, sin estado de la máquina ni secretos, opciones), ida y vuelta entre dos instalaciones, cuarentena (UI, step, API, dry run, chat, ask; un guardado no la quita; "Revisé, habilitar" la libera), flujo sin nada ejecutable sin revisión, archivos inválidos o más nuevos, saneo, CLI `afs export`/`afs import`, y en el navegador: descargar, importar, aviso y habilitar |
 | `18-break-chat` | Spec 24: chat dentro del break con la entrada y la salida reales (`<run-review>`), propuestas de comando, variables y formato de salida (con saneo), "re-ejecutar con los cambios" (después) y "ejecutar con los cambios" (antes), sin `reload` la ejecución conserva su copia; en el navegador: abrir el chat, aplicar y re-ejecutar, y reemplazar la salida de un step de texto (texto escrito en "Datos JSON" → "Usarlo como salida") |
 | `19-conversational-chats` | Spec 25: conversación de ida y vuelta (pregunta, propone, ajusta con otra propuesta, descartar, aplicar una vez), habla como su rol/agente/skill, cambios a archivos de la skill/agente solo al confirmar y solo en su carpeta, chat del flujo (descripción, variables, contexto, varios steps) y ejecuciones propuestas (con requisitos), entregable corregido en el break, propuestas desde el chat general, con el flujo en ejecución solo conversa el step en break (409 al resto, cancelar respuesta no frena la ejecución), ask externo sigue el proceso (ejecuta y recuerda directo); en el navegador: Aplicar / Descartar |
+| `20-credentials` | Spec 26: alta/edición/borrado sin devolver secretos, cifrado en disco con la clave fuera de data/, uso en comandos (variable de entorno, •••• en la salida y la actividad, nunca en prompts), credencial faltante bloquea con su ítem (UI, step, API, dry run), probar conexión (Jira OK / 401), importar desde .env, exportar sin credenciales y aviso al importar; en el navegador: alta con el token oculto |
 
 Cómo se simula cada origen en `07-integrations`:
 

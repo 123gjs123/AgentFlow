@@ -9,6 +9,7 @@ import * as store from './store.js';
 import { runClaude, killTree, isTransient } from './claude.js';
 import { resolveContext, contextAccess } from './sources.js';
 import { quarantineProblem } from './bundle.js';
+import { resolveCredential } from './credentials.js';
 import { findAgent, findSkill } from './catalog.js';
 import * as P from './prompt.js';
 import { validate, parseSchema } from './schema.js';
@@ -108,6 +109,12 @@ export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed
     child.on('exit', (code) => { grace = setTimeout(() => { try { child.stdout.destroy(); child.stderr.destroy(); } catch {} settle({ code, stdout, stderr }); }, 2000); });
     child.on('close', (code) => settle({ code: code ?? child.exitCode, stdout, stderr }));
   });
+}
+
+/** Replaces credential values (spec 26) found in a text by ••••. */
+export function maskSecrets(set) {
+  const vals = [...set].filter((v) => v && v.length >= 4).sort((a, b) => b.length - a.length);
+  return (t) => { let x = String(t ?? ''); for (const v of vals) x = x.split(v).join('••••'); return x; };
 }
 
 // ---------- hooks ----------
@@ -454,7 +461,9 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       const raws = [];
       const quoted = P.placeholdersInSingleQuotes(step.command, step.shell);
       if (quoted.length) throw Object.assign(new Error(`{{${quoted[0]}}} está entre comillas simples: ahí no se expande y el comando recibiría el texto literal. Quita las comillas simples o usa comillas dobles.`), { code: 'TEMPLATE_IN_SINGLE_QUOTES' });
-      const cmd = P.render(step.command, { flow, vars: flow.vars, input: ctx.input, upstream: up, data, ...rctx, quote: q.quote, onRaw: (k) => raws.push(k) });
+      const secrets = new Set();
+      const cmd = P.render(step.command, { flow, vars: flow.vars, input: ctx.input, upstream: up, data, ...rctx, quote: q.quote, onRaw: (k) => raws.push(k), cred: resolveCredential, onSecret: (v) => secrets.add(v) });
+      const hide = maskSecrets(secrets);
       for (const k of raws) log({ kind: 'hook_log', text: `⚠️ {{{${k}}}} se inserta tal cual en el comando (sin protección). Úsalo solo con valores de confianza.` });
       // Windows PowerShell 5.1 does not escape embedded double quotes when passing a value to a native .exe.
       if ((step.shell || 'powershell') === 'powershell' && process.platform === 'win32' && q.values.some((v) => q.env[v.name].includes('"'))) {
@@ -470,6 +479,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         // stdin = output of previous steps (or the flow input for the first step)
         if (sig.aborted) break;
         const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
+        r.stdout = hide(r.stdout); r.stderr = hide(r.stderr); // a credential printed by the command never reaches the output or the activity
         log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 20000), isError: r.code !== 0 });
         output = takeRoutes(r.stdout.trim());
         rs.exitCode = r.code;
@@ -697,7 +707,9 @@ export async function runFinally(flow, run, { input = '', data = new Map(), stat
   const f = flow.finally;
   const shell = f.shell || 'powershell';
   const q = P.shellQuoter(shell, f.command);
-  const cmd = P.render(f.command, { flow, vars: flow.vars, input, data, runId: run.id, quote: q.quote });
+  const secrets = new Set();
+  const cmd = P.render(f.command, { flow, vars: flow.vars, input, data, runId: run.id, quote: q.quote, cred: resolveCredential, onSecret: (v) => secrets.add(v) });
+  const hide = maskSecrets(secrets);
   const steps = Object.fromEntries(Object.entries(run.steps || {}).filter(([id]) => !id.includes('~')).map(([id, s]) => [flow.steps.find((x) => x.id === id)?.name || id, s.status]));
   const ctl = new AbortController();
   const limit = clampInt(f.timeoutSec, 5, 3600, 300);
@@ -706,6 +718,7 @@ export async function runFinally(flow, run, { input = '', data = new Map(), stat
   emit({ type: 'run.finally', flowId: flow.id, runId: run.id, status: 'running' });
   const r = await sh(cmd, { cwd: flowCwd(flow), shell, input: '', env: { ...q.env, AFS_RUN_ID: run.id, AFS_RUN_STATUS: status, AFS_RUN_STEPS_JSON: JSON.stringify(steps), FLOW_INPUT: input || '', AFS_FLOW: flow.name }, signal: ctl.signal, delayed: q.values.length > 0 });
   clearTimeout(t);
+  r.stdout = hide(r.stdout); r.stderr = hide(r.stderr);
   const res = { status: ctl.signal.aborted ? 'timeout' : r.code === 0 ? 'success' : 'error', exitCode: r.code, output: clipS(r.stdout.trim(), 4000), error: r.code === 0 ? undefined : clipS((r.stderr || r.stdout).trim(), 2000), startedAt, endedAt: now(), runStatus: status };
   emit({ type: 'run.finally', flowId: flow.id, runId: run.id, status: res.status });
   return res;

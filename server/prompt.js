@@ -54,6 +54,16 @@ function resolveKey(key, ctx) {
   if (key === 'upstream') return ctx.upstream ?? '';
   if (key.startsWith('vars.')) { const k = key.slice(5); return show(ctx.vars?.[k] ?? getPath(ctx.vars, k)); }
   if (key.startsWith('steps.') && ctx.flow) return resolveStepRef(ctx.flow, key.slice(6), ctx.data, ctx);
+  // Credentials (spec 26): only in commands (ctx.quote), where the value travels in an env var. A prompt never gets one.
+  if (key.startsWith('cred.')) {
+    if (!ctx.quote) return `[credencial no disponible en prompts: ${key}]`;
+    if (!ctx.cred) return '••••'; // previews
+    const [, name, field] = key.split('.');
+    const r = ctx.cred(String(name || '').toLowerCase(), field || '');
+    if (r.error) throw Object.assign(new Error(r.error), { credError: true, code: 'CREDENTIAL_MISSING' });
+    if (r.secret) ctx.onSecret?.(r.value);
+    return r.value;
+  }
   return null;
 }
 
@@ -66,7 +76,7 @@ export function render(tpl, ctx) {
     const k = raw ?? key;
     const v = resolveKey(k, ctx);
     if (v === null) return m;
-    if (raw !== undefined) { ctx.onRaw?.(k); return v; }
+    if (raw !== undefined && !k.startsWith('cred.')) { ctx.onRaw?.(k); return v; } // a credential is never spliced raw
     return ctx.quote ? ctx.quote(v, k, offset) : v;
   });
 }
@@ -106,7 +116,7 @@ export function shellQuoter(shell, template = '') {
   const quote = (v, key, offset) => {
     const k = `AFS_V${i++}`;
     env[k] = String(v);
-    values.push({ name: k, ref: key, value: clip(String(v), 2000) });
+    values.push({ name: k, ref: key, value: /^cred\.[^.]+\.(?!url$|user$)/.test(String(key)) ? '••••' : clip(String(v), 2000) });
     // Inside the author's own "…" the reference must be bare: our quotes would close theirs and leave the value
     // unquoted (bash word-splitting/globbing, cmd argument splitting). Braced forms: {{x}}.json, {{a}}_{{b}}.
     const inDouble = offset !== undefined && at(offset) === 'double';
