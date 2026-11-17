@@ -13,6 +13,22 @@ import { resolveCredential } from './credentials.js';
 import { findAgent, findSkill } from './catalog.js';
 import * as P from './prompt.js';
 import { validate, parseSchema } from './schema.js';
+import * as POL from './policies.js';
+
+// Rehearsal (spec 28): each step runs at most this long; AI steps in plan mode (they describe, never change anything)
+const REHEARSAL_STEP_SEC = Math.max(10, Number(process.env.AFS_REHEARSAL_STEP_SEC) || 180);
+/** A command that writes OUTSIDE or destroys (push, POST/PUT/PATCH/DELETE, commits, deletes, containers…): skipped in a
+ *  rehearsal and reported by the review. Writing a local result file (Set-Content, Out-File) is allowed. */
+export const COMMAND_WRITE_RE = /\bgit(\s+-C\s+\S+)?\s+(push|commit|merge|rebase|reset|clean|worktree\s+add)\b|\bgit\b[^\n]*\bswitch\b[^\n]*\s(-c|--create)\b|\bgit\b[^\n]*\bcheckout\s+-[bB]\b|\bgit\b[^\n]*\bbranch\s+-[dD]\b|-Method\s+['"]?(Put|Patch|Delete)\b|-Method\s+['"]?Post\b(?![^\n]*\bsearch)|\bcurl\b[^\n]*(-X|--request)\s*['"]?(POST|PUT|PATCH|DELETE)\b|\bcurl\b[^\n]*\s(-d|--data(-raw|-binary)?|-F|--form)\s|\b(Remove-Item|rmdir)\b|\brm\s+-[a-z]*r|\bdel\s+\/|\bdocker\s+(run|compose\s+up|rm|stop|push)\b|\bnpm\s+publish\b|\bkubectl\s+(apply|delete|create)\b|\bbb\.mjs\s+(open-pr|update-pr|reply)\b/i;
+/** Rehearsal only (broader, adversarial review): also deletes, other git/curl/HTTP forms, gh writes, deploys, and anything
+ *  that launches suites or tools against shared environments. A command that matches none of these runs (capped). */
+export const REHEARSAL_SKIP_RE = new RegExp([
+  COMMAND_WRITE_RE.source,
+  String.raw`\b(rm|del|erase|rd)\s`, String.raw`\bgit\b[^\n]*\b(push|pull|commit|merge|rebase|reset|clean|stash|tag)\b`,
+  String.raw`\bcurl\b[^\n]*\s(--json|-d@|--data-urlencode|-T|--upload-file)\b`, String.raw`-Method[:\s]+['"]?(?!Get\b|Head\b|Post\b[^\n]*\bsearch)`, String.raw`\bwget\b[^\n]*--post`,
+  String.raw`\bgh\s+(pr|issue|release|repo|api)\b`, String.raw`\bdocker-compose\s+(up|run|rm|down)\b`, String.raw`\bnpm\s+(run\s+)?(deploy|release|publish|install|ci)\b`,
+  String.raw`\b(npx|yarn|pnpm|testcafe|gherkin-testcafe|playwright|cypress|k6|jmeter|pytest|mvn|gradle|terraform|kubectl|helm|az|aws|gcloud)\b`, String.raw`\bnpm\s+(run|test|t)\b`, String.raw`\bdotnet\s+(test|run)\b`, String.raw`run-e2e`,
+].join('|'), 'i');
 
 export const bus = new EventEmitter();
 bus.setMaxListeners(100);
@@ -314,7 +330,8 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   const rs = run.steps[opts.nested || step.id] = {
     status: 'running', startedAt: now(), events: [], output: '', files: [], actions: [], inputs: [], assertions: [], warnings: [], denials: [], attempts: [],
   };
-  const setLast = (patch) => { if (!opts.nested) setStepRun(flow.id, step.id, patch); };
+  // a rehearsal never touches the step's last run (chats, {{steps.X}} and pins keep the real one)
+  const setLast = (patch) => { if (!opts.nested && !run.rehearsal) setStepRun(flow.id, step.id, patch); };
   const pending = new Map();
   let writeCalls = 0; // tool calls that may change something (counted at tool_use, even if no result ever arrives)
   // Live child processes ({pid, at}): removed on exit, so recovery after a crash only kills what was really running.
@@ -375,7 +392,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   const stepCtl = new AbortController();
   const onRunAbort = () => stepCtl.abort();
   if (signal?.aborted) stepCtl.abort(); else signal?.addEventListener?.('abort', onRunAbort, { once: true });
-  const limitSec = clampInt(step.timeoutSec, 10, 7200, 900);
+  const limitSec = run.rehearsal ? Math.min(clampInt(step.timeoutSec, 10, 7200, 900), run.rehearsalStepSec || REHEARSAL_STEP_SEC) : clampInt(step.timeoutSec, 10, 7200, 900);
   let timedOut = false; let timer = null;
   const startClock = () => {
     if (timer) return;
@@ -429,6 +446,8 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   let hooks = {}; let hookCompileError = null;
   // A hook that does not compile fails the step: running without it would skip its checks and report a false success.
   try { hooks = loadHooks(step.hooks); } catch (e) { hookCompileError = Object.assign(new Error(`Error compilando hooks: ${e.message}`), { code: 'HOOK_ERROR' }); }
+  // Rehearsal: hooks are code (ctx.sh, writes…): they never run in a rehearsal
+  if (run.rehearsal && String(step.hooks || '').trim()) { hooks = {}; hookCompileError = null; rs.warnings.push('Ensayo: los hooks de este step no se ejecutaron.'); }
   const ctx = hookCtx({ flow, step, run, input, signal: sig, log, upstream, data });
 
   const wantsJson = step.output?.format === 'json';
@@ -471,6 +490,17 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       }
       addRefInputs();
       rs.inputView = { kind: 'command', command: cmd, values: q.values, stdin: clipS(up || ctx.input || '', 20000), upstream: upMeta, raw: raws };
+      // Rehearsal (spec 28): a command that writes outside or deletes is not executed; downstream gets its last real output
+      // checked on the command AND on the values inserted into it ({{vars.x}} travels as an env var, not in the text)
+      const risky = [step.command, ...Object.values(q.env || {})].map((t) => String(t || '').match(REHEARSAL_SKIP_RE)?.[0]).find(Boolean);
+      if (run.rehearsal && risky) {
+        const prev = step.pinned || (step.lastRun?.status === 'success' ? step.lastRun : null);
+        rs.status = 'skipped'; rs.skipReason = 'rehearsal'; rs.output = prev?.output || ''; rs.json = prev?.json;
+        rs.warnings.push(`Ensayo: no se ejecutó porque el comando escribe fuera, borra o lanza herramientas sobre ambientes («${clipS(risky.trim(), 60)}»). ${prev ? 'Los steps siguientes reciben su última salida real.' : 'Los steps siguientes no reciben datos de este.'}`);
+        log({ kind: 'hook_log', text: `🧪 ${rs.warnings[rs.warnings.length - 1]}` });
+        return finish();
+      }
+      const polEnv = POL.commandEnv(flow);
       const retry = { max: clampInt(step.retry?.max, 0, 5, 0), backoffSec: clampInt(step.retry?.backoffSec, 1, 600, 10) };
       for (let n = 0; ; n++) {
         startClock();
@@ -478,7 +508,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         log({ kind: 'tool_use', name: `shell:${step.shell}`, input: { cmd } });
         // stdin = output of previous steps (or the flow input for the first step)
         if (sig.aborted) break;
-        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
+        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...polEnv, ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
         r.stdout = hide(r.stdout); r.stderr = hide(r.stderr); // a credential printed by the command never reaches the output or the activity
         log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 20000), isError: r.code !== 0 });
         output = takeRoutes(r.stdout.trim());
@@ -512,11 +542,23 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       rctx.contextSources = cx.sections;
       for (const w of cx.warnings) rs.warnings.push(w);
       if (cx.sources.length) log({ kind: 'hook_log', text: `📎 Fuentes de consulta disponibles: ${cx.sources.map((x) => `${x.label}${x.ok ? '' : ' (⚠)'}`).join(' · ')} — el modelo las consulta si las necesita` });
+      // Spec 28: what the policies enforce (blocked write tools, attribution off, git author) + their text for the model
+      const rt = POL.runtimeFor(flow, step);
+      rctx.policyNotes = rt.notes;
+      rctx.rehearsal = !!run.rehearsal;
       const prompt = P.runUserPrompt(flow, step, ctx.input, upstream, data, rctx);
       const system = P.runSystemPrompt(flow, step, rctx);
       addRefInputs();
       rs.inputView = { kind: 'ai', mode: step.input?.mode || 'full', prompt: clipS(prompt, 60000), system: clipS(system, 30000), upstream: upMeta.map((m, i) => ({ ...m, summarized: !!upstream[i].summary })) };
       const common = cliOptions(step, cx);
+      if (rt.disallowed.length) common.disallowedTools = [common.disallowedTools, ...rt.disallowed].filter(Boolean).join(' ');
+      if (rt.settings) common.settings = rt.settings;
+      // The CLI cuts every Bash command at 10 min by default: a step that runs long suites raises it (bashTimeoutMin)
+      const bashMs = clampInt(step.bashTimeoutMin, 1, 120, 0) * 60000;
+      common.env = { ...rt.env, ...(bashMs ? { BASH_DEFAULT_TIMEOUT_MS: String(bashMs), BASH_MAX_TIMEOUT_MS: String(bashMs) } : {}) };
+      // Rehearsal: plan mode (Claude describes what it would do, changes nothing) and no write tools at all
+      if (run.rehearsal) { common.permissionMode = 'plan'; common.disallowedTools = [common.disallowedTools, CHAT_DISALLOWED].filter(Boolean).join(' '); }
+      if (rt.disallowed.length || rt.settings || rt.notes.length) rs.inputView.policies = { blocked: rt.disallowed, settings: rt.settings, notes: rt.notes, env: Object.keys(rt.env) };
       rs.inputView.context = cx.sources;
       rs.inputView.tools = common.tools ?? '(los del agente)';
       const r = await ai({ prompt, appendSystem: system, ...common });
@@ -546,7 +588,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
           if (c.error) { error = c.error; code = c.code; }
         }
         // Strict success (VER-1)
-        if (!error && rs.denials.length && !step.allowDenials) { error = `Se denegaron herramientas: ${[...new Set(rs.denials.map((d) => d.tool))].join(', ')}. Dale acceso en "Acceso" o marca "Permitir permisos denegados".`; code = 'PERMISSION_DENIED'; }
+        if (!error && rs.denials.length && !step.allowDenials && !run.rehearsal) { error = `Se denegaron herramientas: ${[...new Set(rs.denials.map((d) => d.tool))].join(', ')}. Dale acceso en "Acceso" o marca "Permitir permisos denegados".`; code = 'PERMISSION_DENIED'; }
         // the real cause first: the connector the step needed is not loaded in the CLI
         if (error && rs.mcpMissing?.length) { error = `${mcpMissingText(rs.mcpMissing)} ${error}`; code = 'MCP_UNAVAILABLE'; }
         else if (rs.denials.length) rs.warnings.push(`Herramientas denegadas (permitido): ${[...new Set(rs.denials.map((d) => d.tool))].join(', ')}.`);
@@ -565,7 +607,8 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         else if (r && typeof r === 'object') { if (typeof r.output === 'string') output = r.output; if ('json' in r) json = r.json; if (Array.isArray(r.routes)) rs.routes = r.routes.map((x) => (typeof x === 'string' ? { to: x, payload: null } : { to: String(x.to), payload: x.payload == null ? null : typeof x.payload === 'string' ? x.payload : JSON.stringify(x.payload) })); }
       }
       // Assertions on the final handoff (VER-5/6)
-      const list = Array.isArray(step.assertions) ? step.assertions.filter((a) => a && a.type && !a.disabled) : [];
+      let list = Array.isArray(step.assertions) ? step.assertions.filter((a) => a && a.type && !a.disabled) : [];
+      if (run.rehearsal && list.some((a) => a.type === 'command')) { list = list.filter((a) => a.type !== 'command'); rs.warnings.push('Ensayo: las aserciones con comando no se ejecutaron.'); }
       for (const a of list) {
         if (sig.aborted) break;
         const t0 = now();
@@ -727,7 +770,7 @@ export async function runFinally(flow, run, { input = '', data = new Map(), stat
 /** Paused runs waiting for a review decision: `${runId}:${stepId}` -> {when, resolve} (spec 18 breaks). */
 const pendingReviews = new Map();
 const REVIEW_ACTIONS = { before: ['continue', 'skip', 'stop'], after: ['continue', 'edit', 'retry', 'stop'] };
-const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed']);
+const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed', 'rehearsal']);
 
 /**
  * Run the whole flow (or a single step with `only`). Returns runId immediately.
@@ -739,14 +782,19 @@ const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed']);
  * arrows are all inactive is skipped as 'not_routed' (not a failure) and its own arrows stay inactive.
  * The flow is snapshotted at start: edits made while it runs don't change this run (REL-4).
  */
-export function startRun(flowId, { input = '', only = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null, breakpoints = false } = {}) {
+export function startRun(flowId, { input = '', only = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null, breakpoints = false, rehearsal = false } = {}) {
   const flow = store.getFlow(flowId);
   if (!flow) throw new Error('Flujo no encontrado');
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   { const cp = cwdProblem(flow); if (cp) throw Object.assign(new Error(cp.error), { status: cp.status, code: cp.code }); }
+  // Spec 28 policy "noParallelRuns": shared environments are wiped by parallel runs of the same flow
+  if (POL.has(flow, 'noParallelRuns') && isRunning(flowId)) throw Object.assign(new Error('Este flujo ya se está ejecutando y su política no permite dos ejecuciones a la vez (ambientes compartidos). Espera a que termine o detenla.'), { status: 409, code: 'FLOW_BUSY' });
   const levels = only ? [[only]] : topoLevels(flow);
-  const runVars = { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) };
+  // Spec 28: an empty variable takes the policy default ("ambiente por defecto")
+  const runVars = POL.withDefaults(flow, { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) });
+  // Rehearsal (spec 28, "ensayo acotado"): breaks off, no "Al terminar", read-only AI, capped steps, lastRun untouched
+  if (rehearsal) { breakpoints = false; trigger = 'rehearsal'; }
   const rflow = { ...structuredClone(flow), vars: runVars };
   const snap = { steps: flow.steps.map(({ lastRun, memory, chatSessionId, chatContextHash, position, ...s }) => s), edges: flow.edges.map(({ source, target, when, pick }) => ({ source, target, when, pick })), vars: runVars, cwd: flow.cwd };
   const limit = clampInt(deadlineSec, 10, 14400, clampInt(flow.runTimeoutSec, 10, 14400, 3600));
@@ -755,11 +803,14 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     id: store.uid('r_'), flowId, input, only, trigger, vars: runVars, usePins: !!usePins, idempotencyKey: idempotencyKey || null,
     flowSnapshotHash: crypto.createHash('sha256').update(JSON.stringify(snap)).digest('hex'), flowUpdatedAt: flow.updatedAt,
     deadlineAt: t0 + limit * 1000, eventSeq: 0, status: 'running', startedAt: t0, steps: {}, usedPins: [], breakpoints: !!breakpoints, pauses: [],
+    ...(rehearsal ? { rehearsal: true, rehearsalStepSec: REHEARSAL_STEP_SEC } : {}),
+    // spec 28: which version of each step ran (the review ignores evidence from versions that no longer exist)
+    stepHashes: Object.fromEntries(flow.steps.map((s) => [s.id, stepHash(s)])),
   };
   const controller = new AbortController();
   activeRuns.set(run.id, { controller, flowId, run });
   store.saveRun(run);
-  emit({ type: 'run.started', flowId, runId: run.id, only, trigger });
+  emit({ type: 'run.started', flowId, runId: run.id, only, trigger, ...(rehearsal ? { rehearsal: true } : {}) });
   const onDeadline = () => { run.timedOut = true; controller.abort(); };
   let deadline = setTimeout(onDeadline, limit * 1000);
   const flusher = setInterval(() => { if (run.dirty) { run.dirty = false; try { store.saveRun(run); } catch {} } }, 5000);
@@ -812,7 +863,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     const skip = (id, reason, text) => {
       const benign = reason === 'not_routed' || reason === 'review';
       run.steps[id] = { status: 'skipped', skipReason: reason, output: '', events: [{ kind: benign ? 'hook_log' : 'error', text, t: now(), seq: ++run.eventSeq }] };
-      setStepRun(flowId, id, { status: 'skipped', endedAt: now(), runId: run.id, error: benign ? null : text, skipReason: reason, code: null });
+      if (!run.rehearsal) setStepRun(flowId, id, { status: 'skipped', endedAt: now(), runId: run.id, error: benign ? null : text, skipReason: reason, code: null });
       emit({ type: 'step.status', flowId, runId: run.id, stepId: id, status: 'skipped' });
     };
     const evalCond = (when, output, json) => evalAssertion(when, output, json);
@@ -926,7 +977,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     }
     clearTimeout(deadline);
     // Spec 22 (B2): "Al terminar" runs after every full run, whatever its status (cleanup, notifications).
-    if (!only && hasFinally(rflow)) {
+    if (!only && !run.rehearsal && hasFinally(rflow)) {
       // The run stays "running" until its cleanup ends, so pollers (UI, afs, API wait) don't see it finished too early.
       const finalStatus = run.status;
       run.status = 'running';
@@ -939,7 +990,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
     run.endedAt = now();
     try { run.totals = runTotals(run); delete run.dirty; store.saveRun(run); } catch (err) { console.error('No se pudo guardar la ejecución', run.id, err); }
     activeRuns.delete(run.id);
-    emit({ type: 'run.finished', flowId, runId: run.id, status: run.status, error: run.error });
+    emit({ type: 'run.finished', flowId, runId: run.id, status: run.status, error: run.error, ...(run.rehearsal ? { rehearsal: true } : {}) });
   })();
   return run.id;
 }
@@ -993,7 +1044,7 @@ export function stopRuns(flowId) {
 export function interactionProblem(flowId, key) {
   const active = [...activeRuns.values()].filter((r) => r.flowId === flowId);
   if (!active.length) return null;
-  const step = key && key !== '_flow' && key !== '_global' ? key : null;
+  const step = key && key !== '_flow' && key !== '_global' && key !== '_review' ? key : null;
   const paused = step && active.find((r) => (r.run.pauses || []).some((p) => p.stepId === step));
   if (paused) return { runId: paused.run.id };
   return { status: 409, code: 'FLOW_RUNNING', error: step
@@ -1077,10 +1128,16 @@ export function runEvents(flow, run, after = 0, max = 500) {
 }
 
 // ---------- chats ----------
+// The '_review' chat (spec 28) gets its context from review.js (injected at boot: no circular import).
+let reviewContextFn = () => ({ text: '<review-context>\n(sin revisión todavía)\n</review-context>', hash: 'none' });
+export const setReviewContextProvider = (fn) => { reviewContextFn = fn; };
+const reviewContext = (flow) => reviewContextFn(flow);
+
 async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null, runId = null, external = false }) {
   const flow = store.getFlow(flowId);
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
-  const isFlow = key === '_flow';
+  const isReview = key === '_review'; // spec 28: the conversation about the flow's review (findings and proposals)
+  const isFlow = key === '_flow' || isReview;
   const step = isFlow ? null : flow.steps.find((s) => s.id === key);
   if (!isFlow && !step) throw new Error('Step no encontrado');
 
@@ -1098,13 +1155,15 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   activeChats.set(ck, controller);
 
   // Context: send full block only when it changed since this session last saw it.
-  const sessionId = isFlow ? flow.globalSessionId : step.chatSessionId;
-  const lastHash = isFlow ? flow.globalContextHash : step.chatContextHash;
+  const sessionId = isReview ? flow.reviewSessionId : isFlow ? flow.globalSessionId : step.chatSessionId;
+  const lastHash = isReview ? flow.reviewContextHash : isFlow ? flow.globalContextHash : step.chatContextHash;
   const access = contextAccess(flow, isFlow ? null : step);
-  const block = isFlow ? P.flowContextBlock(flow) : P.stepContextBlock(flow, step, access.lines);
+  const block = isReview ? reviewContext(flow) : isFlow ? P.flowContextBlock(flow) : P.stepContextBlock(flow, step, access.lines);
   const parts = [];
   if (!sessionId || block.hash !== lastHash) parts.push(block.text);
-  else parts.push(isFlow ? '<flow-context>(sin cambios desde el último mensaje)</flow-context>' : '<step-context>(sin cambios desde el último mensaje)</step-context>');
+  else parts.push(isReview ? '<review-context>(sin cambios desde el último mensaje)</review-context>' : isFlow ? '<flow-context>(sin cambios desde el último mensaje)</flow-context>' : '<step-context>(sin cambios desde el último mensaje)</step-context>');
+  // "@adversarial ¿y si…?" — the user can address one of the three reviewers
+  if (isReview) { const who = /^\s*@(producto|product|adversarial|arquitecto|architect)\b/i.exec(message)?.[1]?.toLowerCase(); if (who) parts.push(`(El usuario se dirige a la mirada de ${/^prod/.test(who) ? 'PRODUCTO' : /^adv/.test(who) ? 'ADVERSARIAL' : 'ARQUITECTO'}: responde desde ese rol, sin perder las otras dos de vista.)`); }
   if (!isFlow) {
     const rel = P.relatedMemory(flow, step, message);
     if (rel.length) parts.push(`<related-memory>\n${rel.map((r) => `- [${r.step}] ${r.text}`).join('\n')}\n</related-memory>`);
@@ -1118,7 +1177,8 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
 
   // Spec 25: a chat converses and proposes; it never changes anything itself. Only read tools, whatever the step's
   // access is (edit/dev steps keep Edit/Write/Bash for RUNS, not for chats); write tools are explicitly disallowed.
-  let allowedTools = readOnlyTools([isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...access.tools].filter(Boolean).join(' '));
+  let allowedTools = readOnlyTools([isReview ? 'Read Grep Glob' : isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...(isReview ? [] : access.tools)].filter(Boolean).join(' '));
+  if (isReview) for (const s of flow.steps) { const ref = s.kind === 'skill' ? findSkill(s.skillRef, flow.cwd) : s.kind === 'agent' ? findAgent(s.agentRef, flow.cwd) : null; if (ref) access.addDirs.push(path.dirname(ref.path)); }
   const addDirs = [...access.addDirs];
   const permissionMode = undefined;
   const disallowedTools = CHAT_DISALLOWED;
@@ -1133,9 +1193,11 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     for (const k of keys) emit({ type: 'chat.event', flowId, key: k, messageId: asst.id, event: e, mirrorOf: k !== key ? key : undefined });
   };
 
+  const chatSystem = isReview ? P.reviewChatSystem() : isFlow ? P.flowChatSystem() : P.stepChatSystem();
   let r = await runClaude({
     prompt: parts.join('\n\n'),
-    appendSystem: isFlow ? P.flowChatSystem() : P.stepChatSystem(),
+    appendSystem: chatSystem,
+    ...(isReview ? { strictMcp: true } : {}),
     model: step?.model || undefined,
     effort: step?.effort || undefined,
     agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
@@ -1147,7 +1209,7 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   if (r.isError && sessionId && !controller.signal.aborted && /session|conversation/i.test(r.error || '')) {
     onEvent({ kind: 'hook_log', text: 'Sesión anterior no disponible; iniciando una nueva.' });
     parts[0] = block.text;
-    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: isFlow ? P.flowChatSystem() : P.stepChatSystem(), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, disallowedTools, addDirs, permissionMode, cwd: flowCwd(flow), signal: controller.signal, onEvent });
+    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: chatSystem, ...(isReview ? { strictMcp: true } : {}), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, disallowedTools, addDirs, permissionMode, cwd: flowCwd(flow), signal: controller.signal, onEvent });
   }
   if (activeChats.get(ck) === controller) activeChats.delete(ck);
 
@@ -1163,7 +1225,8 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   store.updateChatMsg(flowId, key, asst.id, (m) => Object.assign(m, asst));
 
   const updated = controller.signal.aborted ? null : store.updateFlow(flowId, (f) => {
-    if (isFlow) { if (r.sessionId) f.globalSessionId = r.sessionId; f.globalContextHash = block.hash; }
+    if (isReview) { if (r.sessionId) f.reviewSessionId = r.sessionId; f.reviewContextHash = block.hash; }
+    else if (isFlow) { if (r.sessionId) f.globalSessionId = r.sessionId; f.globalContextHash = block.hash; }
     else {
       const s = f.steps.find((x) => x.id === key);
       if (s) { if (r.sessionId) s.chatSessionId = r.sessionId; s.chatContextHash = block.hash; }
@@ -1202,6 +1265,65 @@ export function readOnlyTools(list) {
   return [...new Set(tokens.filter((t) => !WRITE_TOOL.test(t)))].join(' ');
 }
 const STEP_FIELDS = ['role', 'task', 'context', 'allowedTools', 'model', 'effort', 'permissionMode', 'hooks', 'name', 'command', 'shell'];
+const STEP_NUMBERS = { bashTimeoutMin: [1, 120], timeoutSec: [10, 7200] };
+const PERMISSION_MODES_OK = new Set(['', 'default', 'acceptEdits', 'plan', 'dontAsk']);
+const toolTokens = (list) => String(list || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || [];
+/** Definition of a step without run/chat state: what a review proposal is anchored to (REVIEW_STALE). */
+export const stepHash = (s) => { if (!s) return null; const { lastRun, memory, pinned, chatSessionId, chatContextHash, position, ...d } = s; return crypto.createHash('sha1').update(JSON.stringify(d)).digest('hex').slice(0, 16); };
+/**
+ * Spec 28 (adversarial B1): what a proposal may NEVER do, whoever wrote it (a chat, the review, or text that came from a
+ * ticket or a run's output). The person can still do it by hand in the step.
+ */
+export function patchProblem(patch) {
+  if (!patch || typeof patch !== 'object') return null;
+  if ('permissionMode' in patch && !PERMISSION_MODES_OK.has(String(patch.permissionMode ?? ''))) return `Una propuesta no puede poner permissionMode "${patch.permissionMode}" (solo default, acceptEdits, plan o dontAsk). Si de verdad lo necesitas, cámbialo tú en el step.`;
+  // unrestricted shells: bare Bash/PowerShell, wildcards, or a pattern that launches another shell (adversarial review)
+  for (const raw of toolTokens(patch.allowedTools)) {
+    const t = raw.replace(/\s+/g, ' ').replace(/\(\s+/, '(').replace(/\s+\)/, ')');
+    const m = /^(Bash|PowerShell)(?:\((.*)\))?$/i.exec(t);
+    if (!m) continue;
+    const pat = (m[2] ?? '').trim();
+    if (!pat || /^[*:]+$/.test(pat) || /^\*/.test(pat) || /^(powershell|pwsh|bash|sh|zsh|cmd|cmd\.exe|wsl)\b/i.test(pat)) return `Una propuesta no puede dar ${m[1]} sin restricción (${raw}): usa patrones concretos, por ejemplo Bash(git status:*).`;
+  }
+  return null;
+}
+/** Spec 28: the parts of a change that WIDEN access. Shown apart, confirmed apart, never inside an "apply all". */
+export function widensOf(cur, patch, prefix = '') {
+  const w = [];
+  if (!patch || typeof patch !== 'object') return w;
+  const before = new Set(toolTokens(cur?.allowedTools));
+  const added = toolTokens(patch.allowedTools).filter((t) => !before.has(t) && !isReadOnlyTool(t.replace(/\(.*$/, '')));
+  if ('allowedTools' in patch && added.length) w.push(`${prefix}herramientas nuevas que pueden cambiar cosas: ${added.join(' ')}`);
+  if ('permissionMode' in patch && patch.permissionMode !== (cur?.permissionMode || '') && ['acceptEdits', 'dontAsk'].includes(patch.permissionMode)) w.push(`${prefix}permisos: ${patch.permissionMode}`);
+  if (typeof patch.command === 'string' && patch.command !== (cur?.command || '')) w.push(`${prefix}cambia el comando que se ejecuta`);
+  if (typeof patch.hooks === 'string' && patch.hooks !== (cur?.hooks || '')) w.push(`${prefix}cambia el código de hooks`);
+  return w;
+}
+const findStepRef = (flow, ref) => flow.steps.find((x) => x.id === ref || x.name.toLowerCase() === String(ref).toLowerCase());
+/** Problems + widening of a step/flow/structure/policy proposal, against the CURRENT flow (also re-checked at apply). */
+function proposalRisk(flow, step, kind, p) {
+  const out = { problem: null, widens: [] };
+  if (kind === 'step') { out.problem = patchProblem(p.patch); out.widens = widensOf(step, p.patch); }
+  else if (kind === 'flow') {
+    for (const [ref, patch] of Object.entries(p.patch?.steps && typeof p.patch.steps === 'object' ? p.patch.steps : {})) {
+      out.problem ||= patchProblem(patch);
+      const s = findStepRef(flow, ref);
+      out.widens.push(...widensOf(s, patch, `${s?.name || ref}: `));
+    }
+  } else if (kind === 'structure') {
+    for (const n of Array.isArray(p.patch?.addSteps) ? p.patch.addSteps : []) {
+      out.problem ||= patchProblem(n);
+      if (n.kind === 'command') out.widens.push(`agrega un step de comando «${n.name || 'nuevo'}»`);
+      out.widens.push(...widensOf({}, n, `${n.name || 'nuevo'}: `).filter((w) => !/cambia el comando/.test(w)));
+    }
+  } else if (kind === 'policy' && p.policy) {
+    if (p.policy.scope === 'machine') out.widens.push('afecta a todos los flujos de esta instalación');
+    // replacing a rule (other params, another author…) is never silent: it may relax what the person set
+    const existing = (p.policy.scope === 'machine' ? POL.machinePolicies() : flow.policies || []).find((x) => x.type === p.policy.type && p.policy.type !== 'note');
+    if (existing) out.widens.push(`reemplaza la regla vigente «${existing.text}»`);
+  }
+  return out;
+}
 const SOURCE_KINDS = ['file', 'folder', 'url', 'jira', 'confluence'];
 function cleanAddContext(list) {
   if (!Array.isArray(list)) return [];
@@ -1213,6 +1335,7 @@ function cleanAddContext(list) {
 }
 function applyStepPatch(s, patch) {
   for (const k of STEP_FIELDS) if (k in patch && typeof patch[k] === 'string') s[k] = k === 'shell' && !['powershell', 'bash', 'cmd'].includes(patch[k]) ? s[k] : patch[k];
+  for (const [k, [lo, hi]] of Object.entries(STEP_NUMBERS)) if (k in patch) { const n = Number(patch[k]); s[k] = Number.isFinite(n) && n > 0 ? Math.min(hi, Math.max(lo, Math.round(n))) : null; }
   const o = patch.output;
   if (o && typeof o === 'object') s.output = { ...(s.output || {}), ...(['text', 'json'].includes(o.format) ? { format: o.format } : {}), ...(typeof o.schema === 'string' ? { schema: o.schema } : o.schema && typeof o.schema === 'object' ? { schema: JSON.stringify(o.schema, null, 2) } : {}) };
   const add = cleanAddContext(patch.addContext);
@@ -1255,7 +1378,38 @@ function prepareProposal(flow, step, key, p) {
     if (q.__invalid || (ref && !/^(flujo|flow)$/i.test(ref) && !target)) return { ...base, patch: q.__invalid ? q : { __invalid: `Step no encontrado: ${ref}` } };
     return { ...base, patch: { step: target?.id || null, stepName: target?.name || null, input: typeof q.input === 'string' ? q.input : '' } };
   }
-  return { ...base, patch: p.patch };
+  if (p.kind === 'policy') {
+    let policy = null; let error = null;
+    // a proposal can only ADD an enabled rule: switching one off is done by the person (adversarial review)
+    try { policy = POL.cleanPolicy({ ...(p.policy || {}), enabled: true, source: 'review' }, p.policy?.scope === 'machine' ? 'machine' : 'flow'); } catch (e) { error = e.message; }
+    const r = policy ? proposalRisk(flow, step, 'policy', { policy }) : { widens: [] };
+    return { ...base, policy: policy ? POL.describe(policy) : null, error, widens: r.widens, ...(p.findingId ? { findingId: p.findingId } : {}) };
+  }
+  const kind = p.kind || 'step';
+  const r = proposalRisk(flow, step, kind, p);
+  // a proposal born in the review is anchored to the steps it touches: if they change, it is stale (REVIEW_STALE)
+  const anchorIds = key === '_review' ? (kind === 'flow' ? Object.keys(p.patch?.steps || {}) : kind === 'structure' ? (p.patch?.addSteps || []).map((n) => n.after) : []).map((ref) => findStepRef(flow, ref)?.id).filter(Boolean) : [];
+  return { ...base, patch: p.patch, ...(r.problem ? { error: r.problem } : {}), ...(r.widens.length ? { widens: r.widens } : {}),
+    ...(anchorIds.length ? { anchor: Object.fromEntries(anchorIds.map((id) => [id, stepHash(flow.steps.find((s) => s.id === id))])) } : {}),
+    ...(p.findingId ? { findingId: p.findingId } : {}) };
+}
+/** Spec 28: inserts new steps right after an existing one ("gate after Pull Jira"): A → X becomes A → new → X. */
+function applyStructure(f, patch) {
+  const added = [];
+  for (const n of Array.isArray(patch?.addSteps) ? patch.addSteps.slice(0, 5) : []) {
+    const after = findStepRef(f, n.after);
+    if (!after) throw Object.assign(new Error(`No existe el step «${n.after}» después del cual insertar`), { status: 400, code: 'BAD_PROPOSAL' });
+    const kind = ['role', 'command', 'skill', 'agent'].includes(n.kind) ? n.kind : 'role';
+    const s = store.newStep({ name: String(n.name || 'Nuevo step').slice(0, 120), kind, position: { x: (after.position?.x || 0) + 30, y: (after.position?.y || 0) + 150 }, ...(kind === 'skill' ? { skillRef: String(n.skillRef || '') } : {}), ...(kind === 'agent' ? { agentRef: String(n.agentRef || '') } : {}) });
+    applyStepPatch(s, n);
+    // only plain arrows move behind the new step; conditional/routed/pick arrows keep reading the original step
+    for (const e of f.edges) if (e.source === after.id && (!e.when || e.when.type === 'always') && !e.pick) e.source = s.id;
+    f.edges.push({ id: store.uid('e_'), source: after.id, target: s.id });
+    f.steps.push(s);
+    added.push(s.name);
+  }
+  topoLevels(f);
+  return added;
 }
 export function findProposal(flowId, key, messageId, proposalId) {
   const msg = store.getChat(flowId, key).find((m) => m.id === messageId);
@@ -1271,14 +1425,52 @@ export function discardProposal(flowId, key, messageId, proposalId) {
   return { discarded: true };
 }
 /** Applies a confirmed proposal. Runs ('run') are started by the caller (index.js: requirements gate first). */
-export async function applyProposal(flowId, key, messageId, proposalId, { runId = null } = {}) {
+export async function applyProposal(flowId, key, messageId, proposalId, { runId = null, confirmWiden = false } = {}) {
   const p = findProposal(flowId, key, messageId, proposalId);
+  const result = await applyChange(flowId, key, p, { runId, confirmWiden });
+  if (result?.prevContent !== undefined) { markProposal(flowId, key, messageId, proposalId, { prev: result.prevContent }); delete result.prevContent; }
+  markProposal(flowId, key, messageId, proposalId, { applied: true, appliedAt: now() });
+  return result;
+}
+/**
+ * Applies one change (a chat proposal, a review proposal or a lint fix) with the same checks for all (spec 28):
+ * never a forbidden value, never a widening without its own confirmation, never on a step changed since (anchor).
+ */
+export async function applyChange(flowId, key, p, { runId = null, confirmWiden = false } = {}) {
   const bad = (msg) => Object.assign(new Error(msg), { status: 400, code: 'BAD_PROPOSAL' });
   if (p.patch?.__invalid) throw bad('Propuesta inválida');
   if (p.applied) throw Object.assign(new Error('Ya está aplicada'), { status: 409, code: 'ALREADY_APPLIED' });
   const kind = p.kind || 'step';
+  // Spec 28: re-checked against the CURRENT flow (a proposal stored before this rule, or a step changed since)
+  if (['step', 'flow', 'structure', 'policy'].includes(kind)) {
+    const cur = store.getFlow(flowId);
+    if (p.error) throw bad(p.error);
+    for (const [sid, h] of Object.entries(p.anchor || {})) {
+      if (stepHash(cur.steps.find((s) => s.id === sid)) !== h) throw Object.assign(new Error('El step cambió desde que se hizo esta propuesta: pídela de nuevo (o vuelve a revisar el flujo).'), { status: 409, code: 'REVIEW_STALE' });
+    }
+    const risk = proposalRisk(cur, cur.steps.find((s) => s.id === key), kind, kind === 'policy' ? { policy: p.policy } : p);
+    if (risk.problem) throw bad(risk.problem);
+    // confirmWiden: the list the person saw (the UI sends it) must be what widens NOW; `true` (API) accepts the current list
+    const seen = Array.isArray(confirmWiden) ? confirmWiden.map(String) : null;
+    const ok = confirmWiden === true || (seen && risk.widens.every((w) => seen.includes(w)));
+    if (risk.widens.length && !ok) throw Object.assign(new Error(`Esta propuesta amplía el acceso: ${risk.widens.join(' · ')}. Confírmalo aparte.`), { status: 409, code: 'WIDEN_CONFIRM', widens: risk.widens });
+  }
   let result;
-  if (kind === 'step' || kind === 'flow') {
+  if (kind === 'policy') {
+    if (!p.policy) throw bad(p.error || 'Política inválida');
+    const pol = POL.cleanPolicy({ ...p.policy, enabled: true }, p.policy.scope);
+    const same = (x) => x.type === pol.type && pol.type !== 'note';
+    if (pol.scope === 'machine') { POL.setMachinePolicies([...POL.machinePolicies().filter((x) => !same(x)), pol]); bus.emit('msg', { type: 'flows.changed' }); result = { policy: pol }; }
+    else {
+      const flow = store.updateFlow(flowId, (f) => { f.policies = [...(f.policies || []).filter((x) => !same(x)), pol]; bumpRev(f); });
+      flowChanged(flow); result = flow;
+    }
+  } else if (kind === 'structure') {
+    let added = [];
+    const flow = store.updateFlow(flowId, (f) => { added = applyStructure(f, p.patch); bumpRev(f); });
+    flowChanged(flow);
+    result = { ...flow, added };
+  } else if (kind === 'step' || kind === 'flow') {
     let missing = [];
     const flow = store.updateFlow(flowId, (f) => {
       if (kind === 'step') {
@@ -1307,17 +1499,17 @@ export async function applyProposal(flowId, key, messageId, proposalId, { runId 
     let prev = null; try { prev = fs.readFileSync(t.target, 'utf8'); } catch {}
     fs.mkdirSync(path.dirname(t.target), { recursive: true });
     fs.writeFileSync(t.target, p.content);
-    markProposal(flowId, key, messageId, proposalId, { prev: prev === null ? null : prev.slice(0, 60000) });
-    result = { written: t.target };
+    result = { written: t.target, prevContent: prev === null ? null : prev.slice(0, 60000) };
   } else if (kind === 'memory') {
     result = addMemory(flowId, p.scope || key, p.text, 'chat');
   } else if (kind === 'output') {
     if (!runId) throw bad('El entregable solo se corrige desde un break (falta la ejecución)');
     result = setPauseOutput(flowId, runId, key, { output: p.output, json: p.json });
   } else throw bad(`Tipo de propuesta desconocido: ${kind}`);
-  markProposal(flowId, key, messageId, proposalId, { applied: true, appliedAt: now() });
   return result;
 }
+/** Review findings → stored proposals of the '_review' chat (same shape and checks as any chat proposal). */
+export const prepareReviewProposals = (flow, list) => list.map((p) => prepareProposal(flow, null, '_review', p));
 export const markRunProposal = (flowId, key, messageId, proposalId, runId) => markProposal(flowId, key, messageId, proposalId, { applied: true, appliedAt: now(), runId });
 
 /** Spec 25: the deliverable corrected in the chat of a break ("after"); it is used when the reviewer approves. */

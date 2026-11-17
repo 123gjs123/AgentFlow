@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (219 tests)
+## Qué cubre (233 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -64,6 +64,8 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `20-credentials` | Spec 26: alta/edición/borrado sin devolver secretos, cifrado en disco con la clave fuera de data/, uso en comandos (variable de entorno, •••• en la salida y la actividad, nunca en prompts), credencial faltante bloquea con su ítem (UI, step, API, dry run), probar conexión (Jira OK / 401), importar desde .env, exportar sin credenciales y aviso al importar; en el navegador: alta con el token oculto (desde ⚙ Configuración) |
 | `21-attention-notify` | Spec 27: breaks de cualquier flujo (UI y API) con su destino y sin reanudar nada; fallos (MCP_UNAVAILABLE → CLI; solo un éxito completo limpia, un step suelto manual no); "visto" según el estado (409 / reaparece); cuarentena y bloqueo por credencial; leer la lista nunca usa la red; rendimiento con 2000 ejecuciones; notificaciones (opt-in, sin datos de la ejecución, sin la clave en el enlace, juntas sin perderse, sin repetir); programadas (primer fallo y recuperación); configuración validada; chequeo de instalación; reinicio con break pendiente (un solo resumen) |
 | `22-ui-attention` | Spec 27 en el navegador: break en otro flujo → aviso "Abrir", 🔔 con contador, título "(1)", prefijo ⏸, Ctrl+Shift+A y Esc, "Abrir" lleva a la revisión sin reanudar; "Marcar visto" y "Ver ejecución"; ⚙ Configuración con sus pestañas |
+| `23-flow-review` | Spec 28: seguridad de propuestas (bypassPermissions y Bash sin patrón nunca; ampliar acceso = 409 `WIDEN_CONFIRM` hasta confirmarlo aparte); lint sin llamar a Claude (skill inexistente, MCP no cargado según el CLI, escrituras externas, secreto enmascarado, suite larga); aplicar un arreglo, descartar con motivo y reaparecer si el step cambia; políticas validadas y aplicadas al ejecutar (herramientas bloqueadas, autor de git, sin trailer, ambiente por defecto, regla en el prompt, "nunca dos a la vez"); revisión de corridas (denegaciones por la forma del comando, falso éxito en segundo plano, comando cortado); ensayo (modo plan, comandos que escriben omitidos, sin "Al terminar", sin tocar lastRun ni 🔔); revisión con IA (2 llamadas read-only con el mismo dossier, evidencia verificada, desacuerdo y arreglo estructural, propuesta que inserta un step); nunca durante una ejecución y cancelada por una; chat de revisión (@rol, regla de flujo y de máquina); 🔔 kind review; políticas en el export |
+| `24-ui-flow-review` | Spec 28 en el navegador: el aviso lleva a 🩺 Revisión; aplicar un arreglo; el que amplía acceso pide confirmación (cancelar no cambia nada); descartar con motivo; agregar una regla del flujo y una de la instalación (⚙ › Reglas) |
 
 Cómo se simula cada origen en `07-integrations`:
 

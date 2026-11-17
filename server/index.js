@@ -22,6 +22,8 @@ import { parseSchema } from './schema.js';
 import { needsPreflight } from './preflight.js';
 import * as CRED from './credentials.js';
 import * as attention from './attention.js';
+import * as review from './review.js';
+import * as POL from './policies.js';
 import * as notify from './notify.js';
 import { checkSystem } from './system.js';
 import { cachedPreflight, setOnChecked } from './preflight.js';
@@ -57,7 +59,7 @@ const wrap = (fn) => async (req, res) => {
     res.locals.code = e.code || null;
     const status = e.status || (e instanceof SyntaxError || e instanceof TypeError || e instanceof RangeError || e instanceof ReferenceError ? 500 : 400);
     if (status >= 500) console.error(e);
-    res.status(status).json({ error: e.message, code: e.code || CODES[status] || 'ERROR' });
+    res.status(status).json({ error: e.message, code: e.code || CODES[status] || 'ERROR', ...(Array.isArray(e.widens) ? { widens: e.widens } : {}) });
   }
 };
 const CODES = { 400: 'BAD_REQUEST', 401: 'UNAUTHORIZED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 409: 'CONFLICT', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'UNPROCESSABLE', 500: 'INTERNAL' };
@@ -379,7 +381,7 @@ app.put('/api/flows/:id', wrap((req, res) => {
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
-  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, requirements: cleanRequirements(body.requirements) ?? cur.requirements, steps, edges };
+  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, requirements: cleanRequirements(body.requirements) ?? cur.requirements, policies: POL.cleanPolicies(body.policies, 'flow') ?? cur.policies, steps, edges };
   engine.topoLevels(next); // throws on cycles
   next.rev = (cur.rev || 0) + 1;
   delete next.baseRev;
@@ -486,7 +488,8 @@ app.post('/api/flows/:id/chat/:key/apply', wrap(async (req, res) => {
     engine.markRunProposal(id, key, messageId, proposalId, runId);
     return { runId };
   }
-  return engine.applyProposal(id, key, messageId, proposalId, { runId: typeof req.body?.runId === 'string' ? req.body.runId : ip?.runId || null });
+  // spec 28: a proposal that widens access needs its own confirmation (409 WIDEN_CONFIRM + the list otherwise)
+  return engine.applyProposal(id, key, messageId, proposalId, { runId: typeof req.body?.runId === 'string' ? req.body.runId : ip?.runId || null, confirmWiden: wideOk(req.body?.confirmWiden) });
 }));
 // Cancels only the chat's answer in progress: never a run (the flow keeps its process).
 app.post('/api/flows/:id/chat/:key/cancel', wrap((req) => { need(req.params.id); return { stopped: engine.stopChat(req.params.id, req.params.key) }; }));
@@ -501,7 +504,8 @@ app.get('/api/flows/:id/export', wrap((req, res) => {
 }));
 app.post('/api/flows/import', wrap((req) => {
   const body = req.body || {};
-  const { flow, warnings, chats, runs } = importBundle(body.bundle, { edge: cleanEdge, sources: (x) => cleanSources(x), finally: (x) => cleanFinally(x), requirements: (x) => cleanRequirements(x) }, { name: typeof body.name === 'string' ? body.name : undefined });
+  const policies = (x) => { if (!Array.isArray(x)) return undefined; const out = []; for (const p of x.slice(0, 50)) { try { out.push(POL.cleanPolicy({ ...p, source: 'import' }, 'flow')); } catch {} } return out; };
+  const { flow, warnings, chats, runs } = importBundle(body.bundle, { edge: cleanEdge, sources: (x) => cleanSources(x), finally: (x) => cleanFinally(x), requirements: (x) => cleanRequirements(x), policies }, { name: typeof body.name === 'string' ? body.name : undefined });
   engine.topoLevels(flow); // rejects cycles
   const saved = store.saveFlow(flow);
   if (chats) for (const [key, list] of Object.entries(chats)) {
@@ -584,6 +588,28 @@ app.get('/api/settings', wrap(() => ({ notify: notify.settings(), platform: proc
 app.put('/api/settings/notify', wrap((req) => ({ notify: notify.setSettings(req.body || {}) })));
 app.post('/api/settings/notify/test', wrap(() => notify.test()));
 app.get('/api/system/check', wrap(async (req) => checkSystem({ flow: req.query.flow ? store.getFlow(String(req.query.flow)) : null, fresh: req.query.fresh === '1' })));
+
+// ----- 🩺 flow review (spec 28): it only proposes; every change goes through engine.applyChange -----
+// spec 28: true (API) or the list of widenings the person saw (UI); anything else = not confirmed
+const wideOk = (v) => (v === true ? true : Array.isArray(v) ? v.map(String).slice(0, 50) : false);
+const describedPolicies = (flow) => ({ machine: POL.machinePolicies().map(POL.describe), flow: (flow?.policies || []).map(POL.describe) });
+app.get('/api/flows/:id/lint', wrap(async (req) => {
+  const flow = need(req.params.id);
+  const lint = await review.lintFlow(flow, { probes: true, fresh: req.query.fresh === '1' });
+  return { ...lint, policies: describedPolicies(flow), running: engine.isRunning(flow.id), activeReview: review.activeReview(flow.id) };
+}));
+app.post('/api/flows/:id/lint/apply', wrap((req) => review.applyLintFix(req.params.id, String(req.body?.fp || ''), { confirmWiden: wideOk(req.body?.confirmWiden) })));
+app.post('/api/flows/:id/review/suppress', wrap((req) => review.suppress(need(req.params.id).id, String(req.body?.fp || ''), String(req.body?.reason || ''), String(req.body?.anchor || ''))));
+app.post('/api/flows/:id/review/unsuppress', wrap((req) => review.unsuppress(need(req.params.id).id, String(req.body?.fp || ''))));
+app.get('/api/flows/:id/reviews', wrap((req) => { need(req.params.id); return { items: store.listReviews(req.params.id), active: review.activeReview(req.params.id) }; }));
+app.post('/api/flows/:id/reviews', wrap((req) => review.startReview(req.params.id)));
+app.get('/api/flows/:id/reviews/:rid', wrap((req) => { need(req.params.id); const rv = store.getReview(req.params.id, req.params.rid); if (!rv) throw fail(404, 'Revisión no encontrada', 'REVIEW_NOT_FOUND'); return { ...rv, stale: rv.flowHash !== store.definitionHash(store.getFlow(req.params.id)) }; }));
+app.post('/api/flows/:id/reviews/:rid/cancel', wrap((req) => { need(req.params.id); if (!review.cancelReview(req.params.id, req.params.rid)) throw fail(409, 'Esa revisión no está en curso', 'REVIEW_FINISHED'); return { cancelled: true }; }));
+// Rehearsal: the whole flow, read-only AI (plan mode), commands that write outside skipped, each step capped
+app.post('/api/flows/:id/rehearsal', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), rehearsal: true }) })));
+app.get('/api/policies', wrap(() => ({ types: POL.POLICY_TYPES, machine: POL.machinePolicies().map(POL.describe) })));
+app.put('/api/policies', wrap((req) => { const list = POL.setMachinePolicies(req.body?.policies || []); engine.bus.emit('msg', { type: 'flows.changed' }); return { machine: list.map(POL.describe) }; }));
+app.post('/api/system/cleanup-headless', wrap(() => review.cleanupHeadless()));
 app.get('/api/library', wrap(() => store.listLibrary()));
 app.post('/api/library', wrap((req) => {
   const f = need(req.body?.flow);
@@ -698,7 +724,9 @@ server.listen(PORT, HOST, () => {
   const recovered = engine.recoverStaleRuns();
   if (recovered) console.log(`${recovered} ejecución(es) interrumpidas por el reinicio marcadas como 'interrupted'.`);
   // spec 27: attention list from disk (after the recovery), then notifications; no toast storm, one summary
-  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight });
+  // spec 28: the flow review (lint in the background, AI review on demand) feeds the 🔔 list with kind 'review'
+  review.init({ bus: engine.bus, emit: (m) => engine.bus.emit('msg', m), refreshAttention: (flowId) => attention.refreshFlow(flowId) });
+  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem });
   setOnChecked((flowId) => engine.bus.emit('msg', { type: 'preflight.checked', flowId }));
   notify.init({ getBaseUrl: () => `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}` });
   notify.bootSummary(recovered);

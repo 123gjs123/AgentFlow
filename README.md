@@ -455,10 +455,43 @@ The **🔔** button in the top bar counts what is waiting for a person in **any*
 | Tab | What it has |
 |---|---|
 | Credenciales | The tokens flows use (see above). |
+| Reglas | Rules for every flow of this installation (see 🩺 below): default environment, commit author, no Co-Authored-By, no writes to external systems without asking, lessons learned. |
 | Integraciones | How to invoke flows from outside (MCP, `afs`, HTTP, Jenkins, webhooks) and the external API token. |
 | Claude Code CLI | Installation check of this machine: CLI version, session (subscription or API key), MCP connectors the CLI really loads compared with the ones the open flow uses, certificates for a corporate TLS proxy, and data folder. Each problem says how to fix it. |
 | Notificaciones | Windows notifications on or off, and **Probar notificación**. |
 | De dónde salen los números | What 5h/7d, tokens and "≈ US$ equiv. API" mean and where they come from. The dollar figure is an estimate at API prices, not a charge. |
+
+### 🩺 Flow review, 📜 rules and 🧪 rehearsal
+
+Flujo › **🩺 Revisión** finds what would make a flow fail, or give false confidence, before the people who use it do. It never says a flow is "approved": it lists what it could not verify.
+
+| Layer | When | Cost | What it looks at |
+|---|---|---|---|
+| Chequeo instantáneo | Every time you open the tab; ↻ to repeat | No tokens | **The definition:** connectors the CLI does not load, skills or agents that do not exist, no working folder, writes to external systems, secrets in prompts, long suites hitting the CLI's 10-minute Bash limit. **The latest runs and rehearsals:** denied commands and why, a "success" left waiting on a background command, commands cut by time, flaky or slow steps. **This machine:** test-runner Chromes left alive. |
+| 🧪 Ensayo | When you ask | One run without writes | The whole flow. AI steps work in plan mode without write tools (they describe what they would do and what they are missing). Hooks and assertions with a command do not run. Commands recognized as a write, delete, deploy or suite/tool launch are skipped, and the skipped list stays in the run. **A command it does not recognize does run** (capped), so check your command steps first. Breaks, "Al terminar" and the real last runs are untouched. |
+| 🤖 Revisión con IA | When you ask; the token estimate is shown first | 2 calls | Two independent reviewers: product + architect, and an adversarial one that never sees the other's answer. The app checks every quote they cite, an unverifiable claim never blocks, and disagreements stay visible. The recommended fix is the verifiable or structural one. |
+
+How each finding card works:
+- It shows its evidence and, when there is one, a fix.
+- **Aplicar** applies that fix only. Anything that **widens access** (tools that change things, permissions, commands, a new command step, a rule for every flow) is confirmed apart, here and in every chat.
+- **Discutir** opens the review chat, where you can address **@producto**, **@arquitecto** or **@adversarial**.
+- **Descartar** asks for a reason. A dismissed finding comes back if its step changes.
+
+Blocking findings, and a finished AI review with open proposals, appear in 🔔.
+
+**📜 Reglas** (policies) are your team's unwritten rules, written once. They apply per flow (🩺 tab) or to every flow (⚙ › Reglas). Each rule says what the app **guarantees** and what it does **not**:
+
+| Rule | Enforced when running |
+|---|---|
+| No escribir en sistemas externos sin pedido | Known MCP write tools and `git push` / `curl` writes are blocked in AI steps. Command steps are only flagged. |
+| Ambiente por defecto | An empty variable takes the value. |
+| Sin Co-Authored-By | Claude Code runs with attribution off. |
+| Autor de los commits | `GIT_AUTHOR_*` / `GIT_COMMITTER_*`. |
+| Estado requerido del ticket | The review asks for a control step. A prompt rule does not stop anything. |
+| Nunca dos ejecuciones a la vez | A second run is refused (409 `FLOW_BUSY`). |
+| Regla o lección | Added to every AI step's instructions. |
+
+A step can also raise the CLI's Bash limit with `bashTimeoutMin`.
 
 ### Sharing flows: export and import
 

@@ -15,7 +15,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const APP_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return '0'; } })();
 export const SECRET_NAME = /(token|secret|password|passwd|pwd|apikey|api_key|credential|private|auth)/i;
 const MACHINE_STEP = ['lastRun', 'chatSessionId', 'chatContextHash'];
-const MACHINE_FLOW = ['globalSessionId', 'globalContextHash', 'quarantine', 'rev', 'updatedAt', 'createdAt'];
+const MACHINE_FLOW = ['globalSessionId', 'globalContextHash', 'reviewSessionId', 'reviewContextHash', 'quarantine', 'rev', 'updatedAt', 'createdAt'];
 
 export const slug = (s) => String(s || 'flujo').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 60) || 'flujo';
 
@@ -37,7 +37,7 @@ export function exportFlow(flow, opts = {}) {
   const bundle = { format: BUNDLE_FORMAT, version: BUNDLE_VERSION, exportedAt: new Date().toISOString(), app: APP_VERSION, flow: f, removed };
   if (opts.chats) {
     const chats = {};
-    for (const key of ['_global', '_flow', ...(f.steps || []).map((s) => s.id)]) { const c = store.getChat(flow.id, key); if (c.length) chats[key] = c; }
+    for (const key of ['_global', '_flow', '_review', ...(f.steps || []).map((s) => s.id)]) { const c = store.getChat(flow.id, key); if (c.length) chats[key] = c; }
     bundle.chats = chats;
   }
   if (opts.runs) bundle.runs = store.rawRuns(flow.id).sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
@@ -90,6 +90,8 @@ export function importBundle(bundle, clean, { name } = {}) {
     runTimeoutSec: src.runTimeoutSec, versionEveryMin: src.versionEveryMin,
     memory: Array.isArray(src.memory) ? src.memory.filter((m) => m && typeof m.text === 'string') : [],
     contextSources: clean.sources(src.contextSources), finally: clean.finally(src.finally) ?? undefined, requirements: clean.requirements(src.requirements),
+    // spec 28: the flow's rules travel with it (marked as imported); this machine's rules stay here
+    policies: clean.policies ? clean.policies(src.policies) : undefined,
     steps, edges,
   };
   if (flow.cwd && !fs.existsSync(flow.cwd)) warnings.push(`El directorio de trabajo "${flow.cwd}" no existe en esta máquina: elige uno en Flujo → Directorio de trabajo.`);

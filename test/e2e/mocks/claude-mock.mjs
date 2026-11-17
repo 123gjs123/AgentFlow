@@ -64,8 +64,8 @@ const fail = (msg, code = 1) => { isError = true; return finish(msg, { exitCode:
 
 // ---- directives: last occurrence wins (history may contain older ones) ----
 // In chats only the user message counts (the step config inside <step-context> must not trigger its run directives).
-const isChat = /^# Chat (de step|general del flujo)/.test(append);
-const chatMsg = prompt.split(/<\/step-context>|<\/flow-context>|<\/related-memory>|<\/mode>|<\/run-review>|enrutado a ti\.\)/).pop();
+const isChat = /^# Chat (de step|general del flujo|de revisión del flujo)/.test(append);
+const chatMsg = prompt.split(/<\/step-context>|<\/flow-context>|<\/review-context>|<\/related-memory>|<\/mode>|<\/run-review>|enrutado a ti\.\)|ARQUITECTO: responde desde ese rol, sin perder las otras dos de vista\.\)|ADVERSARIAL: responde desde ese rol, sin perder las otras dos de vista\.\)|PRODUCTO: responde desde ese rol, sin perder las otras dos de vista\.\)/).pop();
 const scope = isChat ? chatMsg : all;
 const dir = (name) => { const all2 = [...scope.matchAll(new RegExp(`\\[\\[mock:${name}(?:\\s+([\\s\\S]*?))?\\]\\]`, 'g'))]; return all2.length ? (all2[all2.length - 1][1] ?? '') : null; };
 
@@ -76,6 +76,16 @@ if (/verificador estricto/.test(system)) { // assertion judge
   if (/JUEZ-ROTO/.test(data)) await finish('no es json');
   const pass = /APROBADO/.test(data);
   await finish(JSON.stringify({ pass, score: pass ? 9 : 2, reason: pass ? 'cumple' : 'no cumple los criterios' }));
+}
+// spec 28: flow reviewers. The dossier carries the flow description, where tests put
+// [[mock:review-cons <json>]] / [[mock:review-adv <json>]] / [[mock:review-sleep <s>]] / [[mock:review-garbage]]
+if (/^# Revisión de flujo — rol (constructivo|adversarial)/.test(system)) {
+  const role = /rol adversarial/.test(system) ? 'adv' : 'cons';
+  const rs = (prompt.match(/\[\[mock:review-sleep\s+(\d+)\]\]/) || [])[1];
+  if (rs) await sleep(Number(rs) * 1000);
+  if (/\[\[mock:review-garbage\]\]/.test(prompt)) await finish('no es JSON');
+  const m = prompt.match(new RegExp(`\\[\\[mock:review-${role}\\s+(\\{[\\s\\S]*?\\})\\]\\]`));
+  await finish(m ? m[1] : JSON.stringify({ findings: [], notVerifiable: [`mock ${role}: nada`] }));
 }
 if (/^Resume el texto/.test(system)) await finish(`RESUMEN(${prompt.length} chars): ${prompt.replace(/\s+/g, ' ').slice(0, 60)}`);
 if (/enrutador de un flujo/.test(system)) {
@@ -127,6 +137,11 @@ if (dir('error') !== null) await fail(`mock fatal error: ${dir('error')}`);
 for (const t of [...scope.matchAll(/\[\[mock:tool\s+([^\s\]]+)(?:\s+([^\]]*))?\]\]/g)]) toolUse(t[1], { mock: t[2] || '' }, `resultado de ${t[1]}`);
 for (const w of [...scope.matchAll(/\[\[mock:write\s+([^\]]+)\]\]/g)]) toolUse('Write', { file_path: w[1].trim(), content: 'mock' }, 'File created');
 if (dir('deny') !== null) { denials.push({ tool_name: dir('deny').trim() || 'Bash', tool_use_id: 'x', tool_input: { command: 'rm -rf build' } }); }
+// spec 28: a denied Bash command with its text, and a Bash left in the background (false success)
+for (const d of [...scope.matchAll(/\[\[mock:deny-cmd\s+([^\]]+)\]\]/g)]) denials.push({ tool_name: 'Bash', tool_use_id: 'x', tool_input: { command: d[1].trim() } });
+if (dir('bash-bg') !== null) toolUse('Bash', { command: dir('bash-bg').trim(), run_in_background: true }, 'Command running in background with ID: b123');
+if (dir('bash-timeout') !== null) toolUse('Bash', { command: dir('bash-timeout').trim() }, 'Command timed out after 10m 0s', true);
+if (dir('env-echo') !== null) toolUse('Bash', { command: 'env' }, `GIT_AUTHOR_EMAIL=${process.env.GIT_AUTHOR_EMAIL || ''} BASH_MAX_TIMEOUT_MS=${process.env.BASH_MAX_TIMEOUT_MS || ''}`);
 
 let reply;
 if (dir('empty') !== null) reply = '';
@@ -150,6 +165,9 @@ if (dir('propose-flow') !== null) reply += `\n<flow-update>${dir('propose-flow')
 if (dir('propose-file') !== null) { const [p, ...c] = dir('propose-file').split('|'); reply += `\n<file-update path="${p.trim()}">\n${c.join('|')}</file-update>`; }
 if (dir('propose-output') !== null) reply += `\n<output-update>${dir('propose-output')}</output-update>`;
 if (dir('propose-run') !== null) reply += `\n<run-request>${dir('propose-run')}</run-request>`;
+if (dir('propose-policy') !== null) reply += `\n<policy-update>${dir('propose-policy')}</policy-update>`;
+if (dir('propose-structure') !== null) reply += `\n<structure-update>${dir('propose-structure')}</structure-update>`;
+if (dir('env-echo') !== null) reply += `\nENV git=${process.env.GIT_AUTHOR_EMAIL || '-'} bash=${process.env.BASH_MAX_TIMEOUT_MS || '-'} settings=${opt('--settings') ? readFile(opt('--settings')) : '-'} perm=${opt('--permission-mode') || '-'} disallowed=${opt('--disallowedTools') || '-'}`;
 if (dir('ask-back') !== null) reply = `Antes de proponer algo: ${dir('ask-back')}`;
 for (const r of [...scope.matchAll(/\[\[mock:remember\s+([^\]]+)\]\]/g)]) if (!correcting) reply += `\n<remember>${r[1]}</remember>`;
 await finish(reply);

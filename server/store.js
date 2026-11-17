@@ -87,7 +87,24 @@ export function deleteFlow(id) {
   fs.rmSync(path.join(DATA, 'chats', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'runs', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'versions', safe(id)), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA, 'reviews', safe(id)), { recursive: true, force: true });
 }
+
+// ---------- flow reviews (spec 28) ----------
+const reviewFile = (flowId, id) => path.join(dir('reviews', safe(flowId)), `${safe(id)}.json`);
+export const saveReview = (rv) => writeJson(reviewFile(rv.flowId, rv.id), rv);
+export const getReview = (flowId, id) => readJson(at('reviews', safe(flowId), `${safe(id)}.json`), null);
+/** Newest first; only metadata (findings stay in the file). */
+export function listReviews(flowId) {
+  let files = [];
+  try { files = fs.readdirSync(at('reviews', safe(flowId))).filter((f) => /^rv_.*\.json$/.test(f)); } catch { return []; }
+  return files.map((f) => readJson(at('reviews', safe(flowId), f), null)).filter(Boolean)
+    .map(({ id, status, startedAt, endedAt, flowHash, error, findings, totals }) => ({ id, status, startedAt, endedAt, flowHash, error, findings: (findings || []).length, totals }))
+    .sort((a, b) => b.startedAt - a.startedAt);
+}
+/** Findings the person dismissed: {fp: {anchor, reason, at}} (a dismissed finding stays hidden while its anchor holds). */
+export const getSuppressed = (flowId) => readJson(at('reviews', safe(flowId), 'suppressed.json'), {});
+export const setSuppressed = (flowId, map) => writeJson(path.join(dir('reviews', safe(flowId)), 'suppressed.json'), map);
 
 export function newStep(partial = {}) {
   return {
@@ -179,15 +196,27 @@ export function setIdem(key, entry) {
   all[key] = { ...entry, at: Date.now() };
   writeJson(idemFile(), all);
 }
+// Run summaries cached by file mtime+size: a run file (up to ~1 MB) is parsed again only when it changed (spec 28:
+// the review and the attention list ask for the list often).
+const runMeta = new Map(); // path -> {mtimeMs, size, meta}
 export function listRuns(flowId) {
   let files = [];
-  try { files = fs.readdirSync(at('runs', safe(flowId))); } catch { return []; }
-  return files.filter((f) => f.endsWith('.json'))
-    .map((f) => readJson(path.join(DATA, 'runs', safe(flowId), f)))
-    .filter(Boolean)
-    .map((r) => ({ id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: String(r.input ?? '').slice(0, 200), only: r.only, totals: r.totals }))
-    .sort((a, b) => b.startedAt - a.startedAt)
-    .slice(0, 50);
+  const d = at('runs', safe(flowId));
+  try { files = fs.readdirSync(d); } catch { return []; }
+  const out = [];
+  for (const f of files.filter((x) => x.endsWith('.json'))) {
+    const p = path.join(d, f);
+    let st; try { st = fs.statSync(p); } catch { continue; }
+    const hit = runMeta.get(p);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) { out.push(hit.meta); continue; }
+    const r = readJson(p, null);
+    if (!r) continue;
+    const meta = { id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: String(r.input ?? '').slice(0, 200), only: r.only, totals: r.totals };
+    runMeta.set(p, { mtimeMs: st.mtimeMs, size: st.size, meta });
+    out.push(meta);
+  }
+  if (runMeta.size > 5000) runMeta.clear();
+  return out.sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
 }
 
 // ---------- step library (spec 18: reusable boxes across flows) ----------
@@ -206,7 +235,7 @@ export function deleteFromLibrary(id) { writeJson(LIB(), listLibrary().filter((x
 // Only the definition travels (no run state, memory or chat sessions). Automatic ones are pruned; named ones are kept.
 const verDir = (flowId) => dir('versions', safe(flowId));
 const definitionOf = (f) => ({
-  name: f.name, description: f.description, cwd: f.cwd, vars: f.vars, schedule: f.schedule, runTimeoutSec: f.runTimeoutSec, versionEveryMin: f.versionEveryMin, contextSources: f.contextSources, finally: f.finally, requirements: f.requirements,
+  name: f.name, description: f.description, cwd: f.cwd, vars: f.vars, schedule: f.schedule, runTimeoutSec: f.runTimeoutSec, versionEveryMin: f.versionEveryMin, contextSources: f.contextSources, finally: f.finally, requirements: f.requirements, policies: f.policies,
   steps: (f.steps || []).map(({ lastRun, memory, pinned, chatSessionId, chatContextHash, ...s }) => s),
   edges: f.edges || [],
 });

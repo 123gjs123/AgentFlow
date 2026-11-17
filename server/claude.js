@@ -26,8 +26,8 @@ export function claudeSpawn(args) {
 const TMP = path.join(os.tmpdir(), 'agent-flow-studio');
 fs.mkdirSync(TMP, { recursive: true });
 
-function tmpFile(content) {
-  const f = path.join(TMP, `sp-${crypto.randomUUID()}.md`);
+function tmpFile(content, ext = '.md') {
+  const f = path.join(TMP, `sp-${crypto.randomUUID()}${ext}`);
   fs.writeFileSync(f, content, 'utf8');
   return f;
 }
@@ -142,9 +142,11 @@ export async function runClaude(opts) {
 export function buildArgs(opts, fileFor) {
   const {
     appendSystem, systemPrompt, model, effort, agent, resume, permissionMode,
-    allowedTools, disallowedTools, tools, addDirs, noPersist, strictMcp,
+    allowedTools, disallowedTools, tools, addDirs, noPersist, strictMcp, settings,
   } = opts;
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
+  // Spec 28: settings enforced by a policy (e.g. no Co-Authored-By trailer), passed as a file
+  if (settings && typeof settings === 'object' && Object.keys(settings).length) args.push('--settings', fileFor('settings', JSON.stringify(settings)));
   if (systemPrompt) args.push('--system-prompt-file', fileFor('system', systemPrompt));
   if (appendSystem) args.push('--append-system-prompt-file', fileFor('append', appendSystem));
   if (model) args.push('--model', model);
@@ -166,13 +168,14 @@ export function buildArgs(opts, fileFor) {
 function runClaudeNow(opts) {
   const { prompt, cwd, onEvent = () => {}, signal } = opts;
   const files = [];
-  const args = buildArgs(opts, (_k, text) => { const f = tmpFile(text); files.push(f); return f; });
+  const args = buildArgs(opts, (k, text) => { const f = tmpFile(text, k === 'settings' ? '.json' : '.md'); files.push(f); return f; });
 
   return new Promise((resolve) => {
     const ctx = { result: null, text: '', sessionId: null, stderr: '', model: null };
     const workDir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
     const [file, argv] = claudeSpawn(args);
-    const child = spawn(file, argv, { cwd: workDir, env: { ...process.env }, windowsHide: true });
+    // opts.env (spec 28): policy env (git author) and the step's Bash time limit (BASH_*_TIMEOUT_MS)
+    const child = spawn(file, argv, { cwd: workDir, env: { ...process.env, ...(opts.env || {}) }, windowsHide: true });
     if (child.pid) { try { opts.onSpawn?.(child.pid); } catch {} }
     const kill = () => killTree(child); // never by PID once the process exited: Windows reuses PIDs
     signal?.addEventListener?.('abort', kill, { once: true });

@@ -46,7 +46,11 @@ test('break después: el chat ve la entrada y la salida reales, propone variable
   assert.equal(msg.proposals.length, 1);
   assert.deepEqual(msg.proposals[0].patch, proposal);
 
-  await s.uiOk('POST', `/api/flows/${f.id}/chat/s_p/apply`, { messageId: msg.id, proposalId: msg.proposals[0].id });
+  // spec 28: changing the command a step runs widens access → it is confirmed apart
+  assert.deepEqual(msg.proposals[0].widens, ['cambia el comando que se ejecuta']);
+  const r = await s.ui('POST', `/api/flows/${f.id}/chat/s_p/apply`, { messageId: msg.id, proposalId: msg.proposals[0].id });
+  assert.equal(r.body.code, 'WIDEN_CONFIRM');
+  await s.uiOk('POST', `/api/flows/${f.id}/chat/s_p/apply`, { messageId: msg.id, proposalId: msg.proposals[0].id, confirmWiden: true });
   const fl = await s.getFlow(f.id);
   assert.deepEqual(fl.vars, { filtro: 'equipo-checkout', otra: 'igual' }, 'las variables se fusionan');
   assert.equal(fl.steps.find((x) => x.id === 's_p').command, proposal.command);
@@ -64,7 +68,7 @@ test('break después: el chat ve la entrada y la salida reales, propone variable
   assert.equal(run.pauses[0].when, 'before');
   const m2 = await chatDone(f.id, 's_u', `[[mock:propose ${JSON.stringify({ command: '$input | ForEach-Object { "procesado: $_" }' })}]]`, runId);
   assert.match(s.calls().filter((c) => /# Chat de step/.test(c.append)).pop().prompt, /Lo que recibe de otros steps:\n### Pull[\s\S]*nuevo filtro=equipo-checkout/);
-  await s.uiOk('POST', `/api/flows/${f.id}/chat/s_u/apply`, { messageId: m2.id, proposalId: m2.proposals[0].id });
+  await s.uiOk('POST', `/api/flows/${f.id}/chat/s_u/apply`, { messageId: m2.id, proposalId: m2.proposals[0].id, confirmWiden: true });
   await s.uiOk('POST', `/api/flows/${f.id}/runs/${runId}/resume`, { step: 's_u', action: 'continue', reload: true });
   run = await s.waitRun(f.id, runId);
   assert.equal(run.status, 'success');

@@ -1,7 +1,8 @@
 // "Necesita atención" (spec 27): what is waiting for a person, across ALL flows, computed on the server so it is seen
 // even with another flow open, survives a reload and also drives the desktop notifications.
 // Kinds: break (a run paused for review), run_failed (the latest finished run of a flow failed), quarantine (imported
-// flow under review), blocked (the flow cannot start: a missing credential, or a requirement from the cached preflight).
+// flow under review), blocked (the flow cannot start: a missing credential, or a requirement from the cached preflight),
+// review (spec 28: the flow review found problems that will make it fail, or has proposals waiting).
 // NAVIGATION ONLY (D48): items point to the place; nothing here resumes, applies or trusts anything.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -87,6 +88,8 @@ function compute(flowId, cachedPreflight) {
       createdAt: Date.now(), stateKey: crypto.createHash('sha1').update([...labels].sort().join('|')).digest('hex').slice(0, 12),
       target: credNames.length ? { flowId, open: 'settings', tab: 'credentials', name: credNames[0] } : { flowId, open: 'preflight' } });
   }
+  // spec 28: the flow review (blocking findings of the lint, or an AI review with open proposals)
+  try { const rv = deps.reviewItem?.(flow); if (rv) out.push(rv); } catch (e) { console.error('attention review', e.message); }
   return out;
 }
 
@@ -94,7 +97,7 @@ function compute(flowId, cachedPreflight) {
  *  API, chat) that ended in error/timeout/interrupted. Only a COMPLETE run that succeeds clears it; stopped runs and
  *  manual single-step tests change nothing. */
 function track(flowId, r) {
-  if (!r || r.status === 'stopped') return;
+  if (!r || r.status === 'stopped' || r.rehearsal || r.trigger === 'rehearsal') return; // a rehearsal (spec 28) is not news
   const fullRun = !r.only;
   if (FAILED.has(r.status) && (fullRun || !['manual', 'chat'].includes(r.trigger))) {
     const [stepId, st] = Object.entries(r.steps || {}).find(([, x]) => FAILED.has(x.status)) || [];
@@ -104,6 +107,8 @@ function track(flowId, r) {
 }
 
 const SEV = { error: 0, action: 1, warn: 2 };
+// spec 28: review.js computes the lint in the background and calls this when it has news
+export const refreshFlow = (flowId) => refresh(flowId);
 /** All items, worst first then oldest first, each with `dismissed`. */
 export function list() {
   const all = [...items.values()].flat().map((i) => ({ ...i, dismissed: state.dismissed[i.id] === i.stateKey }));

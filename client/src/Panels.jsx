@@ -9,6 +9,7 @@ import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.
 import ContextBox from './Context.jsx';
 import ContextSources, { FsPicker } from './Sources.jsx';
 import RequirementsEditor from './Requirements.jsx';
+import ReviewPanel from './ReviewPanel.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -286,8 +287,8 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
     <div className="panel">
       <div className="panel-head"><b>{flow.name}</b><span className="muted small">{flow.steps.length} steps</span></div>
       <div className="tabs">
-        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones'], ['versions', 'Versiones'], ['external', 'Invocar']].map(([k, l]) => (
-          <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
+        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['review', '🩺 Revisión'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones'], ['versions', 'Versiones'], ['external', 'Invocar']].map(([k, l]) => (
+          <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)} data-testid={`flow-tab-${k}`}>{l}</button>
         ))}
       </div>
       {tab === 'chat' && (
@@ -352,6 +353,7 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
           </details>
         </div>
       )}
+      {tab === 'review' && <ReviewPanel flow={flow} running={running} onChange={onChange} />}
       {tab === 'external' && <div className="panel-body pad"><ExternalInvoke flow={flow} /></div>}
       {tab === 'versions' && <div className="panel-body pad"><Versions flow={flow} onChange={onChange} /></div>}
       {tab === 'memory' && <Memory flowId={flow.id} scope="_flow" items={flow.memory} />}
@@ -385,7 +387,7 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
                 <li key={r.id} onClick={() => api.get(`/api/flows/${flow.id}/runs/${r.id}`).then(setRunDetail)}>
                   <span className={`status s-${r.status}`}>{r.status}</span>
                   <span>{new Date(r.startedAt).toLocaleString()}</span>
-                  <span className="chip">{r.trigger}{r.only ? ' · 1 step' : ''}</span>
+                  <span className="chip">{r.trigger === 'rehearsal' ? '🧪 ensayo' : r.trigger}{r.only ? ' · 1 step' : ''}</span>
                   <span className="muted small grow">{r.input}</span>
                   {r.totals && <span className="muted small">{Math.round((r.totals.durationMs || 0) / 1000)} s{r.totals.costUsd ? ` · ≈US$${r.totals.costUsd.toFixed(3)}` : ''}</span>}
                   {r.status === 'running' && <button className="danger small" onClick={(e) => { e.stopPropagation(); api.post(`/api/flows/${flow.id}/runs/${r.id}/cancel`).then(() => api.get(`/api/flows/${flow.id}/runs`).then(setRuns)).catch(() => {}); }}>■ Cancelar</button>}

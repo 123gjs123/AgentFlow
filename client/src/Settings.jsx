@@ -4,9 +4,11 @@ import React, { useEffect, useState } from 'react';
 import { api } from './api.js';
 import { Modal, ExternalInvoke } from './Help.jsx';
 import { CredentialsPanel } from './Credentials.jsx';
+import { PoliciesEditor } from './ReviewPanel.jsx';
 
 export const SETTINGS_TABS = [
   ['credentials', 'Credenciales'],
+  ['policies', 'Reglas'],
   ['integrations', 'Integraciones'],
   ['cli', 'Claude Code CLI'],
   ['notifications', 'Notificaciones'],
@@ -26,6 +28,7 @@ export function SettingsModal({ tab, setTab, onClose, flow, focusName }) {
         </nav>
         <div className="help-body" role="tabpanel">
           {tab === 'credentials' && <><h3>Credenciales</h3><CredentialsPanel focusName={focusName} /></>}
+          {tab === 'policies' && <MachinePolicies />}
           {tab === 'integrations' && (
             <>
               <h3>Integraciones</h3>
@@ -39,6 +42,22 @@ export function SettingsModal({ tab, setTab, onClose, flow, focusName }) {
         </div>
       </div>
     </Modal>
+  );
+}
+
+/** Spec 28: rules of this installation (every flow): the team's unwritten rules and the lessons learned. */
+function MachinePolicies() {
+  const [list, setList] = useState(null);
+  const [msg, setMsg] = useState('');
+  useEffect(() => { api.get('/api/policies').then((r) => setList(r.machine)).catch((e) => setMsg(e.message)); }, []);
+  const save = async (next) => { const r = await api.put('/api/policies', { policies: next }); setList(r.machine); setMsg('Guardado: se aplica a todos los flujos desde su próxima ejecución.'); };
+  return (
+    <div data-testid="machine-policies">
+      <h3>Reglas de esta instalación</h3>
+      <p className="muted small">Lo que tu equipo no quiere repetir en cada flujo: ambiente por defecto, autor de los commits, no escribir en sistemas externos sin pedido, lecciones aprendidas («el CLI corta Bash a los 10 min»). Valen para TODOS los flujos. Cada regla dice qué garantiza la app y qué no. Las de un solo flujo están en su pestaña 🩺 Revisión.</p>
+      {!list ? <p className="muted">{msg || 'Cargando…'}</p> : <PoliciesEditor scope="machine" value={list} onSave={save} />}
+      {msg && list && <p className="small" role="status">{msg}</p>}
+    </div>
   );
 }
 

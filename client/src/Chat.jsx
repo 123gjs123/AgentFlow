@@ -65,9 +65,19 @@ export default function Chat({ flowId, chatKey, placeholder, step, onOpenStep, r
   const mark = (msg, p, fields) => setMsgs((l) => l.map((x) => (x.id === msg.id ? { ...x, proposals: x.proposals.map((q) => (q.id === p.id ? { ...q, ...fields } : q)) } : x)));
   async function apply(msg, p) {
     setErr('');
+    // spec 28: what widens access (tools that change things, permissions, commands, every flow) is confirmed apart
+    const confirmWiden = (list) => window.confirm(`Esta propuesta AMPLÍA EL ACCESO:\n\n${list.map((w) => `• ${w}`).join('\n')}\n\n¿Aplicarla igual?`);
+    if (p.widens?.length && !confirmWiden(p.widens)) return;
+    const send = (extra) => api.post(`/api/flows/${flowId}/chat/${ownerKey(msg)}/apply`, { messageId: findOrigin(msg), proposalId: p.id, ...(runId ? { runId } : {}), ...extra });
     try {
       await pendingSave.flush();
-      const r = await api.post(`/api/flows/${flowId}/chat/${ownerKey(msg)}/apply`, { messageId: findOrigin(msg), proposalId: p.id, ...(runId ? { runId } : {}) });
+      let r;
+      // the list the person saw travels with the confirmation: if the server finds something else widens, it asks again
+      try { r = await send(p.widens?.length ? { confirmWiden: p.widens } : {}); }
+      catch (e) {
+        if (e.code !== 'WIDEN_CONFIRM' || !confirmWiden(e.body?.widens || [e.message])) throw e;
+        r = await send({ confirmWiden: e.body?.widens || [] });
+      }
       mark(msg, p, { applied: true, ...(r?.runId ? { runId: r.runId } : {}) });
       onApplied?.(p, r);
     } catch (e) { setErr(e.message); }
@@ -162,7 +172,19 @@ function stepRows(patch, step, vars, prefix = '') {
     return [{ key: prefix + k, label: prefix + k, old: step?.[k], val: v }];
   });
 }
-const TITLES = { step: '✏️ Cambio propuesto al step', flow: '✏️ Cambio propuesto al flujo', file: '📝 Cambio propuesto a un archivo', output: '📦 Entregable corregido', memory: '🧷 Guardar en memoria', run: '▶ Ejecución propuesta' };
+const TITLES = { step: '✏️ Cambio propuesto al step', flow: '✏️ Cambio propuesto al flujo', file: '📝 Cambio propuesto a un archivo', output: '📦 Entregable corregido', memory: '🧷 Guardar en memoria', run: '▶ Ejecución propuesta', policy: '📜 Regla propuesta', structure: '➕ Step nuevo propuesto' };
+/** Spec 28: a policy (rule) with what the app guarantees and what it does not. */
+export function PolicyView({ policy }) {
+  if (!policy) return null;
+  return (
+    <div className="diff">
+      <div className="label">{policy.scope === 'machine' ? 'para TODOS los flujos de esta instalación' : 'para este flujo'} · {policy.label || policy.type}</div>
+      <pre className="new">{policy.text}{Object.keys(policy.params || {}).length ? `\n${Object.entries(policy.params).map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}</pre>
+      {policy.guarantee && <div className="small ok-text">✓ Garantiza: {policy.guarantee}</div>}
+      {policy.notGuaranteed && <div className="small warn-text">✗ No garantiza: {policy.notGuaranteed}</div>}
+    </div>
+  );
+}
 
 /**
  * A proposal from a chat (spec 25): nothing changes until the user presses the button. The conversation can go on:
@@ -199,7 +221,17 @@ function Proposal({ p, step, vars, inBreak, locked, onApply, onDiscard }) {
   } else if (kind === 'run') {
     action = 'Ejecutar';
     body = <div className="diff"><div className="label">{p.patch?.stepName ? `step “${p.patch.stepName}”` : 'flujo completo'}</div>{p.patch?.input ? <pre className="new">{p.patch.input}</pre> : <div className="muted small">sin input</div>}</div>;
+  } else if (kind === 'policy') {
+    body = <PolicyView policy={p.policy} />;
+  } else if (kind === 'structure') {
+    body = (p.patch?.addSteps || []).map((n, i) => (
+      <div className="diff" key={i}>
+        <div className="label">después de «{n.after}»: {n.kind === 'command' ? 'step de comando' : 'step'} «{n.name}»</div>
+        <pre className="new">{n.command || n.task || ''}</pre>
+      </div>
+    ));
   }
+  if (p.error && !blocked) blocked = p.error;
   const done = p.applied || p.discarded;
   return (
     <div className={`proposal${p.discarded ? ' discarded' : ''}`} data-kind={kind}>
@@ -208,10 +240,11 @@ function Proposal({ p, step, vars, inBreak, locked, onApply, onDiscard }) {
         {p.discarded && <span className="chip">descartado</span>}
       </div>
       {body}
+      {p.widens?.length > 0 && !done && <div className="widens small" data-testid="widens">⚠ Amplía el acceso (se confirma aparte): {p.widens.join(' · ')}</div>}
       {blocked && <div className="muted small">⚠ {blocked}</div>}
       {!done && (
         <div className="proposal-actions">
-          <button className="primary small" disabled={!!blocked || locked} title={locked ? 'El flujo se está ejecutando' : undefined} onClick={onApply}>{action}</button>
+          <button className={`${p.widens?.length ? 'danger' : 'primary'} small`} disabled={!!blocked || locked} title={locked ? 'El flujo se está ejecutando' : undefined} onClick={onApply}>{p.widens?.length ? `${action} (amplía acceso)` : action}</button>
           <button className="ghost small" onClick={onDiscard}>Descartar</button>
           <span className="muted small">o sigue conversando para ajustarla</span>
         </div>

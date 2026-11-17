@@ -17,7 +17,7 @@ const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { retur
 const ss = { get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} } };
 const urlFlow = () => { try { return new URLSearchParams(location.search).get('flow'); } catch { return null; } };
 // ?open= from a desktop notification (spec 27): whitelist, read once at load (openFlow rewrites the URL).
-const URL_OPEN = (() => { try { const v = new URLSearchParams(location.search).get('open'); return ['review', 'attention'].includes(v) ? v : null; } catch { return null; } })();
+const URL_OPEN = (() => { try { const v = new URLSearchParams(location.search).get('open'); return ['review', 'attention', 'flowreview'].includes(v) ? v : null; } catch { return null; } })();
 const rid = (p) => p + Math.random().toString(36).slice(2, 10);
 
 function newStep(kind, name) {
@@ -108,6 +108,7 @@ export default function App() {
       setFlows(list);
       const id = wanted.map((w) => list.find((f) => f.id === w)?.id).find(Boolean) || list[0]?.id;
       if (id) openFlow(id, { review: URL_OPEN === 'review' });
+      if (URL_OPEN === 'flowreview') setFlowTab('review');
     }).catch(() => {});
   }, []);
   useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
@@ -171,6 +172,7 @@ export default function App() {
     if (t.open === 'settings') { setSettings({ tab: t.tab || 'credentials', name: t.name || null }); return; }
     if (t.open === 'review' && t.runId) { setPaused({ runId: t.runId, nonce: Date.now() }); setReviewOpen(true); return; }
     if (t.open === 'run' && t.runId) { setSelectedId(null); setSelectedEdge(null); setFlowTab('runs'); setFocusRun({ runId: t.runId, n: Date.now() }); return; }
+    if (t.open === 'flowreview') { setSelectedId(null); setSelectedEdge(null); setFlowTab('review'); return; } // spec 28
     if (t.open === 'preflight') setPfModal({});
   }
 
