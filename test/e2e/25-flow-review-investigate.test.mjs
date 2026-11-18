@@ -144,3 +144,32 @@ test('un revisor que devuelve JSON roto: un reintento lo repara (no se pierde su
   assert.equal(rv.roles.constructive.ok, true);
   assert.ok(rv.notVerifiable.includes('reparado'));
 });
+
+test('búsqueda determinística: los textos que esperaban las aserciones fallidas se buscan en git (-S) y se dice en qué rama está el arreglo', async () => {
+  const repo = path.join(s.dirs.work, `repo-s-${Date.now()}`);
+  fs.mkdirSync(repo, { recursive: true });
+  const git = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8' });
+  git('init', '-q', '-b', 'main'); fs.writeFileSync(path.join(repo, 'ui.txt'), 'Limit per bet: 100'); git('add', '.'); git('commit', '-qm', 'base');
+  git('checkout', '-q', '-b', 'fix/limit-texts'); fs.writeFileSync(path.join(repo, 'ui.txt'), 'Bet limit: 100'); git('commit', '-qam', 'Update set-limit texts');
+  git('checkout', '-q', 'main');
+  const auto = cmd('Auto', `Write-Output "1) AssertionError: limit text: expected 'Limit per bet: 100' to equal 'Bet limit: 100'"`, { id: 's_sx' });
+  const f = await s.flow('Revisión -S', [auto], [], { cwd: repo, description: 'S' });
+  const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '', breakpoints: false });
+  await s.waitRun(f.id, runId);
+  await s.uiOk('PUT', `/api/flows/${f.id}`, { ...(await s.getFlow(f.id)), description: `S [[mock:review-inv ${JSON.stringify({ facts: [] })}]] [[mock:review-cons ${JSON.stringify({ findings: [] })}]] [[mock:review-adv ${JSON.stringify({ findings: [] })}]]` });
+  const n0 = s.calls().length;
+  const { reviewId } = await s.uiOk('POST', `/api/flows/${f.id}/reviews`, {});
+  const rv = await until(async () => { const r = await s.uiOk('GET', `/api/flows/${f.id}/reviews/${reviewId}`); return r.status !== 'running' ? r : null; }, 30000);
+  assert.equal(rv.status, 'done');
+  assert.deepEqual(rv.gitSearch.texts.slice(0, 2), ['Bet limit: 100', 'Limit per bet: 100'], 'primero el texto esperado');
+  const hit = rv.facts.find((x) => /«Bet limit: 100»/.test(x.claim));
+  assert.ok(hit, JSON.stringify(rv.facts));
+  assert.match(hit.claim, /Update set-limit texts/);
+  assert.match(hit.claim, /ramas: fix\/limit-texts/);
+  assert.match(hit.claim, /La rama actual NO lo tiene/);
+  assert.ok(hit.evidence[0].verified && /-S Bet limit: 100/.test(hit.evidence[0].ref));
+  const invCall = s.callsSince(n0).find((c) => /Revisión de flujo — investigador/.test(c.system));
+  assert.match(invCall.prompt, /Búsqueda en git que ya hizo la app[\s\S]*fix\/limit-texts/);
+  const rev = s.callsSince(n0).find((c) => /Revisión de flujo — rol/.test(c.system));
+  assert.match(rev.prompt, /Hechos investigados[\s\S]*Bet limit: 100/, 'llega a los revisores como hecho');
+});

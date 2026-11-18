@@ -78,7 +78,15 @@ On the first real test (SBK-10110), the coordinator:
 - sent the ticket only to automation;
 - listed the missing team skills.
 
+## Read-only git (2026-11-18)
+
+In the first real test the coordinator could not check a ticket branch's new commits. It now gets the review's read-only git (spec 28, `bin/review-git.mjs`) on the flow's repositories: the working folder and the absolute folders named in its variables.
+
+- **Runs:** `Bash(node …/review-git.mjs:*)` is added to its allowed tools, `Bash` to its built-in tools, the repos to `--add-dir` and `AFS_REVIEW_REPOS` to its environment. Its system prompt gains a "Git de solo lectura" block. Any other Bash command stays unapproved, and the run log says "🧭 Git de solo lectura: N repositorio(s)".
+- **Its chat:** the same, with write tools still disallowed.
+- **Never** for other steps, a command coordinator, a coordinator in `bypassPermissions` (Bash would be open), or a flow without git repositories.
+- e2e: `26-*` "el coordinador decide con git de solo lectura".
+
 ## Open questions
 
-- Whether the coordinator should get read-only git, as the review has (spec 28). In the first test it could not check the branch's new commits.
 - A "for each ticket" fan-out, for several tickets in parallel phases.

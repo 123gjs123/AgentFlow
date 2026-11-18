@@ -125,7 +125,11 @@ E2E: `test/e2e/25-flow-review-investigate.test.mjs`.
 | Causes found | None beyond the summary | A run hung 60 minutes on a DNS error; the set-limit failures; the fix commit is only in `synergy-web` main (from git), so the Alcance step misses it by searching only branches and PRs |
 | Policy conflict | Proposed SynergyNew | Leaves the SynergyNew question to the person |
 
-Still missing: the investigator did not look in the test repo for the branch that already updates the set-limit texts (PR #19), even though the prompt asks for it. The next step is to make that search deterministic, running `log --all -S` on the expected texts of failing assertions.
+The investigator did not look in the test repo for the branch that already updates the set-limit texts (PR #19), even though the prompt asks for it. That search is now **deterministic** (2026-11-18, `review.searchAssertionTexts`, e2e `25-*` "búsqueda determinística"):
+
+- The app reads the failing assertions of the recent runs and takes the texts they expected, then the texts they got. It understands chai `expected 'A' to (deeply) equal/include 'B'`, jest/playwright `Expected: "B"` / `Received: "A"` and `toHaveText("B")`. At most 6 texts, expected first.
+- For each text and each flow repository (up to 6, one worker per repo, 90 s in total) it runs `git log --all --since=6.months -S "<text>" -n 5`. For the newest hit it adds the branches that contain the commit and whether the checked-out branch already has it. Without `--since`, the biggest real repo took 47 s per text; with it, 5 s.
+- Every hit is a verified fact (`source: 'git-search'`, git evidence). It goes first in `rv.facts`, to the investigator's prompt ("Búsqueda en git que ya hizo la app") and to the reviewers' "Hechos investigados". `rv.gitSearch` keeps the texts and the number of hits. When nothing matches, the investigator is told that too.
 
 ## Not done (deferred)
 

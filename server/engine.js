@@ -547,7 +547,11 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       rctx.policyNotes = rt.notes;
       rctx.rehearsal = !!run.rehearsal;
       const prompt = P.runUserPrompt(flow, step, ctx.input, upstream, data, rctx);
-      const system = P.runSystemPrompt(flow, step, rctx);
+      const cgit = coordinatorGit(flow, step);
+      let system = P.runSystemPrompt(flow, step, rctx);
+      if (cgit) system += `
+
+${cgit.block}`;
       addRefInputs();
       rs.inputView = { kind: 'ai', mode: step.input?.mode || 'full', prompt: clipS(prompt, 60000), system: clipS(system, 30000), upstream: upMeta.map((m, i) => ({ ...m, summarized: !!upstream[i].summary })) };
       const common = cliOptions(step, cx);
@@ -556,6 +560,13 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       // The CLI cuts every Bash command at 10 min by default: a step that runs long suites raises it (bashTimeoutMin)
       const bashMs = clampInt(step.bashTimeoutMin, 1, 120, 0) * 60000;
       common.env = { ...rt.env, ...(bashMs ? { BASH_DEFAULT_TIMEOUT_MS: String(bashMs), BASH_MAX_TIMEOUT_MS: String(bashMs) } : {}) };
+      if (cgit) {
+        common.allowedTools = `${common.allowedTools || ''} ${cgit.allowed}`.trim();
+        if (typeof common.tools === 'string' && !/(^|,)Bash(,|$)/.test(common.tools)) common.tools += ',Bash';
+        common.addDirs = [...(common.addDirs || []), ...cgit.repos];
+        common.env = { ...common.env, ...cgit.env };
+        log({ kind: 'hook_log', text: `🧭 Git de solo lectura: ${cgit.repos.length} repositorio(s) del flujo` });
+      }
       // Rehearsal: plan mode (Claude describes what it would do, changes nothing) and no write tools at all
       if (run.rehearsal) { common.permissionMode = 'plan'; common.disallowedTools = [common.disallowedTools, CHAT_DISALLOWED].filter(Boolean).join(' '); }
       if (rt.disallowed.length || rt.settings || rt.notes.length) rs.inputView.policies = { blocked: rt.disallowed, settings: rt.settings, notes: rt.notes, env: Object.keys(rt.env) };
@@ -1144,6 +1155,13 @@ export const setReviewContextProvider = (fn) => { reviewContextFn = fn; };
 // …and the same read-only investigation powers as the review (evidence files + read-only git), from review.js too
 let reviewInvestigationFn = () => null;
 export const setReviewInvestigationProvider = (fn) => { reviewInvestigationFn = fn; };
+let gitAccessFn = () => null;
+export const setGitAccessProvider = (fn) => { gitAccessFn = fn; };
+/** Spec 30: the coordinator decides with read-only git on the flow's repos (never with bypassPermissions: Bash would open). */
+export function coordinatorGit(flow, step) {
+  if (!step?.coordinator || step.kind === 'command' || step.permissionMode === 'bypassPermissions') return null;
+  try { return gitAccessFn(flow) || null; } catch { return null; }
+}
 const reviewContext = (flow) => reviewContextFn(flow);
 
 async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null, runId = null, external = false }) {
@@ -1188,6 +1206,8 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   if (origin === 'global') parts.push('(Este mensaje llegó desde el chat general y fue enrutado a ti.)');
   let inv = null;
   if (isReview) { try { inv = reviewInvestigationFn(flow); } catch { inv = null; } if (inv) parts.push(inv.block); }
+  const cgit = isReview || isFlow ? null : coordinatorGit(flow, step);
+  if (cgit) parts.push(cgit.block);
   parts.push(message);
 
   // Spec 25: a chat converses and proposes; it never changes anything itself. Only read tools, whatever the step's
@@ -1195,6 +1215,8 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   let allowedTools = readOnlyTools([isReview ? 'Read Grep Glob' : isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...(isReview ? [] : access.tools)].filter(Boolean).join(' '));
   if (isReview) for (const s of flow.steps) { const ref = s.kind === 'skill' ? findSkill(s.skillRef, flow.cwd) : s.kind === 'agent' ? findAgent(s.agentRef, flow.cwd) : null; if (ref) access.addDirs.push(path.dirname(ref.path)); }
   if (inv) { allowedTools = inv.allowed; access.addDirs.push(inv.dir, ...inv.repos, ...(inv.readDirs || [])); }
+  if (cgit) { allowedTools = `${allowedTools} ${cgit.allowed}`.trim(); access.addDirs.push(...cgit.repos); }
+  const chatEnv = inv ? inv.env : cgit ? cgit.env : null;
   const addDirs = [...access.addDirs];
   const permissionMode = undefined;
   const disallowedTools = CHAT_DISALLOWED;
@@ -1219,14 +1241,14 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
     resume: sessionId || undefined,
     allowedTools, disallowedTools, addDirs, permissionMode,
-    ...(inv ? { env: inv.env } : {}),
+    ...(chatEnv ? { env: chatEnv } : {}),
     cwd: inv ? inv.dir : flowCwd(flow), signal: controller.signal, onEvent,
   });
   // Resumed session may have been deleted/expired: retry once fresh with the full context.
   if (r.isError && sessionId && !controller.signal.aborted && /session|conversation/i.test(r.error || '')) {
     onEvent({ kind: 'hook_log', text: 'Sesión anterior no disponible; iniciando una nueva.' });
     parts[0] = block.text;
-    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: chatSystem, ...(isReview ? { strictMcp: true } : {}), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, disallowedTools, addDirs, permissionMode, ...(inv ? { env: inv.env } : {}), cwd: inv ? inv.dir : flowCwd(flow), signal: controller.signal, onEvent });
+    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: chatSystem, ...(isReview ? { strictMcp: true } : {}), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, disallowedTools, addDirs, permissionMode, ...(chatEnv ? { env: chatEnv } : {}), cwd: inv ? inv.dir : flowCwd(flow), signal: controller.signal, onEvent });
   }
   if (activeChats.get(ck) === controller) activeChats.delete(ck);
 

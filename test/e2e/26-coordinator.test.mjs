@@ -125,3 +125,36 @@ test('chat general con coordinador: atiende él, consulta al step que sabe y res
   // the step answered in its OWN chat (its context and memory)
   assert.ok((await s.uiOk('GET', `/api/flows/${f.id}/chat/s_cs`)).some((m) => m.role === 'user' && /Consulta del coordinador/.test(m.text)));
 });
+
+test('el coordinador decide con git de solo lectura sobre los repos del flujo (corrida y chat); otros steps no lo reciben', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const repo = path.join(s.dirs.work, `coord-repo-${Date.now()}`);
+  fs.mkdirSync(repo, { recursive: true });
+  const git = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8' });
+  git('init', '-q'); fs.writeFileSync(path.join(repo, 'a.txt'), 'x'); git('add', '.'); git('commit', '-qm', 'SBK-1 fix');
+  const coord = role('Coordinador', '[[mock:say decidido]]', { id: 's_cg', coordinator: true, allowedTools: 'Read Grep Glob' });
+  const other = role('Otro', '[[mock:say listo]]', { id: 's_og', allowedTools: 'Read' });
+  const f = await s.flow('Coord git', [coord, other], [['s_cg', 's_og']]);
+  const g = await s.getFlow(f.id); g.vars = { ...(g.vars || {}), code_clones: `synergy=${repo}` }; await s.uiOk('PUT', `/api/flows/${f.id}`, g);
+  const n0 = s.calls().length;
+  const r = await run(f.id);
+  assert.equal(r.status, 'success');
+  const calls = s.callsSince(n0);
+  const arg = (c, k) => { const i = c.argv.indexOf(k); return i >= 0 ? c.argv[i + 1] : ''; };
+  const cc = calls.find((c) => /decidido/.test(c.prompt) || /Coordinador/.test(c.append || ''));
+  const oc = calls.find((c) => c !== cc && /listo/.test(c.prompt));
+  assert.match(arg(cc, '--allowedTools'), /Bash\(node .*review-git\.mjs:\*\)/, 'el coordinador recibe git de solo lectura');
+  assert.match(arg(cc, '--tools'), /(^|,)Bash(,|$)/);
+  assert.match(cc.append || cc.system, /Git de solo lectura/);
+  assert.ok(!/review-git/.test(arg(oc, '--allowedTools')), 'los demás steps no');
+  assert.ok(r.steps.s_cg.events.some((e) => /Git de solo lectura: 1 repositorio/.test(e.text || '')));
+  // chat with the coordinator: the same powers, still no write tools
+  const n1 = s.calls().length;
+  await s.uiOk('POST', `/api/flows/${f.id}/chat/s_cg`, { message: '¿la rama de SBK-1 tiene commits nuevos?' });
+  const ch = await until(async () => s.callsSince(n1).find((c) => /commits nuevos/.test(c.prompt)), 15000);
+  assert.match(arg(ch, '--allowedTools'), /review-git\.mjs/);
+  assert.match(ch.prompt, /Git de solo lectura/);
+  assert.match(arg(ch, '--disallowedTools'), /Edit/);
+});
