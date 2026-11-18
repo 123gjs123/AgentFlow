@@ -400,3 +400,9 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .policy-row { border-bottom: 1px solid var(--line); padding: 4px 0; }
 .policy-add { margin-top: 8px; gap: 6px; }
 .policy-add input, .policy-add select { min-width: 120px; }
+
+/* spec 30: the general chat as a work table */
+.chat-table { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 10px; border-top: 1px solid var(--line); background: var(--bg2); }
+.chat-table .chip a { margin-left: 4px; color: var(--muted); }
+.mention-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px 10px; border-top: 1px solid var(--line); background: var(--bg3); }
+.mention-list button.active { border-color: var(--accent); }

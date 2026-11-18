@@ -297,7 +297,7 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
         ))}
       </div>
       {tab === 'chat' && (
-        <Chat flowId={flow.id} chatKey="_global" vars={flow.vars} onOpenStep={onOpenStep}
+        <Chat flowId={flow.id} chatKey="_global" flow={flow} vars={flow.vars} onOpenStep={onOpenStep}
           locked={running ? 'El flujo se está ejecutando y sigue su proceso. El chat vuelve cuando termine; los steps en break se conversan desde su ventana de revisión.' : ''}
           placeholder="Habla en lenguaje natural. Un enrutador (Haiku) decide qué step, agente, skill o rol responde —o si conviene ejecutar algo, que te propone para que confirmes— y verás por qué. La respuesta queda también en el chat de ese step." />
       )}

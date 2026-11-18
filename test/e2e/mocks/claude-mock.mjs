@@ -79,6 +79,11 @@ if (/verificador estricto/.test(system)) { // assertion judge
 }
 // spec 28: flow reviewers. The dossier carries the flow description, where tests put
 // [[mock:review-cons <json>]] / [[mock:review-adv <json>]] / [[mock:review-sleep <s>]] / [[mock:review-garbage]]
+// spec 30: with several steps at the table, who answers: the first participant listed (deterministic)
+if (/conversa con varios steps a la vez/.test(system)) {
+  const first = (prompt.match(/Participantes:\n- ([^(]+?) \(/) || [])[1] || '';
+  await finish(JSON.stringify({ steps: [first.trim()], reason: 'mock: el primero de la mesa' }));
+}
 // the review's JSON repair: answers a fixed object
 if (/^Recibes un texto que debía ser un único objeto JSON/.test(system)) await finish('{"findings":[],"notVerifiable":["reparado"]}');
 // [[mock:review-inv <json>]]: the investigator (phase 0); without it, it finds nothing

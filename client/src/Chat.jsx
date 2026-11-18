@@ -13,9 +13,19 @@ const md = (t) => ({ __html: DOMPurify.sanitize(marked.parse(t || '', { breaks: 
  * Chat bound to a key: a step id, '_flow' or '_global'.
  * Shows the internal process (tools/thinking) of each answer, proposals to apply and remembered facts.
  */
-export default function Chat({ flowId, chatKey, placeholder, step, onOpenStep, runId, vars, onApplied, compact, locked }) {
+const fold = (t) => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+export default function Chat({ flowId, chatKey, placeholder, step, onOpenStep, runId, vars, onApplied, compact, locked, flow }) {
   const [msgs, setMsgs] = useState([]);
   const [text, setText] = useState('');
+  // spec 30: the general chat is a work table: @Step talks with that step, @Other joins it, @Coordinador goes back
+  const table = chatKey === '_global' && flow;
+  const [participants, setParticipants] = useState(flow?.chatParticipants || []);
+  useEffect(() => { if (table) setParticipants(flow.chatParticipants || []); }, [table, flow?.id, JSON.stringify(flow?.chatParticipants || [])]);
+  const coord = table ? flow.steps.find((x) => x.coordinator) : null;
+  const mention = table ? /(?:^|\s)@([^@\n]{0,40})$/.exec(text) : null;
+  const options = mention ? [...(coord ? [coord] : []), ...flow.steps.filter((x) => !x.coordinator)].filter((x) => fold(x.name).includes(fold(mention[1]).trim())).slice(0, 8) : [];
+  const pick = (x) => setText(text.slice(0, text.length - mention[1].length) + x.name + ' ');
+  const setTable = (ids) => api.put(`/api/flows/${flowId}/chat/_global/participants`, { ids }).then((r) => setParticipants(r.participants)).catch((e) => setErr(e.message));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const live = useRef({}); // messageId -> streaming text
@@ -26,6 +36,7 @@ export default function Chat({ flowId, chatKey, placeholder, step, onOpenStep, r
     setMsgs([]); setErr('');
     api.get(`/api/flows/${flowId}/chat/${chatKey}`).then((m) => alive && setMsgs(m)).catch((e) => setErr(e.message));
     const off = onWs((m) => {
+      if (m.type === 'chat.participants' && m.flowId === flowId && chatKey === '_global') { setParticipants(m.participants || []); return; }
       if (m.flowId !== flowId || m.key !== chatKey) return;
       if (m.type === 'chat.message' || m.type === 'chat.done') {
         setMsgs((list) => { const i = list.findIndex((x) => x.id === m.message.id); if (i < 0) return [...list, m.message]; const c = [...list]; c[i] = { ...c[i], ...m.message, events: m.message.events?.length ? m.message.events : c[i].events }; return c; });
@@ -98,9 +109,28 @@ export default function Chat({ flowId, chatKey, placeholder, step, onOpenStep, r
       </div>
       {err && <div className="error-bar">{err}</div>}
       {locked && <div className="chat-locked small" data-testid="chat-locked">⏵ {locked}</div>}
+      {table && (
+        <div className="chat-table small" data-testid="chat-table">
+          {participants.length ? (
+            <>
+              <span>💬 En la mesa:</span>
+              {participants.map((id) => { const x = flow.steps.find((y) => y.id === id); return x ? <span key={id} className="chip">@{x.name} <a title="Sacarlo de la conversación" onClick={() => setTable(participants.filter((p) => p !== id))}>✕</a></span> : null; })}
+              <span className="muted">{participants.length > 1 ? `responde a quien nombres; si no nombras a nadie, ${coord ? 'el coordinador decide' : 'se elige'} quién` : 'le hablas a este step'}</span>
+              <a onClick={() => setTable([])}>{coord ? `volver a 🧭 ${coord.name}` : 'volver al chat general'}</a>
+            </>
+          ) : <span className="muted">{coord ? `Te atiende 🧭 ${coord.name}.` : 'Responde el flujo.'} Escribe @ y el nombre de un step para hablar con él (y @ otro para sumarlo a la mesa).</span>}
+        </div>
+      )}
+      {options.length > 0 && (
+        <div className="mention-list" data-testid="mention-list">
+          {options.map((x, i) => <button key={x.id} className={`ghost small${i === 0 ? ' active' : ''}`} onMouseDown={(e) => { e.preventDefault(); pick(x); }}>{x.coordinator ? '🧭 ' : '@'}{x.name}</button>)}
+          <span className="muted small">Tab elige el primero</span>
+        </div>
+      )}
       <div className="chat-input">
         <textarea value={text} disabled={!!locked} onChange={(e) => setText(e.target.value)} placeholder="Escribe… (Enter envía · Alt+Enter nueva línea)" rows={3}
           onKeyDown={(e) => {
+            if (e.key === 'Tab' && options.length) { e.preventDefault(); pick(options[0]); return; }
             if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
             // Alt+Enter (or Shift+Enter) = new line; Enter alone = send.
             if (e.altKey) {

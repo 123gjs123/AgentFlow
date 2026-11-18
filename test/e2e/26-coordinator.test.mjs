@@ -61,6 +61,49 @@ test('un solo coordinador por flujo: marcar otro desmarca el anterior', async ()
   assert.equal(h.steps.find((x) => x.id === 's_a').coordinator, undefined);
 });
 
+test('mesa de trabajo: @Step habla con ese step, @Otro lo suma, nombrados responden, sin nombrar decide el coordinador, @Coordinador vuelve', async () => {
+  const coord = role('Coordinador', 'Clasifica', { id: 's_mc', coordinator: true });
+  const a = role('Ejecutar en qa', 'Corre qa', { id: 's_mq' });
+  const b = role('Selección de casos', 'Elige casos', { id: 's_ms' });
+  const f = await s.flow('Mesa', [coord, a, b], [['s_mc', 's_mq'], ['s_mq', 's_ms']]);
+  const say = async (message) => {
+    const before = (await s.uiOk('GET', `/api/flows/${f.id}/chat/_global`)).length;
+    await s.uiOk('POST', `/api/flows/${f.id}/chat/_global`, { message });
+    return until(async () => { const l = await s.uiOk('GET', `/api/flows/${f.id}/chat/_global`); const fresh = l.slice(before); return fresh.length > 1 && !fresh.some((m) => m.status === 'running') ? fresh : null; }, 15000);
+  };
+  const who = (fresh) => fresh.filter((m) => m.role === 'assistant').map((m) => m.routedTo);
+  const n0 = s.calls().length;
+  // @ with the name (accents/case ignored) → that step answers, and the conversation stays with it
+  let r = await say('@ejecutar en QA ¿cómo te fue en qa?');
+  assert.deepEqual(who(r), ['Ejecutar en qa']);
+  assert.match(r.find((m) => m.role === "router").text, /Conversación con \*\*Ejecutar en qa\*\*/);
+  r = await say('¿y los fallos?');
+  assert.deepEqual(who(r), ['Ejecutar en qa'], 'sigue con ese step sin nombrarlo');
+  assert.ok(!s.callsSince(n0).some((c) => /enrutador de un flujo|Eres el COORDINADOR/.test(`${c.system}\n${c.append}`)), 'ni enrutador ni coordinador');
+  // @Other joins the table and answers (it was named)
+  r = await say('@Selección de casos sumate: ¿cubrimos eso?');
+  assert.deepEqual(who(r), ['Selección de casos']);
+  assert.deepEqual((await s.getFlow(f.id)).chatParticipants, ['s_mq', 's_ms']);
+  // nobody named → the coordinator decides who answers
+  const n1 = s.calls().length;
+  r = await say('¿qué hacemos con el ambiente?');
+  assert.match(r.find((m) => m.role === "router").text, /el coordinador elige: \*\*Ejecutar en qa\*\*/);
+  assert.deepEqual(who(r), ['Ejecutar en qa']);
+  assert.ok(s.callsSince(n1).some((c) => /Eres «Coordinador», el coordinador del flujo/.test(c.system || '')), 'decide con el rol del coordinador');
+  // both named → both answer
+  r = await say('@Ejecutar en qa y @Selección de casos opinen');
+  assert.deepEqual(who(r).sort(), ['Ejecutar en qa', 'Selección de casos']);
+  // an e-mail is not a mention; @Coordinador goes back
+  r = await say('mándalo a qa@empresa.com @Coordinador');
+  assert.deepEqual(who(r), ['Coordinador']);
+  assert.deepEqual((await s.getFlow(f.id)).chatParticipants, []);
+  // the ✕ / "volver" of the UI, and a new conversation, empty the table
+  await s.uiOk('PUT', `/api/flows/${f.id}/chat/_global/participants`, { ids: ['s_ms', 's_mc', 'no-existe'] });
+  assert.deepEqual((await s.getFlow(f.id)).chatParticipants, ['s_ms'], 'ni el coordinador ni steps inexistentes se sientan a la mesa');
+  await s.uiOk('DELETE', `/api/flows/${f.id}/chat/_global`);
+  assert.deepEqual((await s.getFlow(f.id)).chatParticipants, []);
+});
+
 test('chat general con coordinador: atiende él, consulta al step que sabe y responde con lo que ese step dijo', async () => {
   const coord = role('Coordinador', 'Clasifica pedidos', { id: 's_cc', coordinator: true });
   const casos = role('Casos', 'Diseña casos de prueba', { id: 's_cs' });

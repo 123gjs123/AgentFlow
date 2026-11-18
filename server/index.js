@@ -469,6 +469,7 @@ app.delete('/api/flows/:id/chat/:key', wrap((req) => {
   store.clearChat(id, key);
   const f = store.updateFlow(id, (fl) => {
     if (key === '_flow' || key === '_global') { fl.globalSessionId = null; fl.globalContextHash = null; }
+    if (key === '_global') fl.chatParticipants = []; // a new conversation starts with the coordinator
     const s = fl.steps.find((x) => x.id === key);
     if (s) { s.chatSessionId = null; s.chatContextHash = null; }
   });
@@ -500,6 +501,8 @@ app.post('/api/flows/:id/chat/:key/apply', wrap(async (req, res) => {
   // spec 28: a proposal that widens access needs its own confirmation (409 WIDEN_CONFIRM + the list otherwise)
   return engine.applyProposal(id, key, messageId, proposalId, { runId: typeof req.body?.runId === 'string' ? req.body.runId : ip?.runId || null, confirmWiden: wideOk(req.body?.confirmWiden) });
 }));
+// spec 30: who the general chat is talking with (@mentions); [] = back to the coordinator
+app.put('/api/flows/:id/chat/_global/participants', wrap((req) => { need(req.params.id); const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : []; return { participants: engine.setParticipants(req.params.id, ids) }; }));
 // Cancels only the chat's answer in progress: never a run (the flow keeps its process).
 app.post('/api/flows/:id/chat/:key/cancel', wrap((req) => { need(req.params.id); return { stopped: engine.stopChat(req.params.id, req.params.key) }; }));
 app.post('/api/flows/:id/chat/:key/discard', wrap((req) => engine.discardProposal(req.params.id, req.params.key, req.body?.messageId, req.body?.proposalId)));

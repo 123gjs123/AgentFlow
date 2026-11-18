@@ -30,6 +30,21 @@ Jira does not follow the plan either. Sprints drop and add work, a ticket analys
 
    A consulted step answers in its own chat, with its own context and memory. The coordinator then answers the person using those answers. Every exchange shows in the general chat, and the consultation tags are never shown. There is no second round of consultations, so no loops.
 
+4. **The general chat is a work table.** You talk with one step, or with several, and the coordinator decides who answers when that is unclear.
+
+   | You write | Who answers | Who is at the table afterwards |
+   |---|---|---|
+   | `@Step …` | That step, directly, with no router or coordinator in between | That step. Later messages without `@` go to it |
+   | `@Other …` while talking with someone | `Other` | Both |
+   | A message that names one or more of those at the table | The named ones | Unchanged |
+   | A message that names nobody, with several at the table | The one(s) the coordinator chooses. It decides with its role and model in one short call, and says why | Unchanged |
+   | `@Coordinador` / `@todos` / `@flujo`, the ✕ on each participant, "volver a 🧭 …", or "nueva conversación" | The coordinator | Nobody: back to the coordinator |
+
+   - Names are matched without accents or case, and the longest name wins. A step's id also works, and an e-mail address is not a mention.
+   - The table is `flow.chatParticipants`. It is machine state, not part of the definition. The coordinator never sits at it.
+   - `PUT /api/flows/:id/chat/_global/participants` changes the table, and a WebSocket `chat.participants` event updates the UI.
+   - The chat input autocompletes after `@` (Tab picks the first match). Above it, the UI shows who is at the table.
+
 ## Non-goals
 
 - The coordinator does not run anything from the chat: it proposes, and the person confirms (spec 25).

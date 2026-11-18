@@ -1649,9 +1649,38 @@ export async function globalChat(flowId, message, { external = false } = {}) {
   store.appendChat(flowId, key, routing);
   emit({ type: 'chat.message', flowId, key, message: routing });
 
-  // Spec 30: a flow with a 🧭 coordinator: the coordinator attends the general chat (it answers, consults a step, or
-  // proposes a run). The Haiku router is only for flows without one.
+  // Spec 30: @mentions. "@Step" makes the conversation be with that step (sticky); "@Other" adds it; with several,
+  // the coordinator (or the router, without one) picks who answers. "@Coordinador" / "@todos" goes back.
   const coord = flow.steps.find((s) => s.coordinator);
+  {
+    const before = participantsOf(flow);
+    const m = parseMentions(flow, message);
+    let next = before;
+    if (m.reset) next = [];
+    else if (m.ids.length) next = [...new Set([...before, ...m.ids])].slice(0, 6);
+    if (JSON.stringify(next) !== JSON.stringify(before)) setParticipants(flowId, next);
+    if (next.length) {
+      const named = (ids) => ids.map((id) => flow.steps.find((x) => x.id === id)?.name).filter(Boolean);
+      let chosen = next; let why = '';
+      if (next.length > 1) {
+        // a work table: the steps named in THIS message answer (one or several); when nobody is named, the
+        // coordinator decides who should answer
+        const inMsg = m.ids.filter((id) => next.includes(id));
+        if (inMsg.length) { chosen = inMsg; why = inMsg.length > 1 ? 'los nombraste' : 'lo nombraste'; }
+        else { const c = await chooseResponder(flow, coord, next, history, message); chosen = c.ids; why = c.reason; }
+      }
+      routing.status = 'done';
+      routing.decision = { action: 'ask', target: chosen[0], reason: why || 'conversación con ese step' };
+      routing.participants = next;
+      routing.text = next.length === 1 ? `→ 💬 Conversación con **${named(next)[0]}**${m.ids.length ? '' : ' (sigue la charla; @Coordinador para volver)'}`
+        : `→ 💬 Conversación con ${named(next).map((n) => `**${n}**`).join(', ')} · ${coord ? '🧭 el coordinador elige' : 'elige'}: **${named(chosen).join(' y ')}**${why ? ` — ${why}` : ''}`;
+      store.updateChatMsg(flowId, key, routing.id, (x) => Object.assign(x, routing));
+      emit({ type: 'chat.done', flowId, key, message: routing });
+      let last = null;
+      for (const id of chosen.slice(0, 4)) { const t = flow.steps.find((x) => x.id === id); if (t) last = await relayedTurn(flowId, t.id, t.name, message, { external }); }
+      return last || routing;
+    }
+  }
   if (coord) {
     routing.status = 'done';
     routing.decision = { action: 'ask', target: coord.id, reason: 'coordinador del flujo' };
@@ -1724,6 +1753,43 @@ export async function globalChat(flowId, message, { external = false } = {}) {
   return mirror;
 }
 
+
+// ---------- spec 30: @mentions in the general chat ----------
+const fold = (t) => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+export const participantsOf = (flow) => (Array.isArray(flow.chatParticipants) ? flow.chatParticipants : []).filter((id) => flow.steps.some((s) => s.id === id && !s.coordinator));
+export function setParticipants(flowId, ids) {
+  const fl = store.updateFlow(flowId, (f) => { f.chatParticipants = ids.filter((id) => f.steps.some((s) => s.id === id && !s.coordinator)); });
+  if (fl) emit({ type: 'chat.participants', flowId, participants: fl.chatParticipants });
+  return fl?.chatParticipants || [];
+}
+/**
+ * "@Ejecutar en qa ¿…?" → the step (longest name that matches after the @, accents and case ignored; also its id).
+ * "@Coordinador" (the coordinator step or the word) / "@todos" / "@flujo" → back to the coordinator (reset).
+ */
+export function parseMentions(flow, text) {
+  const t = String(text || ''); const ft = fold(t);
+  const names = flow.steps.map((s) => ({ s, n: fold(s.name) })).sort((a, b) => b.n.length - a.n.length);
+  const ids = []; let reset = false;
+  for (let i = ft.indexOf('@'); i >= 0; i = ft.indexOf('@', i + 1)) {
+    if (i > 0 && /[\w.]/.test(ft[i - 1])) continue; // an e-mail, not a mention
+    const rest = ft.slice(i + 1);
+    const hit = names.find(({ s, n }) => (rest.startsWith(n) || rest.startsWith(fold(s.id))) && !/[\w]/.test(rest[(rest.startsWith(n) ? n : fold(s.id)).length] || ' '));
+    if (hit) { if (hit.s.coordinator) reset = true; else if (!ids.includes(hit.s.id)) ids.push(hit.s.id); continue; }
+    if (/^(coordinador|todos|flujo)\b/.test(rest)) reset = true;
+  }
+  return { ids: reset ? [] : ids, reset };
+}
+/** With several participants: who answers this message. The coordinator decides (same role and model), else Haiku. */
+async function chooseResponder(flow, coord, ids, history, message) {
+  const cands = ids.map((id) => flow.steps.find((x) => x.id === id)).filter(Boolean);
+  const recent = history.slice(-6).map((m) => `${m.role === 'user' ? 'Persona' : m.routedTo || m.role}: ${String(m.text || '').slice(0, 300)}`).join('\n');
+  const sys = `${coord ? `Eres «${coord.name}», el coordinador del flujo «${flow.name}». ${String(coord.role || '').slice(0, 600)}\n` : ''}La persona conversa con varios steps a la vez. Elige quién responde su mensaje: normalmente UNO; dos solo si la pregunta pide las dos miradas. Devuelve SOLO JSON: {"steps":["Nombre exacto"],"reason":"por qué, 1 frase"}`;
+  const prompt = `Participantes:\n${cands.map((c) => `- ${c.name} (${c.kind}${c.skillRef ? `: ${c.skillRef}` : ''}): ${String(c.role || c.task || '').replace(/\s+/g, ' ').slice(0, 200)}`).join('\n')}\n\nConversación reciente:\n${recent || '(vacía)'}\n\nMensaje nuevo:\n${message}`;
+  const r = await runClaude({ systemPrompt: sys, prompt, model: coord ? coord.model || undefined : 'haiku', tools: '', strictMcp: true, noPersist: true, cwd: os.homedir() });
+  const j = P.parseJsonLoose(r.text);
+  const picked = (Array.isArray(j?.steps) ? j.steps : []).map((n) => cands.find((c) => c.name.toLowerCase() === String(n).toLowerCase() || c.id === n)?.id).filter(Boolean);
+  return picked.length ? { ids: [...new Set(picked)].slice(0, 2), reason: String(j.reason || '').slice(0, 200) } : { ids: [cands[cands.length - 1].id], reason: 'no se pudo decidir: responde el último que sumaste' };
+}
 /** One answer of a step's chat (or the flow's), mirrored into the general chat. */
 async function relayedTurn(flowId, targetKey, targetName, message, { external = false, origin = 'global', note = '' } = {}) {
   const key = '_global';
