@@ -406,3 +406,13 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .chat-table .chip a { margin-left: 4px; color: var(--muted); }
 .mention-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px 10px; border-top: 1px solid var(--line); background: var(--bg3); }
 .mention-list button.active { border-color: var(--accent); }
+/* spec 10: 🔔 Novedades */
+.news { color: var(--warn); font-weight: 600; }
+.node-badges .news { border: 1px solid #e5b04a66; border-radius: 8px; padding: 0 4px; }
+.watch-item { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.watch-item .watch-target { width: 100%; }
+.watch-state { font-size: 12px; padding: 4px 6px; border-radius: 6px; background: var(--bg2); border-left: 3px solid var(--line); }
+.watch-state.ws-new { border-left-color: var(--warn); } .watch-state.ws-same, .watch-state.ws-first { border-left-color: var(--ok); } .watch-state.ws-error { border-left-color: var(--err); }
+.watch-changes { margin: 4px 0 0 16px; padding: 0; } .watch-changes li { margin: 2px 0; }
+.watch-changes .ch-removed { color: var(--muted); } .watch-changes .ch-added { color: var(--ok); }
+.foreach-fields { display: flex; flex-direction: column; gap: 4px; }

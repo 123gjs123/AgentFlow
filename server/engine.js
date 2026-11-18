@@ -803,6 +803,13 @@ export function unpinStep(flowId, stepId) {
   return flow;
 }
 
+/** Every step reachable from id by arrows (not id itself). */
+export function descendantsOf(flow, id) {
+  const seen = new Set(); const stack = [id];
+  while (stack.length) { const cur = stack.pop(); for (const e of flow.edges) if (e.source === cur && !seen.has(e.target)) { seen.add(e.target); stack.push(e.target); } }
+  seen.delete(id);
+  return [...seen];
+}
 export function ancestorsOf(flow, id) {
   const seen = new Set(); const stack = [id];
   while (stack.length) {
@@ -877,15 +884,18 @@ const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed', 'rehearsal', 'emp
  * arrows are all inactive is skipped as 'not_routed' (not a failure) and its own arrows stay inactive.
  * The flow is snapshotted at start: edits made while it runs don't change this run (REL-4).
  */
-export function startRun(flowId, { input = '', only = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null, breakpoints = false, rehearsal = false } = {}) {
+export function startRun(flowId, { input = '', only = null, from = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null, breakpoints = false, rehearsal = false } = {}) {
   const flow = store.getFlow(flowId);
   if (!flow) throw new Error('Flujo no encontrado');
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
+  if (from && !flow.steps.some((s) => s.id === from)) throw new Error('Step no encontrado');
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   { const cp = cwdProblem(flow); if (cp) throw Object.assign(new Error(cp.error), { status: cp.status, code: cp.code }); }
   // Spec 28 policy "noParallelRuns": shared environments are wiped by parallel runs of the same flow
   if (POL.has(flow, 'noParallelRuns') && isRunning(flowId)) throw Object.assign(new Error('Este flujo ya se está ejecutando y su política no permite dos ejecuciones a la vez (ambientes compartidos). Espera a que termine o detenla.'), { status: 409, code: 'FLOW_BUSY' });
-  const levels = only ? [[only]] : topoLevels(flow);
+  // spec 10: "desde este step" = that step and everything after it; the steps before keep their last output (not re-run)
+  const fromSet = !only && from ? new Set([from, ...descendantsOf(flow, from)]) : null;
+  const levels = only ? [[only]] : topoLevels(flow).map((l) => (fromSet ? l.filter((id) => fromSet.has(id)) : l)).filter((l) => l.length);
   // Spec 28: an empty variable takes the policy default ("ambiente por defecto")
   const runVars = POL.withDefaults(flow, { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) });
   // Rehearsal (spec 28, "ensayo acotado"): breaks off, no "Al terminar", read-only AI, capped steps, lastRun untouched
@@ -895,7 +905,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
   const limit = clampInt(deadlineSec, 10, 14400, clampInt(flow.runTimeoutSec, 10, 14400, 3600));
   const t0 = now();
   const run = {
-    id: store.uid('r_'), flowId, input, only, trigger, vars: runVars, usePins: !!usePins, idempotencyKey: idempotencyKey || null,
+    id: store.uid('r_'), flowId, input, only, ...(fromSet ? { from } : {}), trigger, vars: runVars, usePins: !!usePins, idempotencyKey: idempotencyKey || null,
     flowSnapshotHash: crypto.createHash('sha256').update(JSON.stringify(snap)).digest('hex'), flowUpdatedAt: flow.updatedAt,
     deadlineAt: t0 + limit * 1000, eventSeq: 0, status: 'running', startedAt: t0, steps: {}, usedPins: [], breakpoints: !!breakpoints, pauses: [],
     ...(rehearsal ? { rehearsal: true, rehearsalStepSec: REHEARSAL_STEP_SEC } : {}),
@@ -1008,7 +1018,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
               let cond = evalCond;
               if (!only && e.when?.from && e.when.type !== 'route') {
                 const fid = rflow.steps.find((x) => x.id === e.when.from || x.name === e.when.from)?.id;
-                const fd = fid ? data.get(fid) : null;
+                const fd = fid ? data.get(fid) || (fromSet && !fromSet.has(fid) ? P.stepData(rflow.steps.find((x) => x.id === fid), null, null, { usePins: run.usePins }) : null) : null;
                 const fname = rflow.steps.find((x) => x.id === fid)?.name || e.when.from;
                 if (!fd || notRouted.has(fid)) { inactive.push(`"${s?.name || u}": la condición mira a "${fname}", que no se ejecutó en esta ejecución`); continue; }
                 cond = (w) => { const r = evalCond(w, fd.output, fd.json); return { ...r, message: `en la salida de "${fname}": ${r.message}` }; };

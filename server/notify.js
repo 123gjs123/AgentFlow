@@ -31,6 +31,7 @@ const CODE_TEXT = { MCP_UNAVAILABLE: 'Claude Code no cargó un conector (MCP)', 
 export function textFor(item) {
   const flow = clean(item.flowName, 60); const step = clean(item.stepName, 40);
   if (item.kind === 'break') return { title: '⏸ Break esperando revisión', body: `${flow}${step ? ` · ${step}` : ''}. La ejecución sigue pausada hasta que la revises.` };
+  if (item.kind === 'news') return { title: '🔔 Novedades', body: `${flow}${step ? ` · ${step}` : ''}: ${clean(item.detail, 120)}` };
   if (item.kind === 'recovered') return { title: '✓ Volvió a funcionar', body: `${flow}: ${item.recovered?.trigger === 'schedule' ? 'la ejecución programada' : 'una ejecución completa'} terminó bien.` };
   const why = CODE_TEXT[item.code] || 'terminó con error';
   return { title: item.code === 'INTERRUPTED' ? 'Ejecución interrumpida' : '✗ Falló un flujo', body: `${flow}${step ? ` · ${step}` : ''}: ${why}.` };
@@ -110,7 +111,7 @@ function onChange(added, removed) {
   const now = Date.now();
   let dirty = false;
   for (const it of added) {
-    if (it.kind !== 'break' && it.kind !== 'run_failed') continue;
+    if (it.kind !== 'break' && it.kind !== 'run_failed' && it.kind !== 'news') continue;
     if (st.notified[it.id] === it.stateKey) continue; // already told
     // schedules: only the first failure (a failing hourly job is one problem, not one per hour)
     if (it.kind === 'run_failed' && it.trigger === 'schedule' && st.notified[it.id]) { st.notified[it.id] = it.stateKey; dirty = true; continue; }

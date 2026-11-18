@@ -57,7 +57,7 @@ export function edgeText(e, steps = []) {
 }
 
 function StepNode({ data, selected }) {
-  const { step, live, order } = data;
+  const { step, live, order, news = 0 } = data;
   const status = live?.status || step.lastRun?.status || 'idle';
   const notRouted = status === 'skipped' && (live?.skipReason || step.lastRun?.skipReason) === 'not_routed';
   const [label, icon] = KIND[step.kind] || ['?', '•'];
@@ -73,8 +73,9 @@ function StepNode({ data, selected }) {
       <div className="node-name" title={step.name}>{step.name}</div>
       <div className="node-sub" title={ref}>{ref || <span className="muted">—</span>}</div>
       {live?.activity && status === 'running' && <div className="node-live" title={live.activity}>{live.activity}</div>}
-      {(step.breakpoint || step.contextSources?.length > 0 || step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0 || step.assertions?.length > 0) && (
+      {(news > 0 || step.watches?.length > 0 || step.breakpoint || step.contextSources?.length > 0 || step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0 || step.assertions?.length > 0) && (
         <div className="node-badges">
+          {news > 0 ? <span className="news" data-testid="news-badge" title="Novedades en las fuentes que vigila este step">🔔 {news}</span> : step.watches?.length > 0 ? <span title={`Vigila ${step.watches.length} fuente(s): sin novedades pendientes`}>👀 {step.watches.length}</span> : null}
           {step.contextSources?.length > 0 && <span title={`Contexto: ${step.contextSources.map((x) => x.label || x.path || x.url || x.ref).join(' · ')}`}>📎 {step.contextSources.length}</span>}
           {step.breakpoint && <span className="brk" title="Break: la ejecución se pausa aquí para validar">{BREAK_LABEL[step.breakpoint]}</span>}
           {step.memory?.length > 0 && <span title="Memoria">🧷 {step.memory.length}</span>}
@@ -95,7 +96,7 @@ function StepNode({ data, selected }) {
 const statusLabel = (s) => ({ idle: '', running: 'ejecutando', success: 'ok', error: 'error', skipped: 'omitido', stopped: 'detenido', timeout: '⏱ tiempo agotado', interrupted: 'interrumpido', queued: '⏳ en cola', paused: '⏸ en revisión' }[s] ?? s);
 const nodeTypes = { step: StepNode };
 
-export default function Canvas({ flow, live, selectedId, onSelect, onConnect, onReconnect, onDeleteSteps, onDeleteEdges, onMove, selectedEdge, onSelectEdge }) {
+export default function Canvas({ flow, live, watch = {}, selectedId, onSelect, onConnect, onReconnect, onDeleteSteps, onDeleteEdges, onMove, selectedEdge, onSelectEdge }) {
   const order = useMemo(() => {
     // execution level per step (1-based) for the badge
     const lvl = new Map(); const steps = flow.steps;
@@ -114,9 +115,9 @@ export default function Canvas({ flow, live, selectedId, onSelect, onConnect, on
   useEffect(() => {
     setNodes((prev) => flow.steps.map((s) => {
       const p = prev.find((n) => n.id === s.id);
-      return { ...(p || {}), id: s.id, type: 'step', position: p?.dragging ? p.position : s.position, data: { step: s, live: live[s.id], order: order.get(s.id) }, selected: s.id === selectedId };
+      return { ...(p || {}), id: s.id, type: 'step', position: p?.dragging ? p.position : s.position, data: { step: s, live: live[s.id], order: order.get(s.id), news: Object.values(watch).reduce((a, v) => a + (v.stepId === s.id ? v.pending?.length || 0 : 0), 0) }, selected: s.id === selectedId };
     }));
-  }, [flow.steps, live, selectedId, order]);
+  }, [flow.steps, live, selectedId, order, watch]);
 
   const edgeSel = selectedEdge || null;
   const setEdgeSel = (id) => onSelectEdge?.(id);

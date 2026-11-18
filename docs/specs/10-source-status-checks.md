@@ -1,6 +1,6 @@
 # 10 — Source status checks ("pull for news")
 
-**Status:** Proposed
+**Status:** Implemented (2026-11-18; e2e: `test/e2e/28-watch.test.mjs`). In the app it is called **🔔 Novedades**. See "Implementation" at the end for the differences from the proposal.
 
 ## Summary
 
@@ -81,3 +81,39 @@ The app, not the model, compares this list with the previous snapshot. This keep
 - A `url` source pointing at a Jenkins `lastSuccessfulBuild` artifact reports a change after a new build.
 - With `onChange: run_step`, a detected change starts a run with trigger `source`, and the change summary is the input.
 - Status checks never call write tools. Denied write attempts appear as denials.
+
+## Implementation (2026-11-18)
+
+**Names.** "Sources" was already 📎 Context (spec 21), so here everything is called "watch":
+- the step field is `step.watches`;
+- the module is `server/watch.js`;
+- the state lives in `data/watch/<flowId>.json`;
+- polling is configured in `flow.watchPolling`;
+- the UI calls it "🔔 Novedades".
+
+The flow-folder storage of spec 09 does not exist yet.
+
+| Requirement | How it is implemented |
+|---|---|
+| SRC-1 | `step.watches[] = {id, type, target, options?: {branch, credential, fetch:false}, onChange}`. The server sanitises it on save: unknown types are dropped and there are at most 20 per step. |
+| SRC-2 | Targets render `{{vars.x}}`. A command target also takes `{{cred.x.y}}`, which travels in an environment variable like in command steps. |
+| SRC-3 | Three ways to check:<br>• **"Comprobar ahora"** per step.<br>• **🔔 Novedades** in the top bar (all steps; shown when some step has watches).<br>• `POST /api/ext/flows/:flow/status` (`step` in the body or the query). In the UI API: `GET /api/flows/:id/watch`, `POST …/watch/check {stepId?, watchId?}` and `POST …/watch/ack {stepId?}`. Only one check runs per flow at a time; a second request gets the same result. |
+| SRC-4/5 | States `first`, `same`, `new` and `error`.<br>• An error keeps the previous snapshot, so the next good check compares against it.<br>• Changing the target, the type or the branch takes a new `first`.<br>• The changes accumulate in `pending` (up to 100) until **✓ Visto**. |
+| SRC-6 | The node shows 🔔 N when news are pending, and 👀 N (the number of watches) when there is nothing new. The 🔔 attention list (spec 27) has a `news` item that opens the step, and there is an OS notification. |
+| SRC-7 | `notify`, `run_step`, `run_from_step` or `run_flow`. The strongest action wins, with one run per check, and the summary of the changes is its input (`trigger: 'source'`). If the flow is already running nothing starts, and the result says so.<br>**`run_from_step` is new in the engine:** `startRun({from})` runs that step and everything after it, and the steps before it are not re-run (they pass their last output). `POST /api/flows/:id/run {from}` takes it too. |
+| SRC-8 | `flow.watchPolling {enabled, everyMinutes}`: at least 5 minutes, default 30. It is set in the flow's configuration under "🔔 Revisar novedades". |
+| SRC-10 | Never writes outside: `git fetch` only updates the local clone's remote refs. Jira, Confluence and ai checks:<br>• use Haiku (`config.watch.model` overrides it);<br>• get only the Atlassian read tools, or the step's tools filtered to read-only;<br>• have `Edit Write MultiEdit NotebookEdit Bash` disallowed and no session (`noPersist`);<br>• treat the target as untrusted data. |
+| SRC-11 | Picking a type shows an example target and what the check does. |
+
+**How each type checks**
+
+| Type | Check | Diff text |
+|---|---|---|
+| `git` | `fetch origin <branch>` (if there is an origin and `fetch` is not false), then the head of `origin/<branch>`, or the local branch. | "N commit(s) nuevo(s) — …" with `git log old..new` |
+| `url` | HEAD for ETag / Last-Modified; without them, GET and a hash of the content. Optional credential: Basic with user+token, or Bearer with token. | |
+| `file` | Path or glob relative to the flow's folder; a hash for files under 2 MB, size+mtime above that. | |
+| `command` | Its stdout. A JSON array, or JSON lines with `id`/`key`/`name`, is compared element by element; any other text is one item. | First new line |
+| `jira` | The version is `updated|estado|comentarios`. | "estado A → B; N comentario(s) nuevo(s)" |
+| `confluence` | | "versión A → B" |
+
+**Not done:** history beyond the pending list, and per-source "dismiss" in a drawer. ✓ Visto acts per step.

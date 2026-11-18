@@ -17,7 +17,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 07 | [Onboarding, help and simplified configuration](07-onboarding-help.md) | Implemented |
 | 08 | [Security model](08-security.md) | Implemented |
 | 09 | [Flow workspaces, export and import](09-flow-workspaces-export-import.md) | Export & import implemented (2026-11-12; e2e: `test/e2e/17-*`); folder storage proposed |
-| 10 | [Source status checks ("pull for news")](10-source-status-checks.md) | Proposed |
+| 10 | [Source status checks ("pull for news")](10-source-status-checks.md) | Implemented as 🔔 Novedades (2026-11-18; e2e: `test/e2e/28-*`) |
 | 11 | [Flow isolation](11-flow-isolation.md) | Proposed |
 | 12 | [Per-step external invocation](12-step-invocation.md) | Proposed |
 | 13 | [Skill sources: URL, folder, zip](13-skill-sources.md) | Proposed |

@@ -3,8 +3,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 
-const ICON = { break: '⏸', run_failed: '✗', quarantine: '⛔', blocked: '⛔', review: '🩺' };
-const ACTION = { review: 'Revisar ahora', flowreview: 'Abrir la revisión', run: 'Ver ejecución', quarantine: 'Revisar importación', preflight: 'Ver qué falta', settings: { cli: 'Revisar CLI', credentials: 'Abrir Credenciales' } };
+const ICON = { break: '⏸', run_failed: '✗', quarantine: '⛔', blocked: '⛔', review: '🩺', news: '🔔' };
+const ACTION = { watch: 'Ver novedades', review: 'Revisar ahora', flowreview: 'Abrir la revisión', run: 'Ver ejecución', quarantine: 'Revisar importación', preflight: 'Ver qué falta', settings: { cli: 'Revisar CLI', credentials: 'Abrir Credenciales' } };
 export const actionLabel = (t) => (t.open === 'settings' ? ACTION.settings[t.tab] || 'Abrir Configuración' : ACTION[t.open] || 'Abrir');
 const sevClass = (s) => (s === 'error' ? 'sev-err' : s === 'action' ? 'sev-warn' : 'sev-info');
 export function age(ts, now = Date.now()) {

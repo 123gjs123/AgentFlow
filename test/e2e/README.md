@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (249 tests)
+## Qué cubre (255 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -68,6 +68,7 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `24-ui-flow-review` | Spec 28 en el navegador: el aviso lleva a 🩺 Revisión; aplicar un arreglo; el que amplía acceso pide confirmación (cancelar no cambia nada); descartar con motivo; agregar una regla del flujo y una de la instalación (⚙ › Reglas); "✅ Aplicar las seguras" parte un step y deja aparte lo que quita algo |
 | `25-flow-review-investigate` | Spec 28, ronda 2: git de solo lectura (lee los repos del flujo, rechaza escrituras, programas y otras carpetas); evidencia completa de las ejecuciones en archivos; el investigador y sus hechos verificados por la app (los inventados se descartan); partir, quitar y reconectar steps (todo o nada, sin ciclos); "aplicar las seguras" con versión previa; el chat de revisión también investiga; reparación de un JSON roto |
 | `26-coordinator` | Spec 30: el coordinador elige por dónde entra cada pedido (un step a mitad de camino corre aunque lo anterior no); una flecha que depende de su decisión (`when.from`); uno por flujo; en el chat general atiende él, consulta al step que sabe y responde con lo que dijo |
+| `28-watch` | Spec 10 🔔 Novedades: rama git (primera foto, commits nuevos, se acumulan hasta "Visto", aviso 🔔), archivos y comando elemento por elemento, error sin perder la foto, Jira con Haiku de solo lectura (la app hace el diff), "ejecutar desde este step" y API externa `/status`, URL (ETag / contenido / HTTP de error), polling saneado, UI con 🔔 en el nodo |
 | `27-for-each` | Spec 15 DATA-10: "para cada": un step corre una vez por elemento de una lista JSON de arriba (`{{item.key}}`, `$env:AFS_ITEM`), de a N, junta los resultados en una lista; si uno falla los demás corren; lista vacía omite lo que sigue; origen que no es lista da error claro; UI 🔁 |
 
 Cómo se simula cada origen en `07-integrations`:

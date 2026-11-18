@@ -23,6 +23,7 @@ import { needsPreflight } from './preflight.js';
 import * as CRED from './credentials.js';
 import * as attention from './attention.js';
 import * as review from './review.js';
+import * as W from './watch.js';
 import * as POL from './policies.js';
 import * as notify from './notify.js';
 import { checkSystem } from './system.js';
@@ -187,6 +188,14 @@ ext.get('/flows/:flow/runs/:runId/events', wrap((req) => {
 }));
 // Spec 25: chats only propose. Proposals made through the API wait for confirmation in the app (chat of that step/flow).
 const pendingOf = (ans) => { const p = (ans.proposals || []).filter((x) => !x.applied && !x.discarded).map((x) => ({ id: x.id, kind: x.kind || 'step' })); return p.length ? { pendingProposals: p, note: 'Propuestas de cambio al flujo: no se aplican desde fuera; quedan en el chat de la app para que una persona las revise con el flujo detenido.' } : {}; };
+// spec 10: 🔔 check the flow's watched sources (optionally one step); on-change actions apply (trigger "api")
+ext.post('/flows/:flow/status', wrap(async (req) => {
+  const flow = extFlow(req.params.flow);
+  const ref = req.query.step || req.body?.step;
+  const step = ref ? flow.steps.find((s) => s.id === ref || s.name === ref) : null;
+  if (ref && !step) throw fail(404, `Step no encontrado: ${ref}`, 'STEP_NOT_FOUND');
+  return W.checkFlow(flow.id, { stepId: step?.id || null, trigger: 'api' });
+}));
 ext.post('/flows/:flow/ask', wrap(async (req) => {
   const flow = extFlow(req.params.flow);
   const body = typeof req.body === 'object' && req.body ? req.body : { message: String(req.body || '') };
@@ -271,7 +280,7 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, contextSources: d.contextSources, finally: d.finally, requirements: d.requirements, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
   engine.topoLevels(next);
   const saved = store.saveFlow(next);
-  engine.syncSchedule(saved);
+  engine.syncSchedule(saved); W.syncPolling(saved);
   engine.flowChanged(saved, String(req.get('x-afs-tab') || '').slice(0, 40) || null);
   if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
   return saved;
@@ -385,6 +394,8 @@ app.put('/api/flows/:id', wrap((req, res) => {
     const keep = marked.length > 1 ? marked.find((s) => !byId.get(s.id)?.coordinator) || marked[0] : marked[0];
     for (const s of steps) if (s !== keep && 'coordinator' in s) Reflect.deleteProperty(s, 'coordinator');
   }
+  // spec 10: watched sources (🔔 Novedades)
+  for (const s of steps) { if ('watches' in s) { const w = W.cleanWatches(s.watches); if (w?.length) s.watches = w; else Reflect.deleteProperty(s, 'watches'); } }
   // spec 15 DATA-10: "para cada" — {path ("" = the JSON itself), from?, parallel 1-4, max 1-50}
   for (const s of steps) {
     if (!('forEach' in s)) continue;
@@ -396,7 +407,7 @@ app.put('/api/flows/:id', wrap((req, res) => {
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
-  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, requirements: cleanRequirements(body.requirements) ?? cur.requirements, policies: POL.cleanPolicies(body.policies, 'flow') ?? cur.policies, steps, edges };
+  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, requirements: cleanRequirements(body.requirements) ?? cur.requirements, policies: POL.cleanPolicies(body.policies, 'flow') ?? cur.policies, watchPolling: W.cleanPolling(body.watchPolling) ?? cur.watchPolling, steps, edges };
   engine.topoLevels(next); // throws on cycles
   next.rev = (cur.rev || 0) + 1;
   delete next.baseRev;
@@ -404,7 +415,7 @@ app.put('/api/flows/:id', wrap((req, res) => {
   const saved = store.saveFlow(next);
   autoVersion(cur, saved);
   clearPreflightCache(saved.id);
-  engine.syncSchedule(saved);
+  engine.syncSchedule(saved); W.syncPolling(saved);
   engine.flowChanged(saved, String(req.get('x-afs-tab') || '').slice(0, 40) || null);
   if (saved.name !== cur.name) engine.bus.emit('msg', { type: 'flows.changed' });
   return saved;
@@ -431,15 +442,19 @@ app.post('/api/flows/:id/reset', wrap((req) => {
     engine.bumpRev(fl);
   });
   engine.flowChanged(f);
-  engine.syncSchedule(f);
+  engine.syncSchedule(f); W.syncPolling(f);
   return f;
 }));
-app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); store.deleteFlow(req.params.id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: req.params.id }); engine.bus.emit('msg', { type: 'flows.changed' }); }));
+app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); W.clearPolling(req.params.id); store.deleteFlow(req.params.id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: req.params.id }); engine.bus.emit('msg', { type: 'flows.changed' }); }));
 
 // ----- runs -----
 // UI runs honour breaks unless {breakpoints:false}.
 const uiInput = (v) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v, null, 2));
-app.post('/api/flows/:id/run', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+app.post('/api/flows/:id/run', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), trigger: 'manual', breakpoints: req.body?.breakpoints !== false, from: typeof req.body?.from === 'string' ? req.body.from : null }) })));
+// spec 10: 🔔 news of the watched sources
+app.get('/api/flows/:id/watch', wrap((req) => { need(req.params.id); return W.view(req.params.id); }));
+app.post('/api/flows/:id/watch/check', wrap(async (req) => { need(req.params.id); return W.checkFlow(req.params.id, { stepId: req.body?.stepId || null, watchId: req.body?.watchId || null, trigger: 'manual' }); }));
+app.post('/api/flows/:id/watch/ack', wrap((req) => { need(req.params.id); return W.ack(req.params.id, req.body?.stepId || null); }));
 app.post('/api/flows/:id/steps/:stepId/run', wrap(async (req, res) => (await gate(need(req.params.id), res, req.params.stepId)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
 app.post('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.pinStep(req.params.id, req.params.stepId, req.body || {})));
 app.delete('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.unpinStep(req.params.id, req.params.stepId)));
@@ -744,7 +759,7 @@ engine.bus.on('msg', (msg) => {
 
 store.getConfig(); // ensure token exists
 
-for (const f of store.listFlows()) { const full = store.getFlow(f.id); if (full) engine.syncSchedule(full); }
+for (const f of store.listFlows()) { const full = store.getFlow(f.id); if (full) { engine.syncSchedule(full); W.syncPolling(full); } }
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `El puerto ${PORT} ya está en uso: ¿hay otro Agent Flow Studio corriendo?` : e.message); process.exit(1); });
 server.listen(PORT, HOST, () => {
   // Only after owning the port: a second instance that fails to start must not touch the first one's runs.
@@ -753,7 +768,8 @@ server.listen(PORT, HOST, () => {
   // spec 27: attention list from disk (after the recovery), then notifications; no toast storm, one summary
   // spec 28: the flow review (lint in the background, AI review on demand) feeds the 🔔 list with kind 'review'
   review.init({ bus: engine.bus, emit: (m) => engine.bus.emit('msg', m), refreshAttention: (flowId) => attention.refreshFlow(flowId) });
-  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem });
+  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem, watchItem: W.attentionItem });
+  W.init({ emit: (m) => engine.bus.emit('msg', m), onNews: (flowId) => attention.refreshFlow(flowId) });
   setOnChecked((flowId) => engine.bus.emit('msg', { type: 'preflight.checked', flowId }));
   notify.init({ getBaseUrl: () => `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}` });
   notify.bootSummary(recovered);

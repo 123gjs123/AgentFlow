@@ -40,6 +40,8 @@ function activityOf(ev) {
 export default function App() {
   const [flows, setFlows] = useState([]);
   const [flow, setFlow] = useState(null);
+  const [watchView, setWatchView] = useState({}); // spec 10: 🔔 news of the watched sources
+  const [watchBusy, setWatchBusy] = useState(false);
   const [catalog, setCatalog] = useState({ skills: [], agents: [], tools: [], mcpServers: [] });
   const [live, setLive] = useState({});
   const [selectedId, setSelectedIdRaw] = useState(null);
@@ -172,6 +174,7 @@ export default function App() {
     if (t.open === 'settings') { setSettings({ tab: t.tab || 'credentials', name: t.name || null }); return; }
     if (t.open === 'review' && t.runId) { setPaused({ runId: t.runId, nonce: Date.now() }); setReviewOpen(true); return; }
     if (t.open === 'run' && t.runId) { setSelectedId(null); setSelectedEdge(null); setFlowTab('runs'); setFocusRun({ runId: t.runId, n: Date.now() }); return; }
+    if (t.open === 'watch' && t.stepId) { setSelectedEdge(null); setSelectedId(t.stepId); setStepTab('config'); return; } // spec 10
     if (t.open === 'flowreview') { setSelectedId(null); setSelectedEdge(null); setFlowTab('review'); return; } // spec 28
     if (t.open === 'preflight') setPfModal({});
   }
@@ -251,8 +254,10 @@ export default function App() {
   }, [undoRedo]);
 
   // ---- websocket ----
+  useEffect(() => { if (!flow?.id) { setWatchView({}); return; } api.get(`/api/flows/${flow.id}/watch`).then(setWatchView).catch(() => setWatchView({})); }, [flow?.id]);
   useEffect(() => onWs((m) => {
     const cur = flowRef.current;
+    if (m.type === 'watch.updated' && cur && m.flowId === cur.id) api.get(`/api/flows/${cur.id}/watch`).then(setWatchView).catch(() => {});
     if (m.type === 'run.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
     if (m.type === 'chat.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
     if (m.type === 'flows.changed') { loadFlows().catch(() => {}); return; } // created / renamed / deleted in another tab
@@ -491,6 +496,12 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
             )}
             <span className="muted small save">{saveState}</span>
             {preflight?.missing > 0 && <button className="ghost small warn-chip" onClick={() => setPfModal({})} title="Este flujo necesita cosas que faltan en esta máquina">⚠ Faltan {preflight.missing} requisito{preflight.missing > 1 ? 's' : ''}</button>}
+            {flow.steps.some((x) => x.watches?.length) && (
+              <button className="ghost" data-testid="watch-all" disabled={watchBusy} title="🔔 Comprueba las fuentes que vigilan los steps (git, URL, archivos, comandos, Jira, Confluence) y muestra qué hay de nuevo"
+                onClick={async () => { setWatchBusy(true); try { await pendingSave.flush(); const r = await api.post(`/api/flows/${flow.id}/watch/check`, {}); const n = r.results.reduce((a, x) => a + (x.changes?.length || 0), 0); const errs = r.results.filter((x) => x.state === 'error').length; notify(n ? `🔔 ${n} novedad${n === 1 ? '' : 'es'}${r.actions?.[0]?.runId ? ' · se lanzó una ejecución' : ''}` : errs ? `🔔 Sin novedades · ${errs} fuente(s) con error` : '🔔 Sin novedades'); } catch (e) { alert(e.message); } finally { setWatchBusy(false); } }}>
+                {watchBusy ? '🔔 Comprobando…' : (() => { const n = Object.values(watchView).reduce((a, v) => a + (v.pending?.length || 0), 0); return n ? `🔔 Novedades (${n})` : '🔔 Novedades'; })()}
+              </button>
+            )}
             <div className="run-wrap" data-tour="run">
               <button className="primary" onClick={() => setShowRun(!showRun)} disabled={!flow.steps.length || !!flow.quarantine} title={flow.quarantine ? 'Flujo importado en revisión: habilítalo primero' : undefined}>▶ Ejecutar flujo</button>
               {showRun && (
@@ -514,7 +525,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         <main className="main">
           <section className="canvas" data-tour="canvas">
             <ReactFlowProvider>
-              <Canvas flow={flow} live={live} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect} onReconnect={onReconnect}
+              <Canvas flow={flow} live={live} watch={watchView} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect} onReconnect={onReconnect}
                 selectedEdge={selectedEdge} onSelectEdge={setSelectedEdge}
                 onDeleteSteps={onDeleteSteps} onDeleteEdges={onDeleteEdges} onMove={onMove} />
             </ReactFlowProvider>
@@ -540,7 +551,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
             {edgeObj ? (
               <EdgePanel key={edgeObj.id} flow={flow} edge={edgeObj} onChange={(p) => patchEdge(edgeObj.id, p)} onDelete={() => { onDeleteEdges([edgeObj.id]); setSelectedEdge(null); }} onClose={() => setSelectedEdge(null)} />
             ) : step ? (
-              <StepPanel key={step.id} onDuplicate={() => duplicateStep(step.id)} onSaveLib={() => saveToLibrary(step.id)} flow={flow} step={step} catalog={catalog} live={live[step.id]} running={anyRunning} tab={stepTab} setTab={setStepTab}
+              <StepPanel key={step.id} onDuplicate={() => duplicateStep(step.id)} onSaveLib={() => saveToLibrary(step.id)} flow={flow} step={step} catalog={catalog} live={live[step.id]} watch={watchView} running={anyRunning} tab={stepTab} setTab={setStepTab}
                 onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onProbe={probe}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             ) : (

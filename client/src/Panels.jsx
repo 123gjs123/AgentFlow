@@ -91,7 +91,7 @@ function Field({ label, hint, children, div }) {
   return <Tag className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</Tag>;
 }
 
-export function StepPanel({ flow, step, catalog, live, running, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
+export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
   const [runInput, setRunInput] = useState('');
   const [runEvents, setRunEvents] = useState(null);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
@@ -138,6 +138,7 @@ export function StepPanel({ flow, step, catalog, live, running, tab, setTab, onC
             </label>
           )}
           <ForEachBox flow={flow} step={step} onChange={onChange} />
+          <WatchBox flow={flow} step={step} watch={watch} onChange={onChange} />
           <div className="ctx-block" data-testid="step-context">
             <div className="ctx-title">📎 Contexto{(step.contextSources || []).length ? ` (${step.contextSources.length})` : ''}</div>
             {step.kind === 'command'
@@ -342,6 +343,13 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
             </div>
             <input value={flow.schedule?.input || ''} onChange={(e) => onChange({ schedule: { ...flow.schedule, input: e.target.value } })} placeholder="Input para ejecuciones programadas" />
           </Field>
+          <Field label="🔔 Revisar novedades" hint="comprueba las fuentes que vigilan los steps y aplica lo que cada una tenga configurado al cambiar (mínimo 5 min)">
+            <div className="row">
+              <label className="toggle"><input type="checkbox" data-testid="watch-polling" checked={!!flow.watchPolling?.enabled} onChange={(e) => onChange({ watchPolling: { everyMinutes: 30, ...flow.watchPolling, enabled: e.target.checked } })} /> cada</label>
+              <input type="number" min={5} style={{ width: 80 }} value={flow.watchPolling?.everyMinutes ?? 30} onChange={(e) => onChange({ watchPolling: { ...flow.watchPolling, everyMinutes: Number(e.target.value) } })} /> min
+            </div>
+            {flow.watchPolling?.enabled && !flow.steps.some((x) => x.watches?.length) && <div className="muted small">Ningún step vigila fuentes todavía (step › Configuración › 🔔 Novedades).</div>}
+          </Field>
           <Field label="Tiempo máximo de una ejecución (s)" hint="al agotarse se detiene; los steps pendientes quedan omitidos. Por llamada externa: deadlineSec">
             <input type="number" min={10} max={14400} style={{ width: 120 }} value={flow.runTimeoutSec ?? 3600} onChange={(e) => onChange({ runTimeoutSec: Number(e.target.value) || 3600 })} />
           </Field>
@@ -410,6 +418,71 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
 
 // ---------------- arrow (edge) settings: spec 18 ----------------
 /** Steps that always run before `id` (its ancestors): a condition can look at one of their decisions. */
+const WATCH_TYPES = [
+  ['git', '🌿 Rama git', 'C:\\repos\\mi-repo', 'Carpeta del repo (o {{vars.repo}}); abajo, la rama. Hace fetch y lista los commits nuevos. Sin modelo.'],
+  ['jira', '🎫 Jira', 'SBK-123, SBK-124  ·  o JQL: project = SBK AND status = "Ready For Testing"', 'Claves o JQL. Avisa cambios de estado y comentarios nuevos. Usa Haiku con herramientas de solo lectura.'],
+  ['confluence', '📘 Confluence', '123456  ·  tree:123456', 'Id o URL de página; tree:<id> incluye sus descendientes. Avisa la nueva versión.'],
+  ['url', '🌐 URL / artefacto', 'https://jenkins…/lastSuccessfulBuild/artifact/x.zip', 'Mira ETag/Last-Modified (o el contenido). Credencial opcional para Jenkins y similares.'],
+  ['file', '📄 Archivos', 'reports/*.xml', 'Ruta o patrón, relativo a la carpeta del flujo.'],
+  ['command', '⌨️ Comando', 'git ls-remote origin', 'Su salida es la versión; un JSON con id por elemento se compara elemento por elemento.'],
+  ['ai', '🤖 Lo que ven sus herramientas', 'bugs abiertos vinculados a SBK-123', 'Con las herramientas de este step, solo lectura.'],
+];
+const ON_CHANGE = [['notify', 'Solo avisar'], ['run_step', 'Ejecutar este step'], ['run_from_step', 'Ejecutar desde este step'], ['run_flow', 'Ejecutar el flujo']];
+const STATE_TEXT = { first: 'primera foto (referencia)', same: 'sin cambios', new: 'hay novedades', error: 'error' };
+/** Spec 10: "🔔 Novedades" — what this step's work depends on; a check reports what changed since the last one. */
+function WatchBox({ flow, step, watch, onChange }) {
+  const list = step.watches || [];
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  const set = (i, patch) => onChange({ watches: list.map((w, j) => (j === i ? { ...w, ...patch } : w)) });
+  const add = (type) => onChange({ watches: [...list, { id: `w_${Math.random().toString(36).slice(2, 10)}`, type, target: '', onChange: 'notify' }] });
+  const mine = Object.entries(watch).filter(([, v]) => v.stepId === step.id);
+  const pending = mine.reduce((a, [, v]) => a + (v.pending?.length || 0), 0);
+  const check = async () => { setBusy(true); setErr(''); try { await pendingSave.flush(); await api.post(`/api/flows/${flow.id}/watch/check`, { stepId: step.id }); } catch (e) { setErr(e.message); } finally { setBusy(false); } };
+  return (
+    <div className="ctx-block" data-testid="watch-box">
+      <div className="ctx-title">🔔 Novedades{list.length ? ` (${list.length})` : ''}{pending ? <span className="news"> · {pending} sin ver</span> : null}</div>
+      <p className="muted small">Lo que el trabajo de este step necesita seguir: una rama, un ticket, una página, un artefacto. Al comprobar se compara con la vez anterior y se dice qué cambió. Nunca escribe nada afuera.</p>
+      {list.map((w, i) => {
+        const def = WATCH_TYPES.find((x) => x[0] === w.type) || WATCH_TYPES[0];
+        const st = watch[w.id];
+        return (
+          <div key={w.id} className="src-item watch-item" data-type={w.type}>
+            <div className="row">
+              <b>{def[1]}</b>
+              <div className="grow" />
+              <select value={w.onChange || 'notify'} onChange={(e) => set(i, { onChange: e.target.value })} title="Qué hacer cuando hay novedades" data-testid="watch-onchange">
+                {ON_CHANGE.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+              </select>
+              <button className="ghost small" onClick={() => onChange({ watches: list.filter((_, j) => j !== i) })} title="Quitar">✕</button>
+            </div>
+            <input className="watch-target" data-testid="watch-target" value={w.target} placeholder={def[2]} onChange={(e) => set(i, { target: e.target.value })} />
+            {w.type === 'git' && <input value={w.options?.branch || ''} placeholder="rama (vacío = la actual)" onChange={(e) => set(i, { options: { ...w.options, branch: e.target.value } })} />}
+            {w.type === 'url' && <input value={w.options?.credential || ''} placeholder="credencial (opcional, nombre de ⚙ Credenciales)" onChange={(e) => set(i, { options: { ...w.options, credential: e.target.value } })} />}
+            <div className="muted small">{def[3]}</div>
+            {st && (
+              <div className={`watch-state ws-${st.state}`} data-testid="watch-state">
+                {STATE_TEXT[st.state] || st.state} · {new Date(st.checkedAt).toLocaleString()}{st.count != null ? ` · ${st.count} elemento(s)` : ''}{st.note || ''}
+                {st.error && <div className="warn-text small">{st.error}</div>}
+                {st.pending?.length > 0 && <ul className="watch-changes">{st.pending.slice(-10).map((c, k) => <li key={k} className={`ch-${c.kind}`}>{c.text}</li>)}</ul>}
+                {st.action && <div className="small">{st.action.runId ? `▶ Se lanzó: ${ON_CHANGE.find((x) => x[0] === st.action.kind)?.[1].toLowerCase()} (${st.action.runId})` : st.action.error}</div>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <div className="row wrap">
+        <select value="" onChange={(e) => e.target.value && add(e.target.value)} data-testid="watch-add">
+          <option value="">＋ Vigilar…</option>
+          {WATCH_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+        {list.length > 0 && <button className="ghost small" onClick={check} disabled={busy} data-testid="watch-check">{busy ? 'Comprobando…' : 'Comprobar ahora'}</button>}
+        {pending > 0 && <button className="ghost small" data-testid="watch-ack" onClick={() => api.post(`/api/flows/${flow.id}/watch/ack`, { stepId: step.id }).catch((e) => setErr(e.message))}>✓ Visto</button>}
+      </div>
+      {err && <div className="warn-text small">{err}</div>}
+    </div>
+  );
+}
+
 /** Spec 15 DATA-10: "🔁 Para cada" — the step runs once per element of a JSON list from a step before it. */
 function ForEachBox({ flow, step, onChange }) {
   const fe = step.forEach;

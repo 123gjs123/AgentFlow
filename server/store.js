@@ -88,6 +88,7 @@ export function deleteFlow(id) {
   fs.rmSync(path.join(DATA, 'runs', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'versions', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'reviews', safe(id)), { recursive: true, force: true });
+  fs.rmSync(path.join(DATA, 'watch', `${safe(id)}.json`), { force: true });
 }
 
 // ---------- flow reviews (spec 28) ----------
@@ -103,6 +104,9 @@ export function listReviews(flowId) {
     .sort((a, b) => b.startedAt - a.startedAt);
 }
 /** Findings the person dismissed: {fp: {anchor, reason, at}} (a dismissed finding stays hidden while its anchor holds). */
+// spec 10: 🔔 news of the watched sources (snapshots, pending changes) per flow
+export const getWatch = (flowId) => readJson(at('watch', `${safe(flowId)}.json`), {});
+export const saveWatch = (flowId, v) => writeJson(path.join(dir('watch'), `${safe(flowId)}.json`), v);
 export const getSuppressed = (flowId) => readJson(at('reviews', safe(flowId), 'suppressed.json'), {});
 export const setSuppressed = (flowId, map) => writeJson(path.join(dir('reviews', safe(flowId)), 'suppressed.json'), map);
 
