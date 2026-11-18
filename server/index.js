@@ -165,7 +165,7 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
   res.locals.runId = runId;
   return respond(runId);
 }));
-ext.get('/flows/:flow/runs/:runId/files/:file', wrap(async (req, res) => { const flow = extFlow(req.params.flow); const f = deliverableFile(flow.id, req.params.runId, req.params.file); await new Promise((ok, ko) => res.download(f.path, f.name, (e) => (e ? ko(e) : ok()))); return undefined; }));
+ext.get('/flows/:flow/runs/:runId/files/:file', wrap(async (req, res) => { const flow = extFlow(req.params.flow); const f = deliverableFile(flow.id, req.params.runId, req.params.file, req.query.step ? String(req.query.step) : null); await sendFile(res, f); return undefined; }));
 ext.post('/flows/:flow/runs/:runId/actions/decide', wrap((req) => { const flow = extFlow(req.params.flow); return decide(flow.id, req.params.runId, req.body); }));
 ext.get('/flows/:flow/runs/:runId', wrap((req) => {
   const flow = extFlow(req.params.flow);
@@ -486,18 +486,25 @@ app.get('/api/flows/:id/runs/:runId', wrap((req) => engine.getRunLive(req.params
 // spec 14: ⚡ a declared action in "confirm" waits for a person (the run did not wait for it)
 const decideDeps = { getRun: (f, r) => engine.getRunLive(f, r), saveRun: (r) => store.saveRun(r), getFlow: store.getFlow, updateFlow: (id, fn) => { const fl = store.updateFlow(id, fn); if (fl) engine.flowChanged(fl); attention.refreshFlow(id); return fl; }, policyBlocked: (fl) => POL.has(fl, 'noExternalWrites'), quarantine: quarantineProblem };
 const decide = (flowId, runId, b) => OUT.decide(flowId, runId, String(b?.stepKey || ''), String(b?.actionId || ''), { approve: b?.approve === true, params: b?.params }, decideDeps);
+app.get('/api/flows/:id/approvals', wrap((req) => { need(req.params.id); return OUT.pendingOf(req.params.id); }));
 app.post('/api/flows/:id/runs/:runId/actions/decide', wrap((req) => { need(req.params.id); return decide(req.params.id, req.params.runId, req.body); }));
 // spec 14: 📄 a deliverable of a run (by its id inside the step, or by file name)
-function deliverableFile(flowId, runId, fileRef) {
+function deliverableFile(flowId, runId, fileRef, stepRef) {
   const run = engine.getRunLive(flowId, runId);
   if (!run) throw fail(404, 'Ejecución no encontrada', 'RUN_NOT_FOUND');
-  const all = Object.values(run.steps || {}).flatMap((s) => s.deliverables || []);
-  const f = all.find((x) => x.name === fileRef) || all.find((x) => x.id === fileRef);
+  // each file once (the parent of a "para cada" repeats its elements' entries), optionally of one step / element
+  const seen = new Set();
+  const all = Object.entries(run.steps || {}).flatMap(([k, s]) => (s.deliverables || []).map((d) => ({ ...d, stepKey: d.stepKey || k }))).filter((d) => !seen.has(d.path) && seen.add(d.path));
+  const scoped = stepRef ? all.filter((d) => d.stepKey === stepRef) : all;
+  const hits = scoped.filter((x) => x.id === fileRef || x.name === fileRef);
+  if (hits.length > 1) throw fail(409, `Hay ${hits.length} archivos "${fileRef}" (de distintos steps o elementos): indica ?step=<step o step~n>`, 'FILE_AMBIGUOUS');
+  const f = hits[0];
   const root = path.resolve(OUT.outputsDir(flowId, runId));
   if (!f || !path.resolve(f.path).startsWith(root + path.sep) || !fs.existsSync(f.path)) throw fail(404, `Archivo no encontrado: ${fileRef}`, 'FILE_NOT_FOUND');
   return f;
 }
-app.get('/api/flows/:id/runs/:runId/files/:file', wrap(async (req, res) => { need(req.params.id); const f = deliverableFile(req.params.id, req.params.runId, req.params.file); await new Promise((ok, ko) => res.download(f.path, f.name, (e) => (e ? ko(e) : ok()))); return undefined; }));
+const sendFile = (res, f) => new Promise((ok, ko) => res.download(f.path, f.name, { dotfiles: 'allow' }, (e) => (e ? ko(e) : ok())));
+app.get('/api/flows/:id/runs/:runId/files/:file', wrap(async (req, res) => { need(req.params.id); const f = deliverableFile(req.params.id, req.params.runId, req.params.file, req.query.step ? String(req.query.step) : null); await sendFile(res, f); return undefined; }));
 
 // ----- memory -----
 app.post('/api/flows/:id/memory/:scope', wrap((req) => engine.addMemory(req.params.id, req.params.scope, req.body?.text, 'manual')));

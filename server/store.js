@@ -91,6 +91,7 @@ export function deleteFlow(id) {
   fs.rmSync(path.join(DATA, 'watch', `${safe(id)}.json`), { force: true });
   fs.rmSync(path.join(DATA, 'outputs', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'actions', `${safe(id)}.json`), { force: true });
+  fs.rmSync(path.join(DATA, 'approvals', `${safe(id)}.json`), { force: true });
 }
 
 // ---------- flow reviews (spec 28) ----------
@@ -179,7 +180,7 @@ export const clearAllChats = (flowId) => fs.rmSync(path.join(DATA, 'chats', safe
 // ---------- runs ----------
 const runFile = (flowId, runId) => path.join(dir('runs', safe(flowId)), `${safe(runId)}.json`);
 export const saveRun = (run) => writeJson(runFile(run.flowId, run.id), run);
-export const clearRuns = (flowId) => fs.rmSync(path.join(DATA, 'runs', safe(flowId)), { recursive: true, force: true });
+export const clearRuns = (flowId) => { for (const d of ['runs', 'outputs']) fs.rmSync(path.join(DATA, d, safe(flowId)), { recursive: true, force: true }); fs.rmSync(path.join(DATA, 'approvals', `${safe(flowId)}.json`), { force: true }); };
 export const countRuns = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'runs', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
 export const countChats = (flowId) => { try { return fs.readdirSync(path.join(DATA, 'chats', safe(flowId))).filter((f) => f.endsWith('.json')).length; } catch { return 0; } };
 export const getRun = (flowId, runId) => readJson(at('runs', safe(flowId), `${safe(runId)}.json`), null);

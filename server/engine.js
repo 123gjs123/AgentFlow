@@ -365,7 +365,7 @@ async function executeForEach(flow, step, input, run, signal, upstream, opts) {
   emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   const end = (status, extra = {}) => {
     Object.assign(rs, { status, ...extra }); rs.endedAt = now(); rs.durationMs = rs.endedAt - rs.startedAt;
-    setLast({ status: rs.status, skipReason: rs.skipReason || null, endedAt: rs.endedAt, output: rs.output, json: rs.json, files: rs.files, actions: rs.actions, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, runId: run.id, deliverables: rs.deliverables, declaredActions: rs.declaredActions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: 0 });
+    setLast({ status: rs.status, skipReason: rs.skipReason || null, endedAt: rs.endedAt, output: rs.output, json: rs.json, files: rs.files, actions: rs.actions, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, runId: run.id, deliverables: rs.deliverables, declaredActions: rs.declaredActions ? rs.declaredActions.map(OUT.lastRunView) : undefined, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: 0 });
     emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
     store.saveRun(run); run.dirty = false;
     return rs;
@@ -762,40 +762,56 @@ ${cgit.block}`;
   else rs.status = error ? 'error' : 'success';
   rs.output = output; rs.json = json; rs.error = error; rs.code = error ? code || 'ERROR' : null; rs.sessionId = sessionId;
   if (isAi) rs.usage = usage; else if (usage.judge) rs.usage = { judge: usage.judge };
-  if (!['stopped', 'timeout'].includes(rs.status) && ((step.deliverables || []).length || (step.actions || []).length)) await applyOutputs();
+  if (!['stopped', 'timeout'].includes(rs.status) && ((step.deliverables || []).length || (step.actions || []).length)) {
+    // with an "after" break the person reviews FIRST; the scheduler applies them once the break settles (edit/retry)
+    if (opts.deferOutputs) Object.defineProperty(rs, '_applyOutputs', { value: async () => { await applyOutputs(); return finish(); }, enumerable: false, configurable: true });
+    else await applyOutputs();
+  }
   return finish();
 
-  /** Spec 14: 📄 deliverables and ⚡ declared actions of this step (after its own work). */
+  /** Spec 14: 📄 deliverables and ⚡ declared actions of this step (after its own work, and after its "after" break). */
   async function applyOutputs() {
     const key = opts.nested || step.id;
-    const render = (tpl) => P.render(tpl, { flow, vars: flow.vars, input: ctx.input, data, ...rctx, output: rs.output, outputJson: rs.json });
+    const render = (tpl, o = {}) => P.render(tpl, { flow, vars: flow.vars, input: ctx.input, data, ...rctx, output: rs.output, outputJson: rs.json, ...(o.jsonEscape ? { quote: (v) => JSON.stringify(String(v)).slice(1, -1) } : {}) });
+    const wasOk = rs.status === 'success';
     if (rs.status === 'success' && (step.deliverables || []).length) {
       const d = OUT.writeDeliverables(flow, step, run, { key, output: rs.output, json: rs.json, render });
       rs.deliverables = d.files;
       for (const f of d.files) { rs.files.push(f.path); log({ kind: 'hook_log', text: `📄 ${f.name} (${f.size} bytes)${f.copies.filter((c) => !c.error && !c.skipped).map((c) => ` → ${c.path}`).join('')}` }); }
-      if (d.errors.length) { for (const e of d.errors) log({ kind: 'error', text: e }); rs.status = 'error'; rs.code = 'DELIVERABLE_INVALID'; rs.error = d.errors.join(' · '); }
-    }
-    if (!(step.actions || []).length) return;
-    const plans = OUT.planActions(flow, step, run, { status: rs.status, output: rs.output, json: rs.json, render, evalCond: (w, o, j) => evalAssertion(w, o, j) });
-    const blocked = POL.has(flow, 'noExternalWrites');
-    const done = [];
-    for (const p of plans) {
-      p.stepKey = key;
-      if (p.status !== 'pending') {
-        done.push(p);
-        log({ kind: 'hook_log', text: `⚡ ${p.label}: ${p.status === 'awaiting_approval' ? '⏳ espera aprobación (Datos del step)' : p.status === 'dry_run' ? `solo se muestra (dryRun${run.rehearsal ? ', ensayo' : ''})` : p.status === 'exists' ? `no se repite: ${p.reason}` : p.status === 'skipped' ? `omitida (${p.reason})` : `✗ ${p.error}`}` });
-        if (p.status === 'error' && !p.optional && rs.status === 'success') { rs.status = 'error'; rs.code = 'ACTION_FAILED'; rs.error = `${p.label}: ${p.error}`; }
-        continue;
+      if (d.errors.length) {
+        for (const e of d.errors) log({ kind: run.rehearsal ? 'hook_log' : 'error', text: e });
+        // a rehearsal (plan mode) cannot produce real content: format errors are warnings there
+        if (run.rehearsal) rs.warnings.push(...d.errors); else { rs.status = 'error'; rs.code = 'DELIVERABLE_INVALID'; rs.error = d.errors.join(' · '); }
       }
-      log({ kind: 'hook_log', text: `⚡ ${p.label}…` });
-      const res = await OUT.executeAction(flow, p, { signal: sig, policyBlocked: blocked });
-      OUT.remember(flow.id, run.id, res);
-      done.push(res);
-      log({ kind: res.status === 'done' ? 'hook_log' : 'error', text: res.status === 'done' ? `⚡ ${p.label}: ✓ ${res.key || 'hecho'}${res.url ? ` ${res.url}` : ''}` : `⚡ ${p.label}: ✗ ${res.error}` });
-      if (res.status === 'done') rs.actions.push({ tool: p.type, server: 'declarada', ok: true, key: res.key, url: res.url, input: JSON.stringify(p.params).slice(0, 600) });
-      if (res.status === 'error' && !p.optional && rs.status === 'success') { rs.status = 'error'; rs.code = 'ACTION_FAILED'; rs.error = `${p.label}: ${res.error}`; }
     }
-    rs.declaredActions = done;
+    if ((step.actions || []).length) {
+      const base = { output: rs.output, json: rs.json, render, evalCond: (w, o, j) => evalAssertion(w, o, j), stepKey: key, item: opts.item ? itemLabel(opts.item.value) : undefined, policyBlocked: POL.has(flow, 'noExternalWrites'), forceConfirm: !!opts.forceConfirm };
+      const done = [];
+      const runPlans = async (plans) => {
+        for (const p of plans) {
+          if (p.status !== 'pending') {
+            done.push(p);
+            log({ kind: 'hook_log', text: `⚡ ${p.label}: ${p.status === 'awaiting_approval' ? `⏳ espera aprobación (Datos del step)${p.reason ? ` — ${p.reason}` : ''}` : p.status === 'dry_run' ? `solo se muestra (dryRun${run.rehearsal ? ', ensayo' : ''})` : p.status === 'exists' ? `no se repite: ${p.reason}` : p.status === 'skipped' || p.status === 'blocked' ? `no se hizo (${p.reason})` : `✗ ${p.error}`}` });
+            if (p.status === 'exists') rs.actions.push({ tool: p.type, server: 'declarada', ok: true, key: p.key, url: p.url, existing: true });
+            if (p.status === 'error' && !p.optional && rs.status === 'success') { rs.status = 'error'; rs.code = 'ACTION_FAILED'; rs.error = `${p.label}: ${p.error}`; }
+            continue;
+          }
+          log({ kind: 'hook_log', text: `⚡ ${p.label}…` });
+          const res = await OUT.executeAction(flow, p, { signal: sig, runId: run.id });
+          done.push(res);
+          log({ kind: res.status === 'done' ? 'hook_log' : 'error', text: res.status === 'done' ? `⚡ ${p.label}: ✓ ${res.key || 'hecho'}${res.url ? ` ${res.url}` : ''}` : `⚡ ${p.label}: ✗ ${res.error}` });
+          if (res.status === 'done') rs.actions.push({ tool: p.type, server: 'declarada', ok: true, key: res.key, url: res.url, input: JSON.stringify(p.params).slice(0, 600) });
+          if (res.status === 'error' && !p.optional && rs.status === 'success') { rs.status = 'error'; rs.code = 'ACTION_FAILED'; rs.error = `${p.label}: ${res.error}`; }
+        }
+      };
+      await runPlans(OUT.planActions(flow, step, run, { ...base, status: rs.status }));
+      // the step turned into a failure because of a deliverable or an action: the "si falla" actions run now
+      if (wasOk && rs.status !== 'success') await runPlans(OUT.planActions(flow, step, run, { ...base, status: rs.status, only: ['failure'] }));
+      rs.declaredActions = done;
+      OUT.addPending(flow.id, run.id, done);
+    }
+    // onFailure already ran for the step's own errors; a failure caused here gets it too
+    if (wasOk && rs.status !== 'success' && hooks.onFailure && !sig.aborted) { ctx.error = rs.error; log({ kind: 'hook', text: 'onFailure' }); try { await hooks.onFailure(ctx); } catch (e) { log({ kind: 'error', text: `Hook/step error: ${e.message}` }); } }
   }
 
   function finish() {
@@ -809,7 +825,7 @@ ${cgit.block}`;
       status: rs.status, endedAt: rs.endedAt, output: rs.output, json: jsonFits ? rs.json : undefined, files: rs.files, actions: rs.actions,
       pinned: !!rs.pinned, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, sessionId: rs.sessionId || null, runId: run.id,
       assertions: rs.assertions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: rs.attempts.length,
-      deliverables: rs.deliverables || undefined, declaredActions: rs.declaredActions || undefined,
+      deliverables: rs.deliverables || undefined, declaredActions: rs.declaredActions ? rs.declaredActions.map(OUT.lastRunView) : undefined,
     });
     opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
     store.saveRun(run);
@@ -1083,7 +1099,8 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
               if (d.reload && d.action === 'continue') reload();
               if (d.action === 'skip') { skip(id, 'review', 'Omitido en el break (antes) por el revisor.'); data.set(id, { output: '', json: undefined, files: [], actions: [], routes: [] }); continue; }
             }
-            const opts = { data, summaries, force: !!only, ancestors: only ? null : ancestorsOf(rflow, id) };
+            const afterBrk = brk === 'after' || brk === 'both';
+            const opts = { data, summaries, force: !!only, ancestors: only ? null : ancestorsOf(rflow, id), ...(afterBrk ? (step.forEach ? { forceConfirm: true } : { deferOutputs: true }) : {}) };
             let r = await exec(rflow, step, input, run, controller.signal, upstream, opts);
             noteReload();
             for (const u of upstream) if (u.warning) r.warnings?.push(`Flecha desde "${u.name}": ${u.warning}.`);
@@ -1116,6 +1133,7 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
               break;
             }
             if (r.status === 'skipped' && r.skipReason === 'empty') { notRouted.add(id); continue; } // "para cada" with no elements: what follows does not run
+            if (r._applyOutputs && !controller.signal.aborted && !['stopped', 'timeout'].includes(r.status)) { r = await r._applyOutputs(); emit({ type: 'step.status', flowId, runId: run.id, stepId: id, status: r.status }); }
             data.set(id, { output: r.output, json: r.json, files: r.files || [], actions: r.actions || [], pinned: !!r.pinned, routes: r.routes || [] });
             if (FAILED.has(r.status) && !(r.status === 'skipped' && NOT_A_FAILURE.has(r.skipReason))) failed.add(id);
           }
@@ -2035,12 +2053,15 @@ export function runSummary(flow, run) {
     step: name(id), stepId: id, status: s.status, code: s.code || undefined, output: s.output || '', json: s.json,
     files: nz(s.files), actions: nz(s.actions), routes: nz(s.routes), reviewed: s.reviewed || undefined, pinned: s.pinned || undefined, error: s.error || undefined, skipReason: s.skipReason || undefined,
     exitCode: s.exitCode, durationMs: s.durationMs, usage: s.usage, attempts: nz(s.attempts), inputs: nz(s.inputs), assertions: nz(s.assertions), warnings: nz(s.warnings),
+    deliverables: nz((s.deliverables || []).map((d) => ({ id: d.id, stepKey: d.stepKey, name: d.name, format: d.format, size: d.size, url: `/api/ext/flows/${flow.id}/runs/${run.id}/files/${encodeURIComponent(d.id)}?step=${encodeURIComponent(d.stepKey || id)}` }))),
+    declaredActions: nz((s.declaredActions || []).map(({ params, hash, ident, ...p }) => p)),
   }));
   const sinks = run.only ? [run.only] : flow.steps.filter((s) => !flow.edges.some((e) => e.source === s.id)).map((s) => s.id);
   const result = sinks.map((id) => run.steps?.[id]).filter((s) => s?.output).map((s) => s.output).join('\n\n---\n\n');
   const sinkJson = sinks.map((id) => run.steps?.[id]?.json).filter((j) => j !== undefined);
   return {
     flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, startedAt: run.startedAt, endedAt: run.endedAt, deadlineAt: run.deadlineAt,
+    pendingApprovals: Object.entries(run.steps || {}).filter(([k]) => !/~\d+$/.test(k)).reduce((a, [, s]) => a + (s.declaredActions || []).filter((p) => p.status === 'awaiting_approval').length, 0) || undefined,
     error: run.error, result, json: sinkJson.length === 1 ? sinkJson[0] : sinkJson.length ? sinkJson : undefined,
     vars: run.vars, usedPins: run.usedPins || [], finally: run.finally || undefined, pauses: nz(run.pauses), breakpoints: run.breakpoints || undefined, totals: run.totals || runTotals(run), flowSnapshotHash: run.flowSnapshotHash, steps,
   };

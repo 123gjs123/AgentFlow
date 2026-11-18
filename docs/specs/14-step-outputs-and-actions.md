@@ -226,3 +226,25 @@ Module `server/outputs.js`. The engine applies a step's deliverables and actions
 - `git.commit` and `flow.invoke` actions.
 - `afs run --out`.
 - A paused run waiting for an approval (ACT-4's `waiting_approval`). The run never waits; the action is decided afterwards.
+
+## Review fixes (2026-11-18)
+
+An architect review and an adversarial review (independent agents) checked 4548b2c. Every finding was fixed, each with a regression test (e2e `29-*` "revisión 14: …").
+
+| Finding | Fix |
+|---|---|
+| **Blocker.** Actions and deliverables ran BEFORE an "after" break: the reviewer saw an issue that already existed, "retry" created another, and "edit" left stale files. | With an "after" break they are deferred: the scheduler applies them once the break settles, with the edited output, also after a retry. Elements of a "para cada" with that break turn `auto` into `confirm`. |
+| **Blocker.** The idempotency key was the hash of the rendered payload: AI output never repeats (so duplicates), and a fixed webhook was dropped forever. | The key is step + element + action + the action's TARGET: parent+summary for a sub-task, project+type+summary for an issue, issue+state for a transition, from+to+type for a link, space+title for a new page, page+body for an update. The author can also give an `idempotencyKey` template. Comments and webhooks are not de-duplicated unless keyed. A matching result reports "los datos cambiaron desde entonces". |
+| **High, proved.** Two simultaneous approvals executed twice. | A lock per run+element+action, and the record is marked `executing` before any await. |
+| **High, proved.** Approving a "para cada" element through the parent key left the element pending, so it ran again. | The plan's own `stepKey` is the truth; the element and the parent are updated together. |
+| **High, proved.** A deliverable destination from `{{vars}}`/`{{output}}` overwrote any file (`settings.json`). | Destinations are literal absolute folders: templates are dropped on save and refused at write. An existing file is not overwritten unless `overwrite: true`. |
+| An action in flight at a crash or cancel left no trace, so it was created again. | The ledger gets `started` before executing. A later run shows that action for confirmation ("quedó a medias en r_…"); an abort keeps the mark. |
+| External callers could not see results or pending approvals. | The run summary has `deliverables` (with download URLs by step+id), `declaredActions` (without params) and `pendingApprovals`. |
+| The app did not check WHICH issue or page the model wrote to, nor how many times. | The write tool must be called exactly once, and its input must contain the target params (issue, parent, project, from/to, title, page). Otherwise the action is an error, and the ledger records it as suspicious. |
+| A webhook JSON body broke on quotes and allowed field injection. A webhook URL could come from the model (SSRF). | Values in a JSON body are JSON-escaped. A URL that uses `{{output}}`, `{{steps.…}}`, `{{item}}`, `{{input}}` or `{{upstream}}` is refused. |
+| Approving could change the target. | The content may be edited when approving; the target (issue, parent, project, page, URL, credential) cannot (`TARGET_LOCKED`). |
+| The `noExternalWrites` policy failed every run. A rehearsal failed format checks. | The policy marks the action `blocked`: not run, not a failure. In a rehearsal, format errors are warnings. |
+| Download by name was ambiguous; names could collide; dotfiles failed. | Downloads are by id (or name) plus `?step=<step or step~n>`, and an ambiguous name gives 409. There is one folder per step id and element, a repeated name within a step is an error, and leading dots are replaced. |
+| Pending approvals disappeared when the step ran again, or behind a pin. | An approvals index (`data/approvals/<flow>.json`) across runs feeds the attention item (keyed on the oldest one) and an "ejecuciones anteriores" list in the Data tab. |
+| `onFailure` did not fire for `ACTION_FAILED` or `DELIVERABLE_INVALID`, and "si falla" actions never ran then. | Both happen after the outputs. |
+| Data growth. | `lastRun` keeps params clipped; `clearRuns` removes outputs and approvals; the ledger is pruned by age (400 days). Each action call stops at 3 minutes. |

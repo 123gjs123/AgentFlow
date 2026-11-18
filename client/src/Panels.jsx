@@ -428,7 +428,7 @@ const ACTION_DEFS = {
   'jira.link': { label: '🔗 Vincular issues', fields: [['from', 'Desde', '{{vars.issue}}'], ['to', 'Hacia', 'SBK-456'], ['type', 'Tipo de vínculo', 'relates to']] },
   'confluence.createPage': { label: '📘 Crear página Confluence', fields: [['space', 'Espacio', 'QA'], ['parent', 'Página padre (id)', '123456'], ['title', 'Título', 'Análisis {{vars.issue}}'], ['body', 'Contenido', '{{output}}', true]] },
   'confluence.updatePage': { label: '📘 Actualizar página Confluence', fields: [['page', 'Página (id)', '123456'], ['title', 'Título (opcional)', ''], ['body', 'Contenido', '{{output}}', true]] },
-  'http.post': { label: '🌐 HTTP POST (webhook)', fields: [['url', 'URL', 'https://hooks.slack.com/…'], ['body', 'Cuerpo', '{"text":"{{output}}"}', true], ['credential', 'Credencial (opcional)', '']] },
+  'http.post': { label: '🌐 HTTP POST (webhook)', fields: [['url', 'URL (fija o {{vars.x}}; nunca de la salida)', 'https://hooks.slack.com/…'], ['body', 'Cuerpo (si es JSON, los valores se escapan solos)', '{"text":"{{output}}"}', true], ['credential', 'Credencial (opcional)', '']] },
 };
 const DEFAULT_APPROVAL = (t) => (t === 'jira.comment' ? 'auto' : 'confirm');
 const FORMATS = [['md', 'Markdown'], ['txt', 'Texto'], ['json', 'JSON'], ['csv', 'CSV'], ['html', 'HTML'], ['feature', 'Gherkin (.feature)'], ['yaml', 'YAML'], ['junit-xml', 'JUnit XML']];
@@ -462,6 +462,7 @@ function OutputsBox({ step, onChange }) {
                   : <input data-testid={`action-${k}`} value={a.params?.[k] || ''} placeholder={ph} onChange={(e) => setA(i, { params: { ...a.params, [k]: e.target.value } })} />}
               </label>
             ))}
+            <label className="out-field"><span className="small muted">Clave para no repetirla (opcional; por defecto, el destino: issue padre + resumen, issue + estado…)</span><input value={a.idempotencyKey || ''} placeholder="{{vars.issue}}-qa" onChange={(e) => setA(i, { idempotencyKey: e.target.value || undefined })} /></label>
             <label className="toggle small"><input type="checkbox" checked={!!a.optional} onChange={(e) => setA(i, { optional: e.target.checked || undefined })} /> si falla, el step igual sale bien</label>
           </div>
         );
@@ -476,7 +477,8 @@ function OutputsBox({ step, onChange }) {
           </div>
           <div className="row">
             <input value={d.from || 'output'} title="De dónde sale: output (la salida) o json.campo" onChange={(e) => setD(i, { from: e.target.value })} style={{ width: 160 }} />
-            <input value={d.destination?.[0]?.path || ''} placeholder="copiar también a (carpeta absoluta, opcional)" onChange={(e) => setD(i, { destination: e.target.value ? [{ path: e.target.value }] : undefined })} />
+            <input value={d.destination?.[0]?.path || ''} placeholder="copiar también a (carpeta absoluta fija, opcional)" onChange={(e) => setD(i, { destination: e.target.value ? [{ path: e.target.value }] : undefined })} />
+            {d.destination?.length > 0 && <label className="toggle small"><input type="checkbox" checked={!!d.overwrite} onChange={(e) => setD(i, { overwrite: e.target.checked || undefined })} /> sobrescribir</label>}
           </div>
         </div>
       ))}

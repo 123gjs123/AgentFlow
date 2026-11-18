@@ -261,7 +261,7 @@ function CopyBtn({ text }) {
 /** Input/Output view of the last run + pin/unpin (n8n-style pin data). */
 
 /** Spec 14: what the last run of this step PRODUCED (deliverables) and its declared actions (approve / reject here). */
-const ACT_STATUS = { done: ['ok', '✓ hecha'], error: ['warn', '✗ error'], awaiting_approval: ['warn', '⏳ espera aprobación'], dry_run: ['', 'solo mostrada'], exists: ['', 'ya existía'], skipped: ['', 'omitida'], rejected: ['', 'rechazada'] };
+const ACT_STATUS = { executing: ['warn', '… ejecutándose'], blocked: ['', 'bloqueada por política'], done: ['ok', '✓ hecha'], error: ['warn', '✗ error'], awaiting_approval: ['warn', '⏳ espera aprobación'], dry_run: ['', 'solo mostrada'], exists: ['', 'ya existía'], skipped: ['', 'omitida'], rejected: ['', 'rechazada'] };
 function Produced({ flow, runId, view }) {
   const [busy, setBusy] = useState(''); const [err, setErr] = useState(''); const [editing, setEditing] = useState(null);
   const dl = view?.deliverables || []; const acts = view?.declaredActions || [];
@@ -276,7 +276,7 @@ function Produced({ flow, runId, view }) {
       {dl.length > 0 && (
         <details open><summary>📄 Entregables ({dl.length})</summary>
           <ul className="io-list">{dl.map((f) => (
-            <li key={f.path}><a href={`/api/flows/${flow.id}/runs/${runId}/files/${encodeURIComponent(f.name)}`} download data-testid="deliverable-link">{f.name}</a> <span className="muted small">{f.format} · {f.size} bytes</span>
+            <li key={f.path}><a href={`/api/flows/${flow.id}/runs/${runId}/files/${encodeURIComponent(f.id)}?step=${encodeURIComponent(f.stepKey || '')}`} download data-testid="deliverable-link">{f.name}</a> <span className="muted small">{f.format} · {f.size} bytes</span>
               {f.copies?.map((c, i) => <div key={i} className={`small ${c.error ? 'warn-text' : 'muted'}`}>→ {c.path}{c.error ? ` (${c.error})` : c.skipped ? ` (${c.skipped})` : ''}</div>)}
             </li>))}
           </ul>
@@ -314,6 +314,21 @@ function Produced({ flow, runId, view }) {
   );
 }
 
+/** Actions of OLDER runs of this step that still wait for a person (a newer run does not hide them). */
+function OlderPending({ flow, step, runId }) {
+  const [list, setList] = useState([]); const [err, setErr] = useState('');
+  const load = () => api.get(`/api/flows/${flow.id}/approvals`).then((l) => setList(l.filter((x) => String(x.stepKey).split('~')[0] === step.id && x.runId !== runId))).catch(() => {});
+  useEffect(() => { load(); }, [flow.id, step.id, runId, JSON.stringify((step.lastRun?.declaredActions || []).map((p) => p.status))]);
+  if (!list.length) return null;
+  const decide = async (x, approve) => { setErr(''); try { await api.post(`/api/flows/${flow.id}/runs/${x.runId}/actions/decide`, { stepKey: x.stepKey, actionId: x.actionId, approve }); load(); } catch (e) { setErr(e.message); } };
+  return (
+    <details open data-testid="older-pending"><summary>⏳ Acciones de ejecuciones anteriores esperando aprobación ({list.length})</summary>
+      <ul className="io-list">{list.map((x) => <li key={`${x.runId}-${x.stepKey}-${x.actionId}`}><b>{x.label}</b>{x.item ? ` · ${x.item}` : ''} <span className="muted small">{x.runId}</span>{x.reason && <div className="small muted">{x.reason}</div>}
+        <div className="row"><button className="primary small" onClick={() => decide(x, true)}>Aprobar</button><button className="ghost small" onClick={() => decide(x, false)}>Rechazar</button></div></li>)}</ul>
+      {err && <div className="warn-text small">{err}</div>}
+    </details>
+  );
+}
 export function DataTab({ flow, step, live }) {
   const [view, setView] = useState(null);
   const [runMeta, setRunMeta] = useState(null);
@@ -407,6 +422,7 @@ export function DataTab({ flow, step, live }) {
           {out.output && <details open={out.json === undefined}><summary>Texto</summary><pre className="small">{out.output}</pre></details>}
           {out.files?.length > 0 && <details open><summary>Archivos escritos ({out.files.length})</summary><ul className="io-list">{out.files.map((f) => <li key={f} className="mono small">{f}</li>)}</ul></details>}
           {!pinned && <Produced flow={flow} runId={runId} view={view || step.lastRun} />}
+          <OlderPending flow={flow} step={step} runId={runId} />
           {out.actions?.length > 0 && (
             <details open><summary>Acciones realizadas ({out.actions.length})</summary>
               <ul className="io-list">{out.actions.map((a, i) => <li key={i}><span className={`chip ${a.ok ? 'ok' : 'warn'}`}>{a.ok ? 'ok' : 'error'}</span> <b>{a.tool}</b> <span className="muted small">{a.server}</span><div className="mono small muted">{clip(a.input, 200)}</div></li>)}</ul>

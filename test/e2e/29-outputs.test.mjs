@@ -57,7 +57,7 @@ test('entregables: .feature, JSON de un campo y CSV de una lista; chequeo de for
 });
 
 test('acción automática (comentar en Jira): Haiku con SOLO las herramientas de esa acción; la clave llega a la salida; re-ejecutar con la misma entrada no la repite', async () => {
-  const st = role('Analizar', '[[mock:say análisis listo]]', { id: 's_ac', actions: [{ id: 'a_c', type: 'jira.comment', params: { issue: '{{vars.issue}}', body: `Resultado: {{output}} [[mock:tool ${ATL}__addCommentToJiraIssue]] ${okJson('SBK-1')}` } }] });
+  const st = role('Analizar', '[[mock:say análisis listo]]', { id: 's_ac', actions: [{ id: 'a_c', type: 'jira.comment', idempotencyKey: '{{vars.issue}}-resultado', params: { issue: '{{vars.issue}}', body: `Resultado: {{output}} [[mock:tool ${ATL}__addCommentToJiraIssue SBK-1]] ${okJson('SBK-1')}` } }] });
   const nx = cmd('Siguiente', 'Write-Output "{{steps.Analizar.actions}}"', { id: 's_an' });
   const f = await s.flow('Acción auto', [st, nx], [['s_ac', 's_an']], { vars: { issue: 'SBK-1' } });
   assert.equal((await s.getFlow(f.id)).steps[0].actions[0].approval, 'auto', 'comentar es automática por defecto');
@@ -90,12 +90,13 @@ test('una acción que no llama a la herramienta de escritura no cuenta como hech
   const g = await s.getFlow(f.id); g.steps[0].actions[0].optional = true; await s.uiOk('PUT', `/api/flows/${f.id}`, g);
   r = await run(f.id);
   assert.equal(r.steps.s_nf.status, 'success', 'opcional: el step sale bien');
-  const g2 = await s.getFlow(f.id); g2.steps[0].actions[0].optional = false; g2.steps[0].actions[0].params.body = `con política [[mock:tool ${ATL}__addCommentToJiraIssue]] ${okJson('SBK-3')}`; g2.policies = [{ type: 'noExternalWrites' }];
+  const g2 = await s.getFlow(f.id); g2.steps[0].actions[0].optional = false; g2.steps[0].actions[0].params.body = `con política [[mock:tool ${ATL}__addCommentToJiraIssue SBK-2]] ${okJson('SBK-3')}`; g2.policies = [{ type: 'noExternalWrites' }];
   await s.uiOk('PUT', `/api/flows/${f.id}`, g2);
   const n0 = s.calls().length;
   r = await run(f.id);
-  assert.equal(r.steps.s_nf.status, 'error');
-  assert.match(r.steps.s_nf.error, /sin escrituras externas/);
+  assert.equal(r.steps.s_nf.status, 'success', 'bloqueada por política no es una falla');
+  assert.equal(r.steps.s_nf.declaredActions[0].status, 'blocked');
+  assert.match(r.steps.s_nf.declaredActions[0].reason, /sin escrituras externas/);
   assert.ok(!s.callsSince(n0).some((c) => /Ejecutas UNA acción/.test(c.system)));
 });
 
@@ -117,7 +118,8 @@ test('confirmar: la ejecución no espera; la acción queda en ⚡ atención; apr
   assert.match(att.title, /2 acciones esperando aprobación/);
   assert.deepEqual(att.target, { flowId: f.id, stepId: 's_cf', open: 'approve' });
   // approve with edited data (the mock reads its answer from the edited summary)
-  const edited = { ...acts[0].params, summary: `Falla la línea media [[mock:tool ${ATL}__createJiraIssue]] ${okJson('SBK-77')}` };
+  const edited = { ...acts[0].params, summary: `Falla la línea media [[mock:tool ${ATL}__createJiraIssue SBK]] ${okJson('SBK-77')}` };
+  assert.equal((await s.ui('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { stepKey: 's_cf', actionId: 'a_bug', approve: true, params: { ...edited, project: 'OTRO' } })).body.code, 'TARGET_LOCKED', 'el destino no se cambia al aprobar');
   const res = await s.uiOk('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { stepKey: 's_cf', actionId: 'a_bug', approve: true, params: edited });
   assert.equal(res.status, 'done'); assert.equal(res.key, 'SBK-77'); assert.equal(res.edited, true);
   assert.equal((await s.ui('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { stepKey: 's_cf', actionId: 'a_bug', approve: true })).status, 409, 'ya no espera');
@@ -131,7 +133,7 @@ test('confirmar: la ejecución no espera; la acción queda en ⚡ atención; apr
   // rehearsal: shown, never sent
   const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/rehearsal`, { input: '' });
   const rh = await s.waitRun(f.id, runId);
-  assert.ok(rh.steps.s_cf.declaredActions.every((p) => p.status === 'dry_run'), JSON.stringify(rh.steps.s_cf.declaredActions?.map((p) => p.status)));
+  assert.deepEqual(rh.steps.s_cf.declaredActions.map((p) => p.status), ['exists', 'dry_run'], 'la ya hecha figura como existente; la otra solo se muestra');
 });
 
 test('HTTP POST: la credencial solo va a su propio sitio; un flujo importado con acciones queda en cuarentena', async () => {
@@ -174,7 +176,7 @@ test('UI: agregar una acción "confirmar", ejecutar, aprobarla en Datos; el nodo
     const box = page.getByTestId('outputs-box');
     await box.getByTestId('action-add').selectOption('jira.transition');
     await box.getByTestId('action-issue').fill('SBK-5');
-    await box.getByTestId('action-to').fill(`Done [[mock:tool ${ATL}__transitionJiraIssue]] ${okJson('SBK-5')}`);
+    await box.getByTestId('action-to').fill(`Done [[mock:tool ${ATL}__transitionJiraIssue SBK-5]] ${okJson('SBK-5')}`);
     await nodeLoc.getByText('⚡ 1').waitFor();
     let g;
     for (let i = 0; i < 40; i++) { g = await u.getFlow(f.id); if (g.steps[0].actions?.[0]?.params?.to?.includes('Done')) break; await sleep(150); }
@@ -189,4 +191,130 @@ test('UI: agregar una acción "confirmar", ejecutar, aprobarla en Datos; el nodo
     await page.getByTestId('declared-action').getByText('✓ hecha').waitFor();
     await nodeLoc.getByTestId('approval-badge').waitFor({ state: 'detached' });
   } finally { await ui.close?.(); }
+});
+
+// ---- regressions of the architect + adversarial reviews of spec 14 ----
+test('revisión 14: con break "después" las acciones corren DESPUÉS de revisar, con la salida editada; los entregables también', async () => {
+  const st = role('Analizar', '[[mock:say original]]', { id: 's_bk', breakpoint: 'after',
+    actions: [{ id: 'a_k', type: 'jira.comment', approval: 'auto', params: { issue: 'SBK-4', body: `{{output}} [[mock:tool ${ATL}__addCommentToJiraIssue SBK-4]] ${okJson('SBK-4')}` } }],
+    deliverables: [{ id: 'd_k', format: 'md', path: 'nota.md' }] });
+  const f = await s.flow('Break y acciones', [st], []);
+  const n0 = s.calls().length;
+  const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '', breakpoints: true });
+  await s.waitRun(f.id, runId, 20000, (x) => x.status === 'paused');
+  assert.ok(!s.callsSince(n0).some((c) => /Ejecutas UNA acción/.test(c.system)), 'nada se envió antes del break');
+  await s.uiOk('POST', `/api/flows/${f.id}/runs/${runId}/resume`, { action: 'edit', output: 'corregido por QA' });
+  const r = await s.waitRun(f.id, runId);
+  assert.equal(r.steps.s_bk.status, 'success', r.steps.s_bk.error);
+  const call = s.callsSince(n0).find((c) => /Ejecutas UNA acción/.test(c.system));
+  assert.match(call.prompt, /corregido por QA/, 'la acción usa la salida editada');
+  assert.equal(fs.readFileSync(r.steps.s_bk.deliverables[0].path, 'utf8'), 'corregido por QA');
+});
+
+test('revisión 14: la clave de idempotencia es el destino (no el texto): otra salida no crea otro sub-task; un webhook fijo sí vuelve a enviarse', async () => {
+  let posts = 0;
+  const srv = http.createServer((req, res) => { posts++; req.resume(); res.writeHead(200); res.end(); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const answer = path.join(s.dirs.work, `out-${Date.now()}.txt`).replace(/\\/g, '/');
+    fs.writeFileSync(answer, 'primera versión');
+    const st = role('QA', `[[mock:say-file ${answer}]]`, { id: 's_id', actions: [
+      { id: 'a_sub', type: 'jira.createSubtask', approval: 'auto', params: { parent: 'SBK-8', summary: 'QA SBK-8', description: `{{output}} [[mock:tool ${ATL}__createJiraIssue SBK-8]] ${okJson('SBK-80')}` } },
+      { id: 'a_hook', type: 'http.post', approval: 'auto', params: { url: `http://127.0.0.1:${srv.address().port}/nightly`, body: '{"text":"Nightly OK"}' } },
+    ] });
+    const f = await s.flow('Idempotencia', [st], []);
+    let r = await run(f.id);
+    assert.deepEqual(r.steps.s_id.declaredActions.map((p) => p.status), ['done', 'done']);
+    fs.writeFileSync(answer, 'otra salida distinta del modelo');
+    r = await run(f.id);
+    const sub = r.steps.s_id.declaredActions.find((p) => p.actionId === 'a_sub');
+    assert.equal(sub.status, 'exists', 'mismo padre + resumen: no se repite');
+    assert.match(sub.reason, /los datos cambiaron/);
+    assert.ok(r.steps.s_id.actions.some((a) => a.key === 'SBK-80'), 'la clave sigue llegando al siguiente');
+    assert.equal(posts, 2, 'el webhook fijo se envía en cada ejecución');
+  } finally { srv.close(); }
+});
+
+test('revisión 14: dos aprobaciones a la vez ejecutan UNA sola vez; un elemento de "para cada" aprobado por la clave del padre no queda pendiente', async () => {
+  let posts = 0;
+  const srv = http.createServer((req, res) => { posts++; req.resume(); setTimeout(() => { res.writeHead(200); res.end(); }, 800); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${srv.address().port}/x`;
+    const src = role('Lista', '[[mock:json {"t":["A","B"]}]]', { id: 's_l', output: { format: 'json' } });
+    const each = role('Cada', '[[mock:say ok]]', { id: 's_e', forEach: { path: 't' }, actions: [{ id: 'a_p', type: 'http.post', params: { url, body: '{"item":"{{item}}"}' } }] });
+    const f = await s.flow('Aprobar dos veces', [src, each], [['s_l', 's_e']]);
+    const r = await run(f.id);
+    assert.deepEqual(r.steps.s_e.declaredActions.map((p) => [p.stepKey, p.status]), [['s_e~1', 'awaiting_approval'], ['s_e~2', 'awaiting_approval']]);
+    // the same element approved twice at once (two tabs, a retrying client): ONE execution
+    const one = { stepKey: 's_e~1', actionId: 'a_p', approve: true };
+    const [x, y] = await Promise.all([s.ui('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, one), s.ext('POST', `/flows/${f.id}/runs/${r.id}/actions/decide`, one)]);
+    assert.deepEqual([x.status, y.status].sort(), [200, 409]);
+    assert.equal(posts, 1, 'una sola ejecución');
+    let sum = await s.ext('GET', `/flows/${f.id}/runs/${r.id}`);
+    assert.equal(sum.body.pendingApprovals, 1, 'el resumen externo dice cuántas esperan');
+    assert.deepEqual((await s.uiOk('GET', `/api/flows/${f.id}/approvals`)).map((p) => p.stepKey), ['s_e~2']);
+    // through the PARENT key: it takes the element that still waits, and that element is decided (not left pending)
+    const viaParent = await s.uiOk('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { stepKey: 's_e', actionId: 'a_p', approve: true });
+    assert.equal(viaParent.stepKey, 's_e~2');
+    const after = await s.uiOk('GET', `/api/flows/${f.id}/runs/${r.id}`);
+    assert.deepEqual(['s_e~1', 's_e~2'].map((k) => after.steps[k].declaredActions[0].status), ['done', 'done']);
+    assert.equal((await s.ui('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { ...one, stepKey: 's_e~2' })).status, 409, 'no se vuelve a ejecutar');
+    assert.equal(posts, 2);
+    sum = await s.ext('GET', `/flows/${f.id}/runs/${r.id}`);
+    assert.equal(sum.body.pendingApprovals, undefined);
+  } finally { srv.close(); }
+});
+
+test('revisión 14: un destino de copia no viene de plantillas ni sobrescribe; archivos de igual nombre por elemento se descargan por step', async () => {
+  const victim = path.join(s.dirs.work, `victim-${Date.now()}`); fs.mkdirSync(victim, { recursive: true });
+  fs.writeFileSync(path.join(victim, 'settings.json'), '{"original":true}');
+  const src = role('Lista', '[[mock:json {"t":["A","B"]}]]', { id: 's_l2', output: { format: 'json' } });
+  const each = role('Cada', 'res {{item}} [[mock:echo]]', { id: 's_e2', forEach: { path: 't' }, deliverables: [
+    { id: 'd_r', format: 'txt', path: 'res.txt' },
+    { id: 'd_s', format: 'json', path: 'settings.json', from: 'output', destination: [{ path: victim }] },
+    { id: 'd_t', format: 'txt', path: 'x.txt', destination: [{ path: '{{vars.dir}}' }] },
+  ] });
+  const f = await s.flow('Destinos', [src, each], [['s_l2', 's_e2']], { vars: { dir: victim } });
+  const g = await s.getFlow(f.id);
+  assert.equal(g.steps[1].deliverables.find((d) => d.id === 'd_t').destination, undefined, 'destino con plantilla descartado al guardar');
+  g.steps[1].deliverables = g.steps[1].deliverables.filter((d) => d.id !== 'd_s');
+  await s.uiOk('PUT', `/api/flows/${f.id}`, g);
+  const r = await run(f.id);
+  assert.equal(r.steps.s_e2.status, 'success', r.steps.s_e2.error);
+  assert.equal(fs.readFileSync(path.join(victim, 'settings.json'), 'utf8'), '{"original":true}');
+  const amb = await s.ext('GET', `/flows/${f.id}/runs/${r.id}/files/res.txt`);
+  assert.equal(amb.status, 409, 'dos res.txt: hay que decir de qué elemento');
+  const b = await s.ext('GET', `/flows/${f.id}/runs/${r.id}/files/d_r?step=s_e2~2`);
+  assert.equal(b.status, 200);
+  assert.match(String(b.body), /res B/);
+  // an existing file at the destination is not overwritten
+  const g2 = await s.getFlow(f.id); g2.steps[1].forEach = undefined; g2.steps[1].task = '{"a":1} [[mock:say {"a":1}]]'; g2.steps[1].deliverables = [{ id: 'd_s', format: 'json', path: 'settings.json', destination: [{ path: victim }] }];
+  await s.uiOk('PUT', `/api/flows/${f.id}`, g2);
+  const r2 = await run(f.id);
+  assert.equal(r2.steps.s_e2.status, 'error');
+  assert.match(r2.steps.s_e2.error, /ya existe un archivo con ese nombre/);
+  assert.equal(fs.readFileSync(path.join(victim, 'settings.json'), 'utf8'), '{"original":true}');
+});
+
+test('revisión 14: la llamada debe usar el destino aprobado y una sola vez; el webhook escapa el JSON y no acepta una URL que salga de la salida', async () => {
+  let got = null;
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => { b += c; }); req.on('end', () => { got = b; res.writeHead(200); res.end(); }); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const st = role('Paso', '[[mock:json {"url":"http://127.0.0.1:1/x","txt":"hola \\"mundo\\"\\n, \\"channel\\":\\"#general"}]]', { id: 's_v', output: { format: 'json' }, actions: [
+      { id: 'a_other', type: 'jira.comment', approval: 'auto', optional: true, params: { issue: 'SBK-1', body: `x [[mock:tool ${ATL}__addCommentToJiraIssue SBK-999]] ${okJson('SBK-999')}` } },
+      { id: 'a_twice', type: 'jira.comment', approval: 'auto', optional: true, params: { issue: 'SBK-1', body: `x [[mock:tool ${ATL}__addCommentToJiraIssue SBK-1]] [[mock:tool ${ATL}__addCommentToJiraIssue SBK-1]] ${okJson('SBK-1')}` } },
+      { id: 'a_json', type: 'http.post', approval: 'auto', params: { url: `http://127.0.0.1:${srv.address().port}/h`, body: '{"text":"{{output.json.txt}}"}' } },
+      { id: 'a_url', type: 'http.post', approval: 'auto', optional: true, params: { url: '{{output.json.url}}', body: 'x' } },
+    ] });
+    const f = await s.flow('Verificación', [st], []);
+    const r = await run(f.id);
+    const by = (id) => r.steps.s_v.declaredActions.find((p) => p.actionId === id);
+    assert.equal(by('a_other').status, 'error'); assert.match(by('a_other').error, /no usó el destino aprobado \(issue=SBK-1\)/);
+    assert.equal(by('a_twice').status, 'error'); assert.match(by('a_twice').error, /Se llamó 2 veces/);
+    assert.equal(by('a_json').status, 'done', by('a_json').error);
+    assert.deepEqual(JSON.parse(got), { text: 'hola "mundo"\n, "channel":"#general' }, 'una sola clave: el texto no inyecta campos');
+    assert.equal(by('a_url').status, 'error'); assert.match(by('a_url').error, /no puede salir de la ejecución/);
+  } finally { srv.close(); }
 });
