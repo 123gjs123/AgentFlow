@@ -52,12 +52,36 @@ function sourceOf(p) {
   return 'project';
 }
 
+/**
+ * Plugins Claude Code really loads for `projectDir` (installed_plugins.json): user scope everywhere, project/local scope
+ * only inside that project. A plugin in the cache but installed for another project is NOT available (seen for real:
+ * qa-domain-sportsbook installed for automation-api-sportsbook looked available in every flow).
+ * Returns null when the file cannot be read (then every cached plugin counts, as before).
+ */
+function loadedPlugins(projectDir) {
+  let j; try { j = JSON.parse(fs.readFileSync(path.join(HOME, 'plugins', 'installed_plugins.json'), 'utf8')); } catch { return null; }
+  const all = j?.plugins && typeof j.plugins === 'object' ? j.plugins : j;
+  const proj = projectDir ? path.resolve(projectDir).toLowerCase() : null;
+  const inside = (p) => { const r = path.resolve(p).toLowerCase(); return proj && (proj === r || proj.startsWith(r + path.sep)); };
+  const out = new Set();
+  for (const [key, v] of Object.entries(all || {})) {
+    for (const e of Array.isArray(v) ? v : [v]) {
+      if (!e || typeof e !== 'object') continue;
+      if (!e.scope || e.scope === 'user' || (e.projectPath && inside(e.projectPath))) out.add(key.split('@')[0]);
+    }
+  }
+  return out;
+}
+const pluginOf = (f) => { const m = f.split(path.sep); const i = m.indexOf('cache'); return i >= 0 ? m[i + 2] || m[i + 1] : null; };
+
 export function listSkills(projectDir) {
   const roots = [path.join(HOME, 'skills'), path.join(HOME, 'plugins', 'cache')];
   if (projectDir) roots.push(path.join(projectDir, '.claude', 'skills'));
+  const loaded = loadedPlugins(projectDir);
   const seen = new Map();
   for (const r of roots) {
     for (const f of walk(r, (_p, n) => n === 'SKILL.md')) {
+      if (loaded && f.includes(`${path.sep}plugins${path.sep}cache${path.sep}`) && !loaded.has(pluginOf(f))) continue;
       const meta = frontmatter(f);
       const name = meta.name || path.basename(path.dirname(f));
       const src = sourceOf(f);
