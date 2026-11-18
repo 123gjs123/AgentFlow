@@ -174,6 +174,7 @@ export default function App() {
     if (t.open === 'settings') { setSettings({ tab: t.tab || 'credentials', name: t.name || null }); return; }
     if (t.open === 'review' && t.runId) { setPaused({ runId: t.runId, nonce: Date.now() }); setReviewOpen(true); return; }
     if (t.open === 'run' && t.runId) { setSelectedId(null); setSelectedEdge(null); setFlowTab('runs'); setFocusRun({ runId: t.runId, n: Date.now() }); return; }
+    if (t.open === 'approve' && t.stepId) { setSelectedEdge(null); setSelectedId(t.stepId); setStepTab('data'); return; } // spec 14
     if (t.open === 'watch' && t.stepId) { setSelectedEdge(null); setSelectedId(t.stepId); setStepTab('config'); return; } // spec 10
     if (t.open === 'flowreview') { setSelectedId(null); setSelectedEdge(null); setFlowTab('review'); return; } // spec 28
     if (t.open === 'preflight') setPfModal({});

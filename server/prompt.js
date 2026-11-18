@@ -52,6 +52,9 @@ function resolveKey(key, ctx) {
   if (key === 'run.short') return String(ctx.runId ?? '').replace(/^r_/, '');
   if (key === 'run.date') return new Date().toISOString().slice(0, 10);
   if (key === 'upstream') return ctx.upstream ?? '';
+  // Spec 14: an action/deliverable may use the step's own result ({{output}}, {{output.json.x}})
+  if (key === 'output' && ctx.output !== undefined) return show(ctx.output);
+  if ((key === 'output.json' || key.startsWith('output.json.')) && ctx.output !== undefined) return show(getPath(ctx.outputJson, key.slice(12)));
   // Spec 15 DATA-10: the element of a "para cada" step ({{item}}, {{item.key}}, {{item.index}}, {{item.total}})
   if (key === 'item' || key.startsWith('item.')) {
     if (!ctx.item) return null;

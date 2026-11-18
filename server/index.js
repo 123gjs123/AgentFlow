@@ -24,6 +24,7 @@ import * as CRED from './credentials.js';
 import * as attention from './attention.js';
 import * as review from './review.js';
 import * as W from './watch.js';
+import * as OUT from './outputs.js';
 import * as POL from './policies.js';
 import * as notify from './notify.js';
 import { checkSystem } from './system.js';
@@ -164,6 +165,8 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
   res.locals.runId = runId;
   return respond(runId);
 }));
+ext.get('/flows/:flow/runs/:runId/files/:file', wrap(async (req, res) => { const flow = extFlow(req.params.flow); const f = deliverableFile(flow.id, req.params.runId, req.params.file); await new Promise((ok, ko) => res.download(f.path, f.name, (e) => (e ? ko(e) : ok()))); return undefined; }));
+ext.post('/flows/:flow/runs/:runId/actions/decide', wrap((req) => { const flow = extFlow(req.params.flow); return decide(flow.id, req.params.runId, req.body); }));
 ext.get('/flows/:flow/runs/:runId', wrap((req) => {
   const flow = extFlow(req.params.flow);
   return engine.runSummary(flow, extRun(flow, req.params.runId));
@@ -310,6 +313,7 @@ function cleanStepExtras(steps) {
       const w = W.cleanWatches(s.watches);
       if (w?.length) { for (const x of w) { if (seen.has(x.id)) x.id = `w_${crypto.randomBytes(4).toString('hex')}`; seen.add(x.id); } s.watches = w; } else Reflect.deleteProperty(s, 'watches');
     }
+    for (const [k, fn] of [['actions', OUT.cleanActions], ['deliverables', OUT.cleanDeliverables]]) if (k in s) { const v = fn(s[k]); if (v?.length) s[k] = v; else Reflect.deleteProperty(s, k); }
     if ('forEach' in s) {
       const fe = s.forEach;
       if (!fe || typeof fe !== 'object' || typeof fe.path !== 'string') { Reflect.deleteProperty(s, 'forEach'); continue; }
@@ -479,6 +483,21 @@ app.post('/api/flows/:id/runs/:runId/cancel', wrap((req) => {
 app.post('/api/flows/:id/runs/:runId/resume', wrap((req) => { need(req.params.id); return engine.resumeRun(req.params.id, req.params.runId, req.body?.step || null, req.body || {}); }));
 app.get('/api/flows/:id/runs', wrap((req) => store.listRuns(req.params.id)));
 app.get('/api/flows/:id/runs/:runId', wrap((req) => engine.getRunLive(req.params.id, req.params.runId)));
+// spec 14: ⚡ a declared action in "confirm" waits for a person (the run did not wait for it)
+const decideDeps = { getRun: (f, r) => engine.getRunLive(f, r), saveRun: (r) => store.saveRun(r), getFlow: store.getFlow, updateFlow: (id, fn) => { const fl = store.updateFlow(id, fn); if (fl) engine.flowChanged(fl); attention.refreshFlow(id); return fl; }, policyBlocked: (fl) => POL.has(fl, 'noExternalWrites'), quarantine: quarantineProblem };
+const decide = (flowId, runId, b) => OUT.decide(flowId, runId, String(b?.stepKey || ''), String(b?.actionId || ''), { approve: b?.approve === true, params: b?.params }, decideDeps);
+app.post('/api/flows/:id/runs/:runId/actions/decide', wrap((req) => { need(req.params.id); return decide(req.params.id, req.params.runId, req.body); }));
+// spec 14: 📄 a deliverable of a run (by its id inside the step, or by file name)
+function deliverableFile(flowId, runId, fileRef) {
+  const run = engine.getRunLive(flowId, runId);
+  if (!run) throw fail(404, 'Ejecución no encontrada', 'RUN_NOT_FOUND');
+  const all = Object.values(run.steps || {}).flatMap((s) => s.deliverables || []);
+  const f = all.find((x) => x.name === fileRef) || all.find((x) => x.id === fileRef);
+  const root = path.resolve(OUT.outputsDir(flowId, runId));
+  if (!f || !path.resolve(f.path).startsWith(root + path.sep) || !fs.existsSync(f.path)) throw fail(404, `Archivo no encontrado: ${fileRef}`, 'FILE_NOT_FOUND');
+  return f;
+}
+app.get('/api/flows/:id/runs/:runId/files/:file', wrap(async (req, res) => { need(req.params.id); const f = deliverableFile(req.params.id, req.params.runId, req.params.file); await new Promise((ok, ko) => res.download(f.path, f.name, (e) => (e ? ko(e) : ok()))); return undefined; }));
 
 // ----- memory -----
 app.post('/api/flows/:id/memory/:scope', wrap((req) => engine.addMemory(req.params.id, req.params.scope, req.body?.text, 'manual')));
@@ -779,7 +798,8 @@ server.listen(PORT, HOST, () => {
   // spec 27: attention list from disk (after the recovery), then notifications; no toast storm, one summary
   // spec 28: the flow review (lint in the background, AI review on demand) feeds the 🔔 list with kind 'review'
   review.init({ bus: engine.bus, emit: (m) => engine.bus.emit('msg', m), refreshAttention: (flowId) => attention.refreshFlow(flowId) });
-  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem, watchItem: W.attentionItem });
+  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem, watchItem: W.attentionItem, approvalItem: OUT.attentionItem });
+  OUT.init({ httpAuth: W.authHeader });
   W.init({
     emit: (m) => engine.bus.emit('msg', m), onNews: (flowId) => attention.refreshFlow(flowId),
     // a run started by news has the guards of an external run (its input comes from outside)

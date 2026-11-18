@@ -92,6 +92,8 @@ function compute(flowId, cachedPreflight) {
   try { const rv = deps.reviewItem?.(flow); if (rv) out.push(rv); } catch (e) { console.error('attention review', e.message); }
   // spec 10: pending news of the watched sources
   try { const nw = deps.watchItem?.(flow); if (nw) out.push(nw); } catch (e) { console.error('attention watch', e.message); }
+  // spec 14: declared actions waiting for a person
+  try { const ap = deps.approvalItem?.(flow); if (ap) out.push(ap); } catch (e) { console.error('attention approval', e.message); }
   return out;
 }
 

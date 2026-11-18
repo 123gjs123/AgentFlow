@@ -139,6 +139,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
           )}
           <ForEachBox flow={flow} step={step} onChange={onChange} />
           <WatchBox flow={flow} step={step} watch={watch} onChange={onChange} />
+          <OutputsBox step={step} onChange={onChange} />
           <div className="ctx-block" data-testid="step-context">
             <div className="ctx-title">📎 Contexto{(step.contextSources || []).length ? ` (${step.contextSources.length})` : ''}</div>
             {step.kind === 'command'
@@ -418,6 +419,79 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
 
 // ---------------- arrow (edge) settings: spec 18 ----------------
 /** Steps that always run before `id` (its ancestors): a condition can look at one of their decisions. */
+// Spec 14: ⚡ declared actions and 📄 deliverables of a step (what it CHANGES and what it PRODUCES)
+const ACTION_DEFS = {
+  'jira.comment': { label: '💬 Comentar en Jira', fields: [['issue', 'Issue', 'SBK-123 o {{vars.issue}}'], ['body', 'Comentario', '{{output}}', true]] },
+  'jira.createSubtask': { label: '🧩 Crear sub-task', fields: [['parent', 'Issue padre', '{{vars.issue}}'], ['summary', 'Resumen', 'QA: {{vars.issue}}'], ['description', 'Descripción', '{{output}}', true]] },
+  'jira.createIssue': { label: '🐞 Crear issue / bug', fields: [['project', 'Proyecto', 'SBK'], ['issueType', 'Tipo', 'Bug'], ['summary', 'Resumen', '{{output.json.defects.0.title}}'], ['description', 'Descripción', '{{output}}', true], ['fields', 'Campos extra (JSON)', '{"environment":"QA, PPD"}', true]] },
+  'jira.transition': { label: '➡ Transicionar issue', fields: [['issue', 'Issue', '{{vars.issue}}'], ['to', 'A estado', 'Ready For Testing']] },
+  'jira.link': { label: '🔗 Vincular issues', fields: [['from', 'Desde', '{{vars.issue}}'], ['to', 'Hacia', 'SBK-456'], ['type', 'Tipo de vínculo', 'relates to']] },
+  'confluence.createPage': { label: '📘 Crear página Confluence', fields: [['space', 'Espacio', 'QA'], ['parent', 'Página padre (id)', '123456'], ['title', 'Título', 'Análisis {{vars.issue}}'], ['body', 'Contenido', '{{output}}', true]] },
+  'confluence.updatePage': { label: '📘 Actualizar página Confluence', fields: [['page', 'Página (id)', '123456'], ['title', 'Título (opcional)', ''], ['body', 'Contenido', '{{output}}', true]] },
+  'http.post': { label: '🌐 HTTP POST (webhook)', fields: [['url', 'URL', 'https://hooks.slack.com/…'], ['body', 'Cuerpo', '{"text":"{{output}}"}', true], ['credential', 'Credencial (opcional)', '']] },
+};
+const DEFAULT_APPROVAL = (t) => (t === 'jira.comment' ? 'auto' : 'confirm');
+const FORMATS = [['md', 'Markdown'], ['txt', 'Texto'], ['json', 'JSON'], ['csv', 'CSV'], ['html', 'HTML'], ['feature', 'Gherkin (.feature)'], ['yaml', 'YAML'], ['junit-xml', 'JUnit XML']];
+const rid = (p) => `${p}_${Math.random().toString(36).slice(2, 10)}`;
+
+function OutputsBox({ step, onChange }) {
+  const actions = step.actions || []; const dels = step.deliverables || [];
+  const setA = (i, patch) => onChange({ actions: actions.map((a, j) => (j === i ? { ...a, ...patch } : a)) });
+  const setD = (i, patch) => onChange({ deliverables: dels.map((d, j) => (j === i ? { ...d, ...patch } : d)) });
+  return (
+    <div className="ctx-block" data-testid="outputs-box">
+      <div className="ctx-title">⚡ Acciones y 📄 entregables{actions.length + dels.length ? ` (${actions.length + dels.length})` : ''}</div>
+      <p className="muted small">Lo que el step <b>cambia</b> afuera (Jira, Confluence, un webhook) y los <b>archivos</b> que deja. Las acciones las ejecuta la app con solo la herramienta de esa acción; «confirmar» espera a que alguien la apruebe en Datos, sin frenar la ejecución. Re-ejecutar con la misma entrada no duplica.</p>
+      {actions.map((a, i) => {
+        const def = ACTION_DEFS[a.type];
+        return (
+          <div key={a.id} className="src-item out-item" data-testid="action-item" data-type={a.type}>
+            <div className="row">
+              <b>{def?.label || a.type}</b><div className="grow" />
+              <select value={a.approval || DEFAULT_APPROVAL(a.type)} onChange={(e) => setA(i, { approval: e.target.value })} title="Aprobación" data-testid="action-approval">
+                <option value="confirm">Confirmar antes</option><option value="auto">Automática</option><option value="dryRun">Solo mostrar (no envía)</option>
+              </select>
+              <select value={a.when || 'success'} onChange={(e) => setA(i, { when: e.target.value })} title="Cuándo">
+                <option value="success">si sale bien</option><option value="failure">si falla</option><option value="always">siempre</option>
+              </select>
+              <button className="ghost small" onClick={() => onChange({ actions: actions.filter((_, j) => j !== i) })} title="Quitar">✕</button>
+            </div>
+            {def?.fields.map(([k, label, ph, multi]) => (
+              <label key={k} className="out-field"><span className="small muted">{label}</span>
+                {multi ? <textarea rows={2} className="mono" value={typeof a.params?.[k] === 'object' ? JSON.stringify(a.params[k]) : a.params?.[k] || ''} placeholder={ph} onChange={(e) => setA(i, { params: { ...a.params, [k]: e.target.value } })} />
+                  : <input data-testid={`action-${k}`} value={a.params?.[k] || ''} placeholder={ph} onChange={(e) => setA(i, { params: { ...a.params, [k]: e.target.value } })} />}
+              </label>
+            ))}
+            <label className="toggle small"><input type="checkbox" checked={!!a.optional} onChange={(e) => setA(i, { optional: e.target.checked || undefined })} /> si falla, el step igual sale bien</label>
+          </div>
+        );
+      })}
+      {dels.map((d, i) => (
+        <div key={d.id} className="src-item out-item" data-testid="deliverable-item">
+          <div className="row">
+            <b>📄</b>
+            <select value={d.format} onChange={(e) => setD(i, { format: e.target.value })}>{FORMATS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+            <input data-testid="deliverable-path" value={d.path || ''} placeholder="{{vars.issue}}.feature" onChange={(e) => setD(i, { path: e.target.value })} />
+            <button className="ghost small" onClick={() => onChange({ deliverables: dels.filter((_, j) => j !== i) })} title="Quitar">✕</button>
+          </div>
+          <div className="row">
+            <input value={d.from || 'output'} title="De dónde sale: output (la salida) o json.campo" onChange={(e) => setD(i, { from: e.target.value })} style={{ width: 160 }} />
+            <input value={d.destination?.[0]?.path || ''} placeholder="copiar también a (carpeta absoluta, opcional)" onChange={(e) => setD(i, { destination: e.target.value ? [{ path: e.target.value }] : undefined })} />
+          </div>
+        </div>
+      ))}
+      <div className="row wrap">
+        <select value="" data-testid="action-add" onChange={(e) => e.target.value && onChange({ actions: [...actions, { id: rid('a'), type: e.target.value, params: {}, approval: DEFAULT_APPROVAL(e.target.value), when: 'success' }] })}>
+          <option value="">＋ Acción…</option>{Object.entries(ACTION_DEFS).map(([k, d]) => <option key={k} value={k}>{d.label}</option>)}
+        </select>
+        <select value="" data-testid="deliverable-add" onChange={(e) => e.target.value && onChange({ deliverables: [...dels, { id: rid('d'), format: e.target.value, path: '', from: 'output' }] })}>
+          <option value="">＋ Archivo…</option>{FORMATS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 const WATCH_TYPES = [
   ['git', '🌿 Rama git', 'C:\\repos\\mi-repo', 'Carpeta del repo (o {{vars.repo}}); abajo, la rama. Hace fetch y lista los commits nuevos. Sin modelo.'],
   ['jira', '🎫 Jira', 'SBK-123, SBK-124  ·  o JQL: project = SBK AND status = "Ready For Testing"', 'Claves o JQL. Avisa cambios de estado y comentarios nuevos. Usa Haiku con herramientas de solo lectura.'],

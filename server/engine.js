@@ -9,6 +9,7 @@ import * as store from './store.js';
 import { runClaude, killTree, isTransient } from './claude.js';
 import { resolveContext, contextAccess } from './sources.js';
 import { quarantineProblem } from './bundle.js';
+import * as OUT from './outputs.js';
 import { resolveCredential } from './credentials.js';
 import { findAgent, findSkill } from './catalog.js';
 import * as P from './prompt.js';
@@ -364,7 +365,7 @@ async function executeForEach(flow, step, input, run, signal, upstream, opts) {
   emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   const end = (status, extra = {}) => {
     Object.assign(rs, { status, ...extra }); rs.endedAt = now(); rs.durationMs = rs.endedAt - rs.startedAt;
-    setLast({ status: rs.status, skipReason: rs.skipReason || null, endedAt: rs.endedAt, output: rs.output, json: rs.json, files: rs.files, actions: rs.actions, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, runId: run.id, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: 0 });
+    setLast({ status: rs.status, skipReason: rs.skipReason || null, endedAt: rs.endedAt, output: rs.output, json: rs.json, files: rs.files, actions: rs.actions, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, runId: run.id, deliverables: rs.deliverables, declaredActions: rs.declaredActions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: 0 });
     emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
     store.saveRun(run); run.dirty = false;
     return rs;
@@ -399,6 +400,7 @@ async function executeForEach(flow, step, input, run, signal, upstream, opts) {
   rs.output = results.map((r, i) => (r ? `## ${rs.forEach.items[i].label} — ${r.status}\n${r.error ? `Error: ${r.error}\n` : ''}${r.output || ''}` : null)).filter(Boolean).join('\n\n');
   rs.json = results.map((r, i) => ({ item: items[i], status: r?.status || 'cancelled', ...(r?.json !== undefined ? { json: r.json } : {}), output: clipS(r?.output || '', 4000), ...(r?.error ? { error: r.error } : {}) }));
   rs.files = done.flatMap((r) => r.files || []); rs.actions = done.flatMap((r) => r.actions || []);
+  { const dl = done.flatMap((r) => r.deliverables || []); if (dl.length) rs.deliverables = dl; const da = done.flatMap((r) => r.declaredActions || []); if (da.length) rs.declaredActions = da; }
   rs.routes = [...new Set(done.flatMap((r) => r.routes || []))];
   rs.usage = done.reduce((a, r) => sumUsage(a, r.usage), undefined);
   for (const r of done) for (const w of r.warnings || []) if (!rs.warnings.includes(w)) rs.warnings.push(w);
@@ -760,7 +762,41 @@ ${cgit.block}`;
   else rs.status = error ? 'error' : 'success';
   rs.output = output; rs.json = json; rs.error = error; rs.code = error ? code || 'ERROR' : null; rs.sessionId = sessionId;
   if (isAi) rs.usage = usage; else if (usage.judge) rs.usage = { judge: usage.judge };
+  if (!['stopped', 'timeout'].includes(rs.status) && ((step.deliverables || []).length || (step.actions || []).length)) await applyOutputs();
   return finish();
+
+  /** Spec 14: 📄 deliverables and ⚡ declared actions of this step (after its own work). */
+  async function applyOutputs() {
+    const key = opts.nested || step.id;
+    const render = (tpl) => P.render(tpl, { flow, vars: flow.vars, input: ctx.input, data, ...rctx, output: rs.output, outputJson: rs.json });
+    if (rs.status === 'success' && (step.deliverables || []).length) {
+      const d = OUT.writeDeliverables(flow, step, run, { key, output: rs.output, json: rs.json, render });
+      rs.deliverables = d.files;
+      for (const f of d.files) { rs.files.push(f.path); log({ kind: 'hook_log', text: `📄 ${f.name} (${f.size} bytes)${f.copies.filter((c) => !c.error && !c.skipped).map((c) => ` → ${c.path}`).join('')}` }); }
+      if (d.errors.length) { for (const e of d.errors) log({ kind: 'error', text: e }); rs.status = 'error'; rs.code = 'DELIVERABLE_INVALID'; rs.error = d.errors.join(' · '); }
+    }
+    if (!(step.actions || []).length) return;
+    const plans = OUT.planActions(flow, step, run, { status: rs.status, output: rs.output, json: rs.json, render, evalCond: (w, o, j) => evalAssertion(w, o, j) });
+    const blocked = POL.has(flow, 'noExternalWrites');
+    const done = [];
+    for (const p of plans) {
+      p.stepKey = key;
+      if (p.status !== 'pending') {
+        done.push(p);
+        log({ kind: 'hook_log', text: `⚡ ${p.label}: ${p.status === 'awaiting_approval' ? '⏳ espera aprobación (Datos del step)' : p.status === 'dry_run' ? `solo se muestra (dryRun${run.rehearsal ? ', ensayo' : ''})` : p.status === 'exists' ? `no se repite: ${p.reason}` : p.status === 'skipped' ? `omitida (${p.reason})` : `✗ ${p.error}`}` });
+        if (p.status === 'error' && !p.optional && rs.status === 'success') { rs.status = 'error'; rs.code = 'ACTION_FAILED'; rs.error = `${p.label}: ${p.error}`; }
+        continue;
+      }
+      log({ kind: 'hook_log', text: `⚡ ${p.label}…` });
+      const res = await OUT.executeAction(flow, p, { signal: sig, policyBlocked: blocked });
+      OUT.remember(flow.id, run.id, res);
+      done.push(res);
+      log({ kind: res.status === 'done' ? 'hook_log' : 'error', text: res.status === 'done' ? `⚡ ${p.label}: ✓ ${res.key || 'hecho'}${res.url ? ` ${res.url}` : ''}` : `⚡ ${p.label}: ✗ ${res.error}` });
+      if (res.status === 'done') rs.actions.push({ tool: p.type, server: 'declarada', ok: true, key: res.key, url: res.url, input: JSON.stringify(p.params).slice(0, 600) });
+      if (res.status === 'error' && !p.optional && rs.status === 'success') { rs.status = 'error'; rs.code = 'ACTION_FAILED'; rs.error = `${p.label}: ${res.error}`; }
+    }
+    rs.declaredActions = done;
+  }
 
   function finish() {
     rs.endedAt = now();
@@ -773,6 +809,7 @@ ${cgit.block}`;
       status: rs.status, endedAt: rs.endedAt, output: rs.output, json: jsonFits ? rs.json : undefined, files: rs.files, actions: rs.actions,
       pinned: !!rs.pinned, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, sessionId: rs.sessionId || null, runId: run.id,
       assertions: rs.assertions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: rs.attempts.length,
+      deliverables: rs.deliverables || undefined, declaredActions: rs.declaredActions || undefined,
     });
     opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
     store.saveRun(run);

@@ -259,6 +259,61 @@ function CopyBtn({ text }) {
 }
 
 /** Input/Output view of the last run + pin/unpin (n8n-style pin data). */
+
+/** Spec 14: what the last run of this step PRODUCED (deliverables) and its declared actions (approve / reject here). */
+const ACT_STATUS = { done: ['ok', '✓ hecha'], error: ['warn', '✗ error'], awaiting_approval: ['warn', '⏳ espera aprobación'], dry_run: ['', 'solo mostrada'], exists: ['', 'ya existía'], skipped: ['', 'omitida'], rejected: ['', 'rechazada'] };
+function Produced({ flow, runId, view }) {
+  const [busy, setBusy] = useState(''); const [err, setErr] = useState(''); const [editing, setEditing] = useState(null);
+  const dl = view?.deliverables || []; const acts = view?.declaredActions || [];
+  if (!dl.length && !acts.length) return null;
+  const decide = async (p, approve, params) => {
+    setBusy(p.actionId); setErr('');
+    try { await api.post(`/api/flows/${flow.id}/runs/${runId}/actions/decide`, { stepKey: p.stepKey, actionId: p.actionId, approve, ...(params ? { params } : {}) }); setEditing(null); }
+    catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+  return (
+    <div data-testid="produced">
+      {dl.length > 0 && (
+        <details open><summary>📄 Entregables ({dl.length})</summary>
+          <ul className="io-list">{dl.map((f) => (
+            <li key={f.path}><a href={`/api/flows/${flow.id}/runs/${runId}/files/${encodeURIComponent(f.name)}`} download data-testid="deliverable-link">{f.name}</a> <span className="muted small">{f.format} · {f.size} bytes</span>
+              {f.copies?.map((c, i) => <div key={i} className={`small ${c.error ? 'warn-text' : 'muted'}`}>→ {c.path}{c.error ? ` (${c.error})` : c.skipped ? ` (${c.skipped})` : ''}</div>)}
+            </li>))}
+          </ul>
+        </details>
+      )}
+      {acts.length > 0 && (
+        <details open><summary>⚡ Acciones declaradas ({acts.length})</summary>
+          <ul className="io-list">{acts.map((p, i) => {
+            const [cls, txt] = ACT_STATUS[p.status] || ['', p.status];
+            return (
+              <li key={`${p.actionId}-${p.stepKey}-${i}`} data-testid="declared-action" data-status={p.status}>
+                <span className={`chip ${cls}`}>{txt}</span> <b>{p.label}</b>{p.key ? <> · {p.url ? <a href={p.url} target="_blank" rel="noreferrer">{p.key}</a> : p.key}</> : null}
+                {(p.error || p.reason) && <div className="small muted">{p.error || p.reason}</div>}
+                {p.params && <details><summary className="small">datos</summary><pre className="mono small">{JSON.stringify(p.params, null, 2)}</pre></details>}
+                {p.status === 'awaiting_approval' && (
+                  editing === i ? (
+                    <div><textarea className="mono" rows={8} defaultValue={JSON.stringify(p.params, null, 2)} id={`edit-${i}`} />
+                      <div className="row"><button className="primary small" disabled={!!busy} onClick={() => { let v; try { v = JSON.parse(document.getElementById(`edit-${i}`).value); } catch (e) { setErr(`JSON inválido: ${e.message}`); return; } decide(p, true, v); }}>Aprobar con estos datos</button><button className="ghost small" onClick={() => setEditing(null)}>Cancelar</button></div>
+                    </div>
+                  ) : (
+                    <div className="row">
+                      <button className="primary small" data-testid="action-approve" disabled={!!busy} onClick={() => decide(p, true)}>{busy === p.actionId ? 'Enviando…' : 'Aprobar'}</button>
+                      <button className="ghost small" onClick={() => setEditing(i)}>Editar y aprobar</button>
+                      <button className="ghost small" data-testid="action-reject" disabled={!!busy} onClick={() => decide(p, false)}>Rechazar</button>
+                    </div>
+                  )
+                )}
+              </li>
+            );
+          })}</ul>
+        </details>
+      )}
+      {err && <div className="warn-text small">{err}</div>}
+    </div>
+  );
+}
+
 export function DataTab({ flow, step, live }) {
   const [view, setView] = useState(null);
   const [runMeta, setRunMeta] = useState(null);
@@ -269,7 +324,7 @@ export function DataTab({ flow, step, live }) {
   useEffect(() => {
     setView(null); setRunMeta(null);
     if (runId && !running) api.get(`/api/flows/${flow.id}/runs/${runId}`).then((r) => { setView(r?.steps?.[step.id] || null); setRunMeta(r ? { id: r.id, vars: r.vars, trigger: r.trigger, usePins: r.usePins } : null); }).catch(() => {});
-  }, [runId, step.lastRun?.endedAt, running]);
+  }, [runId, step.lastRun?.endedAt, running, JSON.stringify((step.lastRun?.declaredActions || []).map((p) => p.status))]);
 
   const pinned = step.pinned;
   const out = pinned ? { output: pinned.output, json: pinned.json, files: [], actions: [] } : { output: view?.output ?? step.lastRun?.output, json: view?.json ?? step.lastRun?.json, files: view?.files || step.lastRun?.files || [], actions: view?.actions || step.lastRun?.actions || [] };
@@ -351,6 +406,7 @@ export function DataTab({ flow, step, live }) {
           )}
           {out.output && <details open={out.json === undefined}><summary>Texto</summary><pre className="small">{out.output}</pre></details>}
           {out.files?.length > 0 && <details open><summary>Archivos escritos ({out.files.length})</summary><ul className="io-list">{out.files.map((f) => <li key={f} className="mono small">{f}</li>)}</ul></details>}
+          {!pinned && <Produced flow={flow} runId={runId} view={view || step.lastRun} />}
           {out.actions?.length > 0 && (
             <details open><summary>Acciones realizadas ({out.actions.length})</summary>
               <ul className="io-list">{out.actions.map((a, i) => <li key={i}><span className={`chip ${a.ok ? 'ok' : 'warn'}`}>{a.ok ? 'ok' : 'error'}</span> <b>{a.tool}</b> <span className="muted small">{a.server}</span><div className="mono small muted">{clip(a.input, 200)}</div></li>)}</ul>

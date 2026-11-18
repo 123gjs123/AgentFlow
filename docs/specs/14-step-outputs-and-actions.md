@@ -1,6 +1,6 @@
 # 14 — Step outputs: handoff, actions and deliverables
 
-**Status:** Partial. Section 2 (handoff) and 3.4 (detected skill-managed actions) are implemented by [spec 15](15-data-passing.md); declared actions and deliverables are proposed.
+**Status:** Implemented v1 (2026-11-18; e2e `test/e2e/29-outputs.test.mjs`). Handoff (section 2) and detected actions (3.4) come from [spec 15](15-data-passing.md). Declared actions (3) and native deliverables (4) are in v1. What v1 leaves out is listed at the end ("Implementation v1").
 
 ## Summary
 
@@ -175,3 +175,54 @@ Skill-provided entries carry a "from skill" chip and a "reset to skill default" 
 ## Open questions
 - **Jira attachments:** the current Atlassian MCP has no attachment upload tool. Options: link to the file served by the app, publish to Confluence and link, or upload with a personal API token (needs secret storage).
 - **Claude Artifacts / Docs:** publishing to claude.ai artifacts is not available from the headless CLI. Proposed for v1: HTML deliverables plus Confluence. Revisit if a connector becomes available.
+
+## Implementation v1 (2026-11-18)
+
+Module `server/outputs.js`. The engine applies a step's deliverables and actions after its own work (`applyOutputs` in `executeStep`), also for each element of a "para cada".
+
+**📄 Deliverables** — `step.deliverables[] = {id, format, path, from, destination?: [{path}]}`
+- Formats: `md`, `txt`, `json`, `csv` (a JSON list becomes rows), `html`, `feature`, `yaml` and `junit-xml`.
+- `from` is `output` or `json.<field>`. `path` is a template, and only its base name is used.
+- Written to `data/outputs/<flow>/<run>/<step>/`. The files list them with size and hash, and they go into the handoff (`files`, `STEP_UPSTREAM`).
+- Format check (DLV-7) before writing: JSON parses, `.feature` has Feature + Scenario, JUnit XML opens and closes `<testsuite(s)>`. If it fails, the step fails with `DELIVERABLE_INVALID`. There is no retry with the model in v1.
+- Destinations: an existing absolute folder. Skipped in a rehearsal.
+- Download:
+  - UI: `GET /api/flows/:id/runs/:runId/files/:name|:id`.
+  - External API: `GET /api/ext/flows/:flow/runs/:runId/files/:name|:id`. Only files inside the run's outputs folder.
+
+**⚡ Declared actions** — `step.actions[] = {id, type, params, when, if?, approval, optional?, allowDuplicate?}`
+- Types:
+  - Jira: `jira.comment`, `jira.createSubtask`, `jira.createIssue`, `jira.transition`, `jira.link`.
+  - Confluence: `confluence.createPage`, `confluence.updatePage`.
+  - Other: `http.post`.
+- Params are templates: vars, steps, item, `{{output}}` and `{{output.json.x}}`. `if` is a condition like an arrow's (`{type:'json', path, op, value}`…).
+- **How a Jira or Confluence action runs** (ACT-3):
+  - A Claude call (Haiku; `config.actions.model` overrides it) allowed ONLY that action's MCP tools, plus `ToolSearch` to load them.
+  - Bash, Edit, Write and Web are disallowed, and there is no session.
+  - The data goes inside `<untrusted-data>`, one field per heading.
+  - **The app checks that the write tool was really called.** A model that only says "done" is a failed action. It answers `{ok, key, url}`.
+- **HTTP POST**: a server-side fetch. Redirects are not followed, and a credential is only sent to its own origin (the same rule as spec 10).
+- **Approval** (ACT-4): `auto` (the default for `jira.comment`), `confirm` (the default for everything else) or `dryRun`.
+  - **The run never waits for a confirmation.** The action stays `awaiting_approval` in the step's Data tab (Aprobar / Editar y aprobar / Rechazar). It shows as ⏳⚡ on the node and as a ⚡ item in the attention list.
+  - It can also be decided through `POST /api/flows/:id/runs/:runId/actions/decide` (and `/api/ext/…`) with `{stepKey, actionId, approve, params?}`.
+  - Consequence: the following steps only get the keys of `auto` actions. The handoff `actions` includes them.
+- **Idempotency** (ACT-5): a ledger in `data/actions/<flow>.json` keyed by actionId + hash of the rendered payload. A re-run with the same input gives `exists` ("ya se hizo en r_…"). An approval checks the ledger again with the final payload.
+- **Failure** (ACT-8): a failed action fails the step (`ACTION_FAILED`) unless `optional`.
+- **Safety:**
+  - The `noExternalWrites` policy blocks every action.
+  - A rehearsal turns every action into `dryRun`.
+  - An imported flow with actions, or with deliverable destinations, is quarantined.
+
+**UI**
+- Step config: a "⚡ Acciones y 📄 entregables" box with a form per action type, approval, when and optional.
+- Data tab: deliverables with download links, and declared actions with status and the approval buttons.
+- Node badges: ⚡N, 📄N, and ⏳⚡ while an action waits.
+
+**Not in v1:**
+- The skill sidecar `afs.json` (1.1).
+- `docx`/`xlsx`/`pdf`/`pptx` through the user's skills.
+- Deliverable templates (DLV-8).
+- Confluence or Jira as deliverable destinations (DLV-4). A `confluence.createPage` action with `{{output}}` covers the common case.
+- `git.commit` and `flow.invoke` actions.
+- `afs run --out`.
+- A paused run waiting for an approval (ACT-4's `waiting_approval`). The run never waits; the action is decided afterwards.

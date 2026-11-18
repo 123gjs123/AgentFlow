@@ -53,6 +53,9 @@ export function executableParts(flow) {
     for (const a of s.assertions || []) if (a?.type === 'command' && String(a.command || '').trim()) out.push(`aserción con comando en "${s.name}"`);
     if (s.kind !== 'command' && /(^|[\s,])(Bash|Edit|Write|NotebookEdit)\b/.test(String(s.allowedTools || ''))) out.push(`"${s.name}" puede usar la terminal o escribir archivos (${String(s.allowedTools).match(/(Bash|Edit|Write|NotebookEdit)[^\s,]*/g).slice(0, 4).join(', ')})`);
     if (s.permissionMode === 'bypassPermissions') out.push(`"${s.name}" salta los permisos (bypassPermissions)`);
+    // spec 14: declared actions change external systems; a deliverable destination writes on this machine
+    for (const a of s.actions || []) if (a && typeof a === 'object') out.push(`acción declarada en "${s.name}": ${String(a.type).slice(0, 40)}${a.approval === 'auto' ? ' (automática)' : ''}`);
+    for (const d of s.deliverables || []) for (const x of d?.destination || []) if (x?.path) out.push(`"${s.name}" copia un archivo a ${String(x.path).slice(0, 120)}`);
     // spec 10: a command watch runs on this machine; a URL watch with a credential would send it
     for (const w of s.watches || []) {
       if (w?.type === 'command' && String(w.target || '').trim()) out.push(`fuente vigilada con comando en "${s.name}": ${String(w.target).split(/\r?\n/)[0].slice(0, 120)}`);

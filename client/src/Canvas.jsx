@@ -73,9 +73,12 @@ function StepNode({ data, selected }) {
       <div className="node-name" title={step.name}>{step.name}</div>
       <div className="node-sub" title={ref}>{ref || <span className="muted">—</span>}</div>
       {live?.activity && status === 'running' && <div className="node-live" title={live.activity}>{live.activity}</div>}
-      {(news > 0 || step.watches?.length > 0 || step.breakpoint || step.contextSources?.length > 0 || step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0 || step.assertions?.length > 0) && (
+      {(news > 0 || step.watches?.length > 0 || step.actions?.length > 0 || step.deliverables?.length > 0 || step.breakpoint || step.contextSources?.length > 0 || step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0 || step.assertions?.length > 0) && (
         <div className="node-badges">
           {news > 0 ? <span className="news" data-testid="news-badge" title="Novedades en las fuentes que vigila este step">🔔 {news}</span> : step.watches?.length > 0 ? <span title={`Vigila ${step.watches.length} fuente(s): sin novedades pendientes`}>👀 {step.watches.length}</span> : null}
+          {(step.lastRun?.declaredActions || []).some((p) => p.status === 'awaiting_approval') && <span className="news" data-testid="approval-badge" title="Acciones esperando aprobación (Datos)">⏳ ⚡</span>}
+          {step.actions?.length > 0 && <span title={`Acciones declaradas: ${step.actions.map((a) => a.type).join(', ')}`}>⚡ {step.actions.length}</span>}
+          {step.deliverables?.length > 0 && <span title={`Entregables: ${step.deliverables.map((d) => d.path || d.format).join(', ')}`}>📄 {step.deliverables.length}</span>}
           {step.contextSources?.length > 0 && <span title={`Contexto: ${step.contextSources.map((x) => x.label || x.path || x.url || x.ref).join(' · ')}`}>📎 {step.contextSources.length}</span>}
           {step.breakpoint && <span className="brk" title="Break: la ejecución se pausa aquí para validar">{BREAK_LABEL[step.breakpoint]}</span>}
           {step.memory?.length > 0 && <span title="Memoria">🧷 {step.memory.length}</span>}

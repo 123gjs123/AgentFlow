@@ -416,3 +416,8 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .watch-changes { margin: 4px 0 0 16px; padding: 0; } .watch-changes li { margin: 2px 0; }
 .watch-changes .ch-removed { color: var(--muted); } .watch-changes .ch-added { color: var(--ok); }
 .foreach-fields { display: flex; flex-direction: column; gap: 4px; }
+
+/* spec 14: actions and deliverables */
+.out-item { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.out-item .out-field { display: flex; flex-direction: column; gap: 2px; }
+.out-item input, .out-item textarea { width: 100%; }
