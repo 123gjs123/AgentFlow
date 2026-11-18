@@ -172,7 +172,7 @@ function stepRows(patch, step, vars, prefix = '') {
     return [{ key: prefix + k, label: prefix + k, old: step?.[k], val: v }];
   });
 }
-const TITLES = { step: '✏️ Cambio propuesto al step', flow: '✏️ Cambio propuesto al flujo', file: '📝 Cambio propuesto a un archivo', output: '📦 Entregable corregido', memory: '🧷 Guardar en memoria', run: '▶ Ejecución propuesta', policy: '📜 Regla propuesta', structure: '➕ Step nuevo propuesto' };
+const TITLES = { step: '✏️ Cambio propuesto al step', flow: '✏️ Cambio propuesto al flujo', file: '📝 Cambio propuesto a un archivo', output: '📦 Entregable corregido', memory: '🧷 Guardar en memoria', run: '▶ Ejecución propuesta', policy: '📜 Regla propuesta', structure: '🧩 Cambio de estructura propuesto' };
 /** Spec 28: a policy (rule) with what the app guarantees and what it does not. */
 export function PolicyView({ policy }) {
   if (!policy) return null;
@@ -224,12 +224,29 @@ function Proposal({ p, step, vars, inBreak, locked, onApply, onDiscard }) {
   } else if (kind === 'policy') {
     body = <PolicyView policy={p.policy} />;
   } else if (kind === 'structure') {
-    body = (p.patch?.addSteps || []).map((n, i) => (
-      <div className="diff" key={i}>
-        <div className="label">después de «{n.after}»: {n.kind === 'command' ? 'step de comando' : 'step'} «{n.name}»</div>
-        <pre className="new">{n.command || n.task || ''}</pre>
-      </div>
-    ));
+    const q = p.patch || {};
+    body = (
+      <>
+        {q.splitStep && (
+          <div className="diff">
+            <div className="label">partir «{q.splitStep.step}» en {(q.splitStep.into || []).length}: {(q.splitStep.into || []).map((n, i) => n.name || (i === 0 ? q.splitStep.step : `parte ${i + 1}`)).join(' → ')}</div>
+            {(q.splitStep.into || []).map((n, i) => <pre key={i} className="new">{`${n.name || q.splitStep.step}: ${n.task || n.command || '(igual que el original)'}`}</pre>)}
+          </div>
+        )}
+        {(q.addSteps || []).map((n, i) => (
+          <div className="diff" key={`a${i}`}>
+            <div className="label">después de «{n.after}»: {n.kind === 'command' ? 'step de comando' : 'step'} «{n.name}»</div>
+            <pre className="new">{n.command || n.task || ''}</pre>
+          </div>
+        ))}
+        {(q.removeSteps || []).length > 0 && <div className="diff"><div className="label">quitar: {q.removeSteps.map((x) => `«${x}»`).join(', ')} (sus flechas se reconectan)</div></div>}
+        {(q.addEdges || []).length > 0 && <div className="diff"><div className="label">flechas nuevas: {q.addEdges.map((e) => `${e.from} → ${e.to}`).join(' · ')}</div></div>}
+        {(q.removeEdges || []).length > 0 && <div className="diff"><div className="label">quitar flechas: {q.removeEdges.map((e) => `${e.from} → ${e.to}`).join(' · ')}</div></div>}
+        {Object.entries(q.steps || {}).map(([name, patch]) => (
+          <div className="diff" key={`s${name}`}><div className="label">cambia «{name}»: {Object.keys(patch || {}).join(', ')}</div>{patch?.task && <pre className="new">{patch.task}</pre>}</div>
+        ))}
+      </>
+    );
   }
   if (p.error && !blocked) blocked = p.error;
   const done = p.applied || p.discarded;

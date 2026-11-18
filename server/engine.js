@@ -1131,6 +1131,9 @@ export function runEvents(flow, run, after = 0, max = 500) {
 // The '_review' chat (spec 28) gets its context from review.js (injected at boot: no circular import).
 let reviewContextFn = () => ({ text: '<review-context>\n(sin revisión todavía)\n</review-context>', hash: 'none' });
 export const setReviewContextProvider = (fn) => { reviewContextFn = fn; };
+// …and the same read-only investigation powers as the review (evidence files + read-only git), from review.js too
+let reviewInvestigationFn = () => null;
+export const setReviewInvestigationProvider = (fn) => { reviewInvestigationFn = fn; };
 const reviewContext = (flow) => reviewContextFn(flow);
 
 async function chatTurn({ flowId, key, message, origin = 'direct', improve = false, mirrorKey = null, runId = null, external = false }) {
@@ -1173,12 +1176,15 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     }
   }
   if (origin === 'global') parts.push('(Este mensaje llegó desde el chat general y fue enrutado a ti.)');
+  let inv = null;
+  if (isReview) { try { inv = reviewInvestigationFn(flow); } catch { inv = null; } if (inv) parts.push(inv.block); }
   parts.push(message);
 
   // Spec 25: a chat converses and proposes; it never changes anything itself. Only read tools, whatever the step's
   // access is (edit/dev steps keep Edit/Write/Bash for RUNS, not for chats); write tools are explicitly disallowed.
   let allowedTools = readOnlyTools([isReview ? 'Read Grep Glob' : isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...(isReview ? [] : access.tools)].filter(Boolean).join(' '));
   if (isReview) for (const s of flow.steps) { const ref = s.kind === 'skill' ? findSkill(s.skillRef, flow.cwd) : s.kind === 'agent' ? findAgent(s.agentRef, flow.cwd) : null; if (ref) access.addDirs.push(path.dirname(ref.path)); }
+  if (inv) { allowedTools = inv.allowed; access.addDirs.push(inv.dir, ...inv.repos, ...(inv.readDirs || [])); }
   const addDirs = [...access.addDirs];
   const permissionMode = undefined;
   const disallowedTools = CHAT_DISALLOWED;
@@ -1203,13 +1209,14 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined,
     resume: sessionId || undefined,
     allowedTools, disallowedTools, addDirs, permissionMode,
-    cwd: flowCwd(flow), signal: controller.signal, onEvent,
+    ...(inv ? { env: inv.env } : {}),
+    cwd: inv ? inv.dir : flowCwd(flow), signal: controller.signal, onEvent,
   });
   // Resumed session may have been deleted/expired: retry once fresh with the full context.
   if (r.isError && sessionId && !controller.signal.aborted && /session|conversation/i.test(r.error || '')) {
     onEvent({ kind: 'hook_log', text: 'Sesión anterior no disponible; iniciando una nueva.' });
     parts[0] = block.text;
-    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: chatSystem, ...(isReview ? { strictMcp: true } : {}), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, disallowedTools, addDirs, permissionMode, cwd: flowCwd(flow), signal: controller.signal, onEvent });
+    r = await runClaude({ prompt: parts.join('\n\n'), appendSystem: chatSystem, ...(isReview ? { strictMcp: true } : {}), model: step?.model || undefined, agent: step?.kind === 'agent' && step.agentRef ? step.agentRef : undefined, allowedTools, disallowedTools, addDirs, permissionMode, ...(inv ? { env: inv.env } : {}), cwd: inv ? inv.dir : flowCwd(flow), signal: controller.signal, onEvent });
   }
   if (activeChats.get(ck) === controller) activeChats.delete(ck);
 
@@ -1313,11 +1320,20 @@ function proposalRisk(flow, step, kind, p) {
       out.widens.push(...widensOf(s, patch, `${s?.name || ref}: `));
     }
   } else if (kind === 'structure') {
-    for (const n of Array.isArray(p.patch?.addSteps) ? p.patch.addSteps : []) {
+    const r = structureRefs(p.patch);
+    const base = r.split ? findStepRef(flow, r.split.step) : null;
+    const parts = [...r.add.map((n) => [n, {}]), ...(r.split ? r.split.into.slice(1).map((n) => [{ kind: base?.kind, ...n }, base ? { allowedTools: base.allowedTools, permissionMode: base.permissionMode, command: base.command } : {}]) : [])];
+    for (const [n, inherited] of parts) {
       out.problem ||= patchProblem(n);
       if (n.kind === 'command') out.widens.push(`agrega un step de comando «${n.name || 'nuevo'}»`);
-      out.widens.push(...widensOf({}, n, `${n.name || 'nuevo'}: `).filter((w) => !/cambia el comando/.test(w)));
+      // a part of a split inherits the step's tools: only what it adds on top widens
+      out.widens.push(...widensOf(inherited, n, `${n.name || 'nuevo'}: `).filter((w) => !/cambia el comando/.test(w)));
     }
+    if (r.split) { const { kind: _k, ...first } = r.split.into[0] || {}; out.problem ||= patchProblem(first); out.widens.push(...widensOf(base, first, `${base?.name || r.split.step}: `)); }
+    for (const [ref, patch] of Object.entries(r.steps)) { out.problem ||= patchProblem(patch); const s = findStepRef(flow, ref); out.widens.push(...widensOf(s, patch, `${s?.name || ref}: `)); }
+    // destructive changes are never silent (never inside "apply the safe ones")
+    for (const ref of r.remove) out.widens.push(`quita el step «${findStepRef(flow, ref)?.name || ref}» (sus flechas se reconectan)`);
+    for (const e of r.removeEdges) out.widens.push(`quita la flecha «${e.from}» → «${e.to}»`);
   } else if (kind === 'policy' && p.policy) {
     if (p.policy.scope === 'machine') out.widens.push('afecta a todos los flujos de esta instalación');
     // replacing a rule (other params, another author…) is never silent: it may relax what the person set
@@ -1390,17 +1406,46 @@ function prepareProposal(flow, step, key, p) {
   const kind = p.kind || 'step';
   const r = proposalRisk(flow, step, kind, p);
   // a proposal born in the review is anchored to the steps it touches: if they change, it is stale (REVIEW_STALE)
-  const anchorIds = key === '_review' ? (kind === 'flow' ? Object.keys(p.patch?.steps || {}) : kind === 'structure' ? (p.patch?.addSteps || []).map((n) => n.after) : []).map((ref) => findStepRef(flow, ref)?.id).filter(Boolean) : [];
+  const anchorIds = key === '_review' ? (kind === 'flow' ? Object.keys(p.patch?.steps || {}) : kind === 'structure' ? structureAnchorRefs(p.patch) : []).map((ref) => findStepRef(flow, ref)?.id).filter(Boolean) : [];
   return { ...base, patch: p.patch, ...(r.problem ? { error: r.problem } : {}), ...(r.widens.length ? { widens: r.widens } : {}),
     ...(anchorIds.length ? { anchor: Object.fromEntries(anchorIds.map((id) => [id, stepHash(flow.steps.find((s) => s.id === id))])) } : {}),
     ...(p.findingId ? { findingId: p.findingId } : {}) };
 }
-/** Spec 28: inserts new steps right after an existing one ("gate after Pull Jira"): A → X becomes A → new → X. */
+/** The steps and arrows a structure proposal touches (anchors and risk). */
+const STRUCT_MAX = 6;
+function structureRefs(patch) {
+  const q = patch && typeof patch === 'object' ? patch : {};
+  const arr = (x) => (Array.isArray(x) ? x : []);
+  return {
+    add: arr(q.addSteps).slice(0, STRUCT_MAX),
+    split: q.splitStep && typeof q.splitStep === 'object' && q.splitStep.step && Array.isArray(q.splitStep.into) ? { step: q.splitStep.step, into: q.splitStep.into.slice(0, STRUCT_MAX) } : null,
+    remove: arr(q.removeSteps).map(String).slice(0, STRUCT_MAX),
+    addEdges: arr(q.addEdges).filter((e) => e && e.from && e.to).slice(0, 12),
+    removeEdges: arr(q.removeEdges).filter((e) => e && e.from && e.to).slice(0, 12),
+    steps: q.steps && typeof q.steps === 'object' && !Array.isArray(q.steps) ? q.steps : {},
+  };
+}
+/** Existing steps a structure proposal depends on (anchored: if one changes, the proposal is stale). */
+function structureAnchorRefs(patch) {
+  const r = structureRefs(patch);
+  return [...r.add.map((n) => n.after), r.split?.step, ...r.remove, ...r.addEdges.flatMap((e) => [e.from, e.to]), ...r.removeEdges.flatMap((e) => [e.from, e.to]), ...Object.keys(r.steps)].filter(Boolean);
+}
+/**
+ * Spec 28 (round 2): the review can reshape a flow, not only insert a gate.
+ *   addSteps    [{after, name, kind, …fields}]   A → X becomes A → new → X
+ *   splitStep   {step, into:[{name?, …fields}, …]} the step keeps its id/memory/chat as part 1 (patched with into[0]);
+ *                                                  the other parts are chained after it (A → 1 → 2 → 3 → X)
+ *   removeSteps [name]                             predecessors are reconnected to the successors
+ *   addEdges / removeEdges [{from, to}]            plain arrows
+ *   steps       {name: {fields}}                   field changes in the same atomic change
+ * All or nothing: any bad reference or a cycle rejects the whole proposal (updateFlow does not save on a throw).
+ */
 function applyStructure(f, patch) {
-  const added = [];
-  for (const n of Array.isArray(patch?.addSteps) ? patch.addSteps.slice(0, 5) : []) {
-    const after = findStepRef(f, n.after);
-    if (!after) throw Object.assign(new Error(`No existe el step «${n.after}» después del cual insertar`), { status: 400, code: 'BAD_PROPOSAL' });
+  const r = structureRefs(patch);
+  const bad = (m) => Object.assign(new Error(m), { status: 400, code: 'BAD_PROPOSAL' });
+  const need = (ref, what) => { const s = findStepRef(f, ref); if (!s) throw bad(`No existe el step «${ref}»${what ? ` (${what})` : ''}`); return s; };
+  const added = []; const removed = []; const changed = [];
+  const insertAfter = (after, n) => {
     const kind = ['role', 'command', 'skill', 'agent'].includes(n.kind) ? n.kind : 'role';
     const s = store.newStep({ name: String(n.name || 'Nuevo step').slice(0, 120), kind, position: { x: (after.position?.x || 0) + 30, y: (after.position?.y || 0) + 150 }, ...(kind === 'skill' ? { skillRef: String(n.skillRef || '') } : {}), ...(kind === 'agent' ? { agentRef: String(n.agentRef || '') } : {}) });
     applyStepPatch(s, n);
@@ -1409,9 +1454,49 @@ function applyStructure(f, patch) {
     f.edges.push({ id: store.uid('e_'), source: after.id, target: s.id });
     f.steps.push(s);
     added.push(s.name);
+    return s;
+  };
+  for (const n of r.add) insertAfter(need(n.after, 'después del cual insertar'), n);
+  if (r.split) {
+    const base = need(r.split.step, 'a dividir');
+    if (r.split.into.length < 2) throw bad('Para dividir un step hacen falta al menos 2 partes');
+    const [first, ...rest] = r.split.into;
+    const { kind: _k, after: _a, ...firstPatch } = first || {};
+    const inherit = { kind: base.kind, skillRef: base.skillRef, agentRef: base.agentRef, allowedTools: base.allowedTools, permissionMode: base.permissionMode, model: base.model, effort: base.effort, shell: base.shell, role: base.role, context: base.context };
+    applyStepPatch(base, firstPatch); changed.push(base.name);
+    let prev = base;
+    for (const n of rest) {
+      const s = insertAfter(prev, { ...Object.fromEntries(Object.entries(inherit).filter(([, v]) => v != null)), ...n });
+      // the new parts inherit the limits of the step they come from (unless the proposal sets them)
+      for (const k of ['bashTimeoutMin', 'timeoutSec', 'allowDenials', 'output', 'retries']) if (!(k in n) && base[k] != null) s[k] = structuredClone(base[k]);
+      prev = s;
+    }
   }
-  topoLevels(f);
-  return added;
+  for (const e of r.addEdges) {
+    const a = need(e.from, 'origen de la flecha'); const b = need(e.to, 'destino de la flecha');
+    if (a.id === b.id) throw bad('Una flecha no puede ir de un step a sí mismo');
+    if (!f.edges.some((x) => x.source === a.id && x.target === b.id)) f.edges.push({ id: store.uid('e_'), source: a.id, target: b.id });
+  }
+  for (const e of r.removeEdges) {
+    const a = need(e.from, 'origen de la flecha'); const b = need(e.to, 'destino de la flecha');
+    const before = f.edges.length;
+    f.edges = f.edges.filter((x) => !(x.source === a.id && x.target === b.id));
+    if (f.edges.length === before) throw bad(`No hay flecha «${a.name}» → «${b.name}»`);
+  }
+  for (const ref of r.remove) {
+    const s = need(ref, 'a quitar');
+    const ins = f.edges.filter((e) => e.target === s.id).map((e) => e.source);
+    const outs = f.edges.filter((e) => e.source === s.id).map((e) => e.target);
+    f.edges = f.edges.filter((e) => e.source !== s.id && e.target !== s.id);
+    for (const a of ins) for (const b of outs) if (a !== b && !f.edges.some((x) => x.source === a && x.target === b)) f.edges.push({ id: store.uid('e_'), source: a, target: b });
+    f.steps = f.steps.filter((x) => x.id !== s.id);
+    removed.push(s.name);
+  }
+  // field changes last: arrows and removals refer to the names as they were
+  for (const [ref, p] of Object.entries(r.steps)) { if (p && typeof p === 'object') { const s = need(ref, 'a cambiar'); applyStepPatch(s, p); changed.push(s.name); } }
+  if (!added.length && !removed.length && !changed.length && !r.addEdges.length && !r.removeEdges.length) throw bad('La propuesta de estructura no cambia nada');
+  try { topoLevels(f); } catch (e) { throw bad(`La propuesta deja el flujo con un ciclo: ${e.message}`); }
+  return { added, removed, changed };
 }
 export function findProposal(flowId, key, messageId, proposalId) {
   const msg = store.getChat(flowId, key).find((m) => m.id === messageId);
@@ -1468,10 +1553,10 @@ export async function applyChange(flowId, key, p, { runId = null, confirmWiden =
       flowChanged(flow); result = flow;
     }
   } else if (kind === 'structure') {
-    let added = [];
-    const flow = store.updateFlow(flowId, (f) => { added = applyStructure(f, p.patch); bumpRev(f); });
+    let res = {};
+    const flow = store.updateFlow(flowId, (f) => { res = applyStructure(f, p.patch); bumpRev(f); });
     flowChanged(flow);
-    result = { ...flow, added };
+    result = { ...flow, ...res };
   } else if (kind === 'step' || kind === 'flow') {
     let missing = [];
     const flow = store.updateFlow(flowId, (f) => {

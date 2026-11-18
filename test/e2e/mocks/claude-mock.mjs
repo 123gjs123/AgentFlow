@@ -79,11 +79,19 @@ if (/verificador estricto/.test(system)) { // assertion judge
 }
 // spec 28: flow reviewers. The dossier carries the flow description, where tests put
 // [[mock:review-cons <json>]] / [[mock:review-adv <json>]] / [[mock:review-sleep <s>]] / [[mock:review-garbage]]
+// the review's JSON repair: answers a fixed object
+if (/^Recibes un texto que debía ser un único objeto JSON/.test(system)) await finish('{"findings":[],"notVerifiable":["reparado"]}');
+// [[mock:review-inv <json>]]: the investigator (phase 0); without it, it finds nothing
+if (/^# Revisión de flujo — investigador/.test(system)) {
+  const m = prompt.match(/\[\[mock:review-inv\s+(\{[\s\S]*?\})\]\]/);
+  await finish(m ? m[1] : JSON.stringify({ facts: [], openQuestions: [] }));
+}
 if (/^# Revisión de flujo — rol (constructivo|adversarial)/.test(system)) {
   const role = /rol adversarial/.test(system) ? 'adv' : 'cons';
   const rs = (prompt.match(/\[\[mock:review-sleep\s+(\d+)\]\]/) || [])[1];
   if (rs) await sleep(Number(rs) * 1000);
   if (/\[\[mock:review-garbage\]\]/.test(prompt)) await finish('no es JSON');
+  if (role === 'cons' && /\[\[mock:review-broken-json\]\]/.test(prompt)) await finish('{"findings":[{"claim":"comillas "sin escapar""}]}');
   const m = prompt.match(new RegExp(`\\[\\[mock:review-${role}\\s+(\\{[\\s\\S]*?\\})\\]\\]`));
   await finish(m ? m[1] : JSON.stringify({ findings: [], notVerifiable: [`mock ${role}: nada`] }));
 }

@@ -488,6 +488,8 @@ app.post('/api/flows/:id/chat/:key/apply', wrap(async (req, res) => {
     engine.markRunProposal(id, key, messageId, proposalId, runId);
     return { runId };
   }
+  // spec 28: a review proposal can reshape the flow: a version is saved first (undo = restore it)
+  if (key === '_review' && !p.applied) { const cur = need(id); if (store.listVersions(id)[0]?.hash !== store.definitionHash(cur)) store.saveVersion(cur, { label: 'Antes de aplicar una propuesta de la revisión' }); }
   // spec 28: a proposal that widens access needs its own confirmation (409 WIDEN_CONFIRM + the list otherwise)
   return engine.applyProposal(id, key, messageId, proposalId, { runId: typeof req.body?.runId === 'string' ? req.body.runId : ip?.runId || null, confirmWiden: wideOk(req.body?.confirmWiden) });
 }));
@@ -604,6 +606,7 @@ app.post('/api/flows/:id/review/unsuppress', wrap((req) => review.unsuppress(nee
 app.get('/api/flows/:id/reviews', wrap((req) => { need(req.params.id); return { items: store.listReviews(req.params.id), active: review.activeReview(req.params.id) }; }));
 app.post('/api/flows/:id/reviews', wrap((req) => review.startReview(req.params.id)));
 app.get('/api/flows/:id/reviews/:rid', wrap((req) => { need(req.params.id); const rv = store.getReview(req.params.id, req.params.rid); if (!rv) throw fail(404, 'Revisión no encontrada', 'REVIEW_NOT_FOUND'); return { ...rv, stale: rv.flowHash !== store.definitionHash(store.getFlow(req.params.id)) }; }));
+app.post('/api/flows/:id/reviews/:rid/apply-safe', wrap(async (req) => { need(req.params.id); return review.applySafe(req.params.id, req.params.rid); }));
 app.post('/api/flows/:id/reviews/:rid/cancel', wrap((req) => { need(req.params.id); if (!review.cancelReview(req.params.id, req.params.rid)) throw fail(409, 'Esa revisión no está en curso', 'REVIEW_FINISHED'); return { cancelled: true }; }));
 // Rehearsal: the whole flow, read-only AI (plan mode), commands that write outside skipped, each step capped
 app.post('/api/flows/:id/rehearsal', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), rehearsal: true }) })));

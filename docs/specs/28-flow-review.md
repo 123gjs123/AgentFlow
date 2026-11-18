@@ -93,6 +93,39 @@ How the design was reached:
 | 12 | 25-min cap | R-SLOW / R-BASH-TIMEOUT; the runner cap belongs to the user's script |
 | 13 | Ticket in Done | `ticketStatus` + POL-TICKET-GATE + a `structure` proposal (a gate step), because a prompt rule does not stop |
 
+## Round 2 (2026-11-18): the reviewer investigates and reshapes the flow
+
+Why: on the real SBK flow the review agent was compared with a manual analysis of the same run. It saw the 2-hour timeout but could only *insert* steps (not split the automation step per environment), and it could not find that 7 of 8 regression failures were already fixed in an unmerged branch (it only had a 300-character digest of each step and no access to the repositories).
+
+| Capability | How |
+|---|---|
+| Full evidence | Each review writes `INDICE.md` plus one file per run and step in its own folder under the temp dir. Each file holds every command, its result and the output, with secrets masked. That folder is the reviewer's working folder. The 6 newest folders are kept. |
+| Read-only git | `node bin/review-git.mjs <repo> <subcommand> [args]` is the only Bash the reviewer may run. Repos are the flow's folder plus absolute folders in its variables (`name=path` lists included), never paths taken from a run. Only read subcommands are allowed. `--output`, pagers, external diff and textconv, `-c`, and creating or deleting refs are refused. No shell is used. |
+| Reshape | `structure` proposals accept: `splitStep` (part 1 keeps its id, memory and chat; the other parts inherit tools, permissions and limits and are chained after it), `addSteps`, `removeSteps` (arrows are reconnected), `addEdges` / `removeEdges`, and `steps` (field changes, applied last). A proposal is applied all or nothing, and one that creates a cycle is rejected. Removing a step or an arrow is confirmed apart, like a widening. |
+| Investigator (phase 0) | Before the two reviewers, a third call whose only job is finding causes. It must use the evidence and git, and it returns facts with citations. The app re-checks every fact: the quote must be in the file it names (inside the evidence, a repo or a skill), or in the output of the git command it names, run again through the helper. Verified facts go to both reviewers (who can cite them as `fact` evidence) and to the panel ("🔎 Hechos investigados"). Unverified ones go to "No se pudo verificar". Without this phase, the first real review answered from the digest without opening a single file. |
+| Policies | Reviewers may not propose fixes that contradict a policy (notes included). If they disagree with one, they must raise it as a `policy` finding with no fix. In the first real review they proposed SynergyNew against the "ambiente habitual" note. |
+| Readable folders | Absolute folders named in the flow's variables (for example the work folder that holds the runner script) can be read with Read/Grep/Glob. The home folder itself and drive roots are excluded. These files are not masked: they are the same files the flow's own steps read. |
+| JSON repair | A reviewer that returns broken JSON gets one retry, without tools, asking it to fix the JSON. |
+| Chat | The `_review` chat has the same evidence and git access. |
+| Apply | `POST /api/flows/:id/reviews/:rid/apply-safe` and the "✅ Aplicar las seguras" button apply only proposals with no error, no widening and no removal, after saving a version. Applying any single review proposal also saves a version first. |
+
+The prompt tells reviewers to find the cause before proposing:
+- read the evidence first;
+- for failing tests, look in git for a fix in another branch;
+- for a timeout, split the step rather than only raise the limit.
+
+E2E: `test/e2e/25-flow-review-investigate.test.mjs`.
+
+**Result on the real flow** (three real reviews on 2026-11-18, about $0.30–0.51 and 1 minute each):
+
+| | Before | After |
+|---|---|---|
+| Splitting the automation step per environment | Proposed as inserted steps, with a 0-character diagnosis | Proposed as a `splitStep` with dev, qa and ppd parts |
+| Causes found | None beyond the summary | A run hung 60 minutes on a DNS error; the set-limit failures; the fix commit is only in `synergy-web` main (from git), so the Alcance step misses it by searching only branches and PRs |
+| Policy conflict | Proposed SynergyNew | Leaves the SynergyNew question to the person |
+
+Still missing: the investigator did not look in the test repo for the branch that already updates the set-limit texts (PR #19), even though the prompt asks for it. The next step is to make that search deterministic, running `log --all -S` on the expected texts of failing assertions.
+
 ## Not done (deferred)
 
 - A gate "listo para compartir" before export.

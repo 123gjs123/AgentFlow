@@ -18,6 +18,7 @@ export default function ReviewPanel({ flow, running, onChange }) {
   const [progress, setProgress] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [rehearsal, setRehearsal] = useState({ open: false, input: '', runId: null });
+  const [safe, setSafe] = useState({ busy: false, result: '' });
   const timer = useRef(null);
 
   const load = async (fresh = false) => {
@@ -62,6 +63,15 @@ export default function ReviewPanel({ flow, running, onChange }) {
     setErr('');
     try { await pendingSave.flush(); await api.post(`/api/flows/${flow.id}/reviews`, {}); setProgress('Preparando el dossier…'); loadReviews(); } catch (e) { setErr(e.message); }
   }
+  const applySafe = async () => {
+    setSafe({ busy: true, result: '' });
+    try {
+      await pendingSave.flush();
+      const r = await api.post(`/api/flows/${flow.id}/reviews/${rv.id}/apply-safe`, {});
+      setSafe({ busy: false, result: r.applied.length ? `Aplicadas ${r.applied.length}. Versión guardada antes: «${r.version?.label}».${r.skipped.length ? ` Quedan ${r.skipped.length} para decidir aparte (amplían acceso, quitan algo o tienen un problema).` : ''}` : `Nada seguro para aplicar${r.skipped.length ? `: las ${r.skipped.length} abiertas amplían acceso o quitan algo, decídelas una por una.` : '.'}` });
+      load(); loadReviews();
+    } catch (e) { setSafe({ busy: false, result: '' }); setErr(e.message); }
+  };
   async function startRehearsal() {
     setErr('');
     try { await pendingSave.flush(); const r = await api.post(`/api/flows/${flow.id}/rehearsal`, { input: rehearsal.input }); setRehearsal((x) => ({ ...x, open: false, runId: r.runId, done: null })); } catch (e) { setErr(e.message); }
@@ -142,6 +152,17 @@ export default function ReviewPanel({ flow, running, onChange }) {
         {rv && !aiRunning && (
           <>
             <div className="small muted">{rv.id} · {rv.status}{rv.stale ? ' · ⚠ el flujo cambió desde esta revisión' : ''}{rv.totals?.inputTokens ? ` · tokens ${rv.totals.inputTokens}/${rv.totals.outputTokens}` : ''}{rv.error ? ` · ${rv.error}` : ''}</div>
+            {(rv.findings || []).some((f) => f.proposalId) && (
+              <div className="row small">
+                <button className="small" disabled={running || safe.busy} onClick={applySafe} data-testid="apply-safe" title="Aplica las propuestas que no amplían acceso ni quitan nada. Antes guarda una versión del flujo (se restaura desde 🕘 Versiones).">✅ Aplicar las seguras</button>
+                {safe.result && <span data-testid="apply-safe-result">{safe.result}</span>}
+              </div>
+            )}
+            {(rv.facts || []).length > 0 && (
+              <details className="small" data-testid="review-facts"><summary>🔎 Hechos investigados ({rv.facts.length}) — verificados contra la evidencia de las ejecuciones y git</summary>
+                <ol>{rv.facts.map((x, i) => <li key={i}>{x.step ? <b>{x.step}: </b> : null}{x.claim}{x.evidence.filter((e) => e.verified).map((e, j) => <div key={j} className="muted">{e.ref}: «{e.quote}»</div>)}</li>)}</ol>
+              </details>
+            )}
             {(rv.findings || []).map((f) => (
               <Finding key={f.id} f={{ ...f, title: f.claim, detail: f.check ? `Cómo se comprueba: ${f.check}` : '' }} ai locked={running}
                 onApply={f.proposalId ? () => applyAi(f) : null} onDismiss={(r) => dismissAi(f, r)}

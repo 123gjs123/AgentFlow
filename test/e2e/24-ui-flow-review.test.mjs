@@ -60,6 +60,25 @@ test('🔔 lleva a 🩺 Revisión; aplicar un arreglo, confirmar el que amplía 
   assert.deepEqual(page.errors, []);
 });
 
+test('revisión con IA en la UI: "✅ Aplicar las seguras" parte el step y deja aparte lo que quita algo', async (t) => {
+  if (guard(t)) return;
+  const cons = { findings: [{ severity: 'block', category: 'timeout', step: 'Auto', claim: 'Tres ambientes en un step se cortan por tiempo', evidence: [{ type: 'def', quote: 'Ejecuta en dev, qa y ppd' }], fix: { kind: 'structure', patch: { splitStep: { step: 'Auto', into: [{ name: 'Auto dev' }, { name: 'Auto qa' }] } } } }] };
+  const adv = { findings: [{ severity: 'improve', category: 'structure', step: 'Extra', claim: 'Extra no aporta nada al flujo', evidence: [{ type: 'def', quote: 'Nada que hacer aquí' }], fix: { kind: 'structure', patch: { removeSteps: ['Extra'] } } }] };
+  const f = await s.flow('Revisión UI 2', [
+    role('Auto', 'Ejecuta en dev, qa y ppd', { id: 's_a', position: { x: 80, y: 80 } }),
+    role('Extra', 'Nada que hacer aquí', { id: 's_x', position: { x: 380, y: 80 } }),
+  ], [['s_a', 's_x']], { description: `UI2 [[mock:review-cons ${JSON.stringify(cons)}]] [[mock:review-adv ${JSON.stringify(adv)}]]` });
+  await page.goto(`${s.base}/?flow=${f.id}&open=flowreview`);
+  const ai = page.getByTestId('ai-review');
+  await ai.waitFor();
+  await s.uiOk('POST', `/api/flows/${f.id}/reviews`, {});
+  await ai.getByTestId('apply-safe').click({ timeout: 20000 });
+  await ai.getByTestId('apply-safe-result').getByText(/Aplicadas 1\. Versión guardada antes.*Quedan 1/).waitFor();
+  const g = await s.getFlow(f.id);
+  assert.ok(g.steps.some((x) => x.name === 'Auto qa') && g.steps.some((x) => x.name === 'Extra'), 'partido, y Extra sigue');
+  assert.deepEqual(page.errors, []);
+});
+
 test('⚙ Configuración › Reglas: una regla para todos los flujos', async (t) => {
   if (guard(t)) return;
   await page.goto(`${s.base}/`);
