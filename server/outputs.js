@@ -32,7 +32,7 @@ const READ_CTX = T('getAccessibleAtlassianResources');
  * in the write call's input · dedup: false = not de-duplicated by default (comments, webhooks).
  */
 export const ACTION_TYPES = {
-  'jira.comment': { tools: [...READ_CTX, ...T('getJiraIssue', 'addCommentToJiraIssue')], write: T('addCommentToJiraIssue'), params: ['issue', 'body'], approval: 'auto', label: 'Comentar en Jira', target: ['issue'], verify: ['issue'], dedup: false },
+  'jira.comment': { tools: [...READ_CTX, ...T('addCommentToJiraIssue')], write: T('addCommentToJiraIssue'), params: ['issue', 'body'], approval: 'auto', label: 'Comentar en Jira', target: ['issue'], verify: ['issue'], dedup: false },
   'jira.createSubtask': { tools: [...READ_CTX, ...T('getJiraIssue', 'getJiraProjectIssueTypesMetadata', 'getJiraIssueTypeMetaWithFields', 'createJiraIssue')], write: T('createJiraIssue'), params: ['parent', 'summary'], approval: 'confirm', label: 'Crear sub-task en Jira', target: ['parent', 'summary'], verify: ['parent'] },
   'jira.createIssue': { tools: [...READ_CTX, ...T('getJiraProjectIssueTypesMetadata', 'getJiraIssueTypeMetaWithFields', 'createJiraIssue')], write: T('createJiraIssue'), params: ['project', 'summary'], approval: 'confirm', label: 'Crear issue / bug en Jira', target: ['project', 'issueType', 'summary'], verify: ['project'] },
   'jira.transition': { tools: [...READ_CTX, ...T('getJiraIssue', 'getTransitionsForJiraIssue', 'transitionJiraIssue')], write: T('transitionJiraIssue'), params: ['issue', 'to'], approval: 'confirm', label: 'Transicionar en Jira', target: ['issue', 'to'], verify: ['issue'] },
@@ -260,7 +260,7 @@ const CHECK = {
   'jira.createSubtask': { exact: { parent: 'parent' }, forbid: ['transition'], forbidExtra: true, subtaskProject: true },
   'jira.createIssue': { exact: { project: 'projectKey', issueType: 'issueTypeName' }, forbid: ['transition', 'parent'], forbidExtra: true },
   'jira.transition': { exact: { issue: 'issueIdOrKey' }, forbid: ['fields', 'update'], transition: true },
-  'jira.link': { exact: { from: 'inwardIssue', to: 'outwardIssue', type: 'type' } },
+  'jira.link': { exact: { from: 'inwardIssue', to: 'outwardIssue', type: 'type' }, forbid: ['comment'] },
   'confluence.createPage': { exact: { space: 'spaceId', title: 'title' }, ifGiven: { parent: 'parentId' } },
   'confluence.updatePage': { exact: { page: 'pageId' }, ifGiven: { title: 'title' }, forbid: ['spaceId', 'parentId'] },
 };
@@ -278,7 +278,8 @@ export function offTarget(type, params, input, reads = []) {
   const c = CHECK[type]; if (!c) return [];
   const bad = [];
   const from = (tool, ok = () => true) => reads.filter((r) => r.tool.endsWith(`__${tool}`) && ok(r.input || {})).flatMap((r) => objectsIn(r.content));
-  const issueEvidence = (want) => from('getJiraIssue', (i) => norm(i.issueIdOrKey) === want);
+  // the issue's OWN top-level id/key only (an object custom field could carry any {key, id})
+  const issueEvidence = (want) => reads.filter((r) => r.tool.endsWith('__getJiraIssue') && norm(r.input?.issueIdOrKey) === want).flatMap((r) => { try { const j = JSON.parse(r.content); return j && typeof j === 'object' && !Array.isArray(j) ? [j] : []; } catch { return []; } });
   for (const [k, field] of Object.entries(c.exact || {})) {
     const want = norm(params[k]); if (!want) continue;
     const got = norm(input?.[field]);

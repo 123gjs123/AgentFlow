@@ -292,3 +292,14 @@ Round-3 findings R1–R5: **FIXED**, re-proved. New findings and fixes (e2e `29-
 | **Low.** An approval executing at that moment looked like a crash to a new run. | Open approvals count as live runs. |
 
 **Residual risk (documented).** Reading `getJiraIssue` puts ticket text inside the action call. The app's exact checks on the write call are what keep a prompt injection there from changing the target. The content (comment body, summary) is the approved one, but the model could still rephrase it.
+
+### Fifth pass of the adversarial review: closed
+
+S1–S5: **FIXED**, re-proved. No new finding of medium severity or higher. The two residual items it raised were closed as well:
+- **`jira.comment` no longer reads the ticket.** `getJiraIssue` was removed from its tools, so an injected issue description cannot steer the posted text. A link may not carry `comment` (free text).
+- **The numeric-id evidence uses only the issue's own top-level `id` and `key`.** An object custom field `{key, id}` inside the issue does not count.
+
+Spec 14 v1 is closed after 2 independent reviews and 5 adversarial passes. In total:
+- 31 findings fixed;
+- every one with a regression test (`29-*`: 18 tests);
+- E2E 281/281.
