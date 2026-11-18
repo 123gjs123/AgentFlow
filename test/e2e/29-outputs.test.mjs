@@ -318,3 +318,75 @@ test('revisión 14: la llamada debe usar el destino aprobado y una sola vez; el 
     assert.equal(by('a_url').status, 'error'); assert.match(by('a_url').error, /no puede salir de la ejecución/);
   } finally { srv.close(); }
 });
+
+// ---- second adversarial pass on spec 14 ----
+test('revisión 14b: el destino se compara EXACTO (SBK-10 no es SBK-1; un título con comillas sí coincide); lo que no coincide pide confirmación la próxima vez', async () => {
+  const st = role('Paso', '[[mock:say ok]]', { id: 's_x', actions: [
+    { id: 'a_10', type: 'jira.comment', approval: 'auto', optional: true, idempotencyKey: 'k-{{vars.n}}', params: { issue: 'SBK-1', body: `x [[mock:tool ${ATL}__addCommentToJiraIssue SBK-10]] ${okJson('SBK-10')}` } },
+    { id: 'a_q', type: 'confluence.createPage', approval: 'auto', params: { space: 'QA', title: 'Plan "Q4"', body: `y [[mock:tool ${ATL}__createConfluencePage Plan "Q4"]] ${okJson('123')}` } },
+  ] });
+  const f = await s.flow('Exacto', [st], [], { vars: { n: '1' } });
+  let r = await run(f.id);
+  const by = (id) => r.steps.s_x.declaredActions.find((p) => p.actionId === id);
+  assert.equal(by('a_10').status, 'error'); assert.match(by('a_10').error, /no usó el destino aprobado \(issue=SBK-1\)/);
+  assert.equal(by('a_q').status, 'done', by('a_q').error);
+  r = await run(f.id);
+  assert.equal(by('a_10').status, 'awaiting_approval', 'no queda como "ya hecha": una persona revisa');
+  assert.match(by('a_10').reason, /no coincidió con lo aprobado/);
+  assert.equal(by('a_q').status, 'exists');
+});
+
+test('revisión 14b: al aprobar no se puede mover el destino (padre, tipo, campos nuevos, listas) y un reinicio a mitad de una aprobación la deja decidible', async () => {
+  let hang = true;
+  const srv = http.createServer((req, res) => { req.resume(); if (!hang) { res.writeHead(200); res.end(); } });
+  await new Promise((rr) => srv.listen(0, '127.0.0.1', rr));
+  try {
+    const st = role('Paso', '[[mock:say ok]]', { id: 's_l', actions: [
+      { id: 'a_pg', type: 'confluence.createPage', params: { space: 'QA', parent: '100', title: 'T', body: 'b' } },
+      { id: 'a_is', type: 'jira.createIssue', params: { project: 'SBK', issueType: 'Bug', summary: 's', fields: { environment: 'QA' } } },
+      { id: 'a_h', type: 'http.post', params: { url: `http://127.0.0.1:${srv.address().port}/h`, body: 'x' } },
+    ] });
+    const f = await s.flow('Bloqueo', [st], []);
+    const r = await run(f.id);
+    const dec = (actionId, params) => s.ui('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { stepKey: 's_l', actionId, approve: true, params });
+    const pg = r.steps.s_l.declaredActions.find((p) => p.actionId === 'a_pg').params;
+    const is = r.steps.s_l.declaredActions.find((p) => p.actionId === 'a_is').params;
+    for (const [id, params] of [['a_pg', { ...pg, parent: '999' }], ['a_is', { ...is, issueType: 'Sub-task' }], ['a_is', { ...is, fields: { project: { key: 'OPS' } } }], ['a_is', { ...is, project: ['SBK'] }], ['a_is', { ...is, extra: 'x' }]]) {
+      const x = await dec(id, params);
+      assert.equal(x.status, 400, `${id} ${JSON.stringify(params)}`); assert.equal(x.body.code, 'TARGET_LOCKED');
+    }
+    // a restart while an approval is executing: it goes back to waiting, marked as halfway, and can be decided
+    const pending = s.ui('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { stepKey: 's_l', actionId: 'a_h', approve: true }).catch(() => null);
+    await until(async () => (await s.uiOk('GET', `/api/flows/${f.id}/runs/${r.id}`)).steps.s_l.declaredActions.some((p) => p.actionId === 'a_h' && p.status === 'executing'), 5000);
+    await s.kill(); await pending;
+    hang = false;
+    await s.start();
+    const back = (await s.uiOk('GET', `/api/flows/${f.id}/runs/${r.id}`)).steps.s_l.declaredActions.find((p) => p.actionId === 'a_h');
+    assert.equal(back.status, 'awaiting_approval');
+    assert.match(back.reason, /se reinició durante la aprobación/);
+    const ok = await s.uiOk('POST', `/api/flows/${f.id}/runs/${r.id}/actions/decide`, { stepKey: 's_l', actionId: 'a_h', approve: false });
+    assert.equal(ok.status, 'rejected');
+  } finally { srv.close(); }
+});
+
+test('revisión 14b: un destino fijo admite reemplazar su propia copia anterior (no la de otro); {{{…}}} en un webhook y la clave con datos de la ejecución se rechazan', async () => {
+  const dest = path.join(s.dirs.work, `dest2-${Date.now()}`); fs.mkdirSync(dest, { recursive: true });
+  fs.writeFileSync(path.join(dest, 'ajeno.md'), 'de otra persona');
+  const st = role('Paso', '[[mock:say contenido]]', { id: 's_d', deliverables: [{ id: 'd_m', format: 'md', path: 'mio.md', destination: [{ path: dest }] }], actions: [
+    { id: 'a_raw', type: 'http.post', approval: 'auto', optional: true, params: { url: 'http://127.0.0.1:9/x', body: '{"t":"{{{output}}}"}' } },
+    { id: 'a_key', type: 'jira.comment', approval: 'auto', optional: true, idempotencyKey: '{{output}}', params: { issue: 'SBK-1', body: 'x' } },
+  ] });
+  const f = await s.flow('Copias', [st], []);
+  let r = await run(f.id);
+  assert.equal(r.steps.s_d.status, 'success', r.steps.s_d.error);
+  r = await run(f.id);
+  assert.equal(r.steps.s_d.status, 'success', 'la segunda ejecución reemplaza su propia copia');
+  const by = (id) => r.steps.s_d.declaredActions.find((p) => p.actionId === id);
+  assert.match(by('a_raw').error, /sin escapar/);
+  assert.match(by('a_key').error, /clave para no repetir no puede salir de la ejecución/);
+  // somebody else's file (or ours, edited since) is never replaced
+  fs.writeFileSync(path.join(dest, 'mio.md'), 'editado a mano');
+  r = await run(f.id);
+  assert.equal(r.steps.s_d.status, 'error');
+  assert.equal(fs.readFileSync(path.join(dest, 'mio.md'), 'utf8'), 'editado a mano');
+});

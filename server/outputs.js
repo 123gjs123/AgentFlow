@@ -144,14 +144,20 @@ export function writeDeliverables(flow, step, run, { key, output, json, render }
       try {
         if (dst.path.includes('{{') || !path.isAbsolute(dst.path) || !fs.existsSync(dst.path) || !fs.statSync(dst.path).isDirectory()) throw new Error('la carpeta destino debe existir (ruta absoluta, sin plantillas)');
         const target = path.join(dst.path, name);
-        if (fs.existsSync(target) && !d.overwrite) throw new Error('ya existe un archivo con ese nombre (no se sobrescribe salvo que el step lo permita)');
-        fs.copyFileSync(file, target); copies.push({ path: target });
+        const copies0 = readCopies(flow.id);
+        if (fs.existsSync(target) && !d.overwrite && copies0[target.toLowerCase()] !== sha(fs.readFileSync(target))) throw new Error('ya existe un archivo con ese nombre que no dejó este flujo (o cambió desde entonces): no se sobrescribe salvo que el step lo permita');
+        fs.copyFileSync(file, target); copies.push({ path: target }); copies0[target.toLowerCase()] = sha(c.text); writeCopies(flow.id, copies0);
       } catch (e) { copies.push({ path: dst.path, error: clip(e.message, 200) }); res.errors.push(`📄 ${name} → ${dst.path}: ${clip(e.message, 200)}`); }
     }
     res.files.push({ id: d.id, stepKey: key, format: d.format, name, path: file, size: Buffer.byteLength(c.text), sha: sha(c.text), copies });
   }
   return res;
 }
+
+// what this flow copied where (sha), so its own earlier copy can be replaced and anybody else's file never is
+const COPIES = (flowId) => path.join(store.DATA, 'outputs', safeId(flowId), 'copies.json');
+const readCopies = (flowId) => { try { return JSON.parse(fs.readFileSync(COPIES(flowId), 'utf8')); } catch { return {}; } };
+const writeCopies = (flowId, m) => { fs.mkdirSync(path.dirname(COPIES(flowId)), { recursive: true }); fs.writeFileSync(COPIES(flowId), JSON.stringify(m)); };
 
 // ---------------- ledger (idempotency) ----------------
 const LEDGER = (flowId) => path.join(store.DATA, 'actions', `${safeId(flowId)}.json`);
@@ -192,21 +198,26 @@ export function planActions(flow, step, run, { status, output, json, render, eva
     const base = { actionId: a.id, type: a.type, label: ACTION_TYPES[a.type]?.label || a.type, optional: !!a.optional, at: Date.now(), stepKey, ...(item != null ? { item: clip(item, 80) } : {}) };
     if (a.if) { const c = evalCond(a.if, output, json); if (!c.pass) { plans.push({ ...base, status: 'skipped', reason: `condición: ${c.message}` }); continue; } }
     if (a.type === 'http.post' && FROM_RUN.test(String(a.params?.url || ''))) { plans.push({ ...base, status: 'error', error: 'La URL de un webhook no puede salir de la ejecución (output, steps, item, input): usa un valor fijo o {{vars.x}}' }); continue; }
+    if (a.type === 'http.post' && /\{\{\{\s*(output|steps\.|item|input|upstream)/.test(String(a.params?.body || ''))) { plans.push({ ...base, status: 'error', error: 'El cuerpo de un webhook no puede insertar datos de la ejecución sin escapar ({{{…}}}): usa {{…}}' }); continue; }
+    if (a.idempotencyKey && FROM_RUN.test(a.idempotencyKey)) { plans.push({ ...base, status: 'error', error: 'La clave para no repetir no puede salir de la ejecución (output, steps, item, input): usa {{vars.x}} o un texto fijo' }); continue; }
     let params;
     try { params = renderParams(a, render); } catch (e) { plans.push({ ...base, status: 'error', error: e.message }); continue; }
     const missing = (ACTION_TYPES[a.type]?.params || []).filter((k) => !String(params[k] ?? '').trim());
     if (missing.length) { plans.push({ ...base, params, status: 'error', error: `Faltan datos: ${missing.join(', ')}` }); continue; }
+    const unresolved = Object.entries({ ...params, ...(a.idempotencyKey ? { idempotencyKey: render(a.idempotencyKey) } : {}) }).filter(([k, v]) => (ACTION_TYPES[a.type].target.includes(k) && k !== 'body') || k === 'idempotencyKey' ? /\{\{[^}]+\}\}/.test(String(v)) : false).map(([k]) => k);
+    if (unresolved.length) { plans.push({ ...base, params, status: 'error', error: `Quedó una plantilla sin resolver en: ${unresolved.join(', ')}` }); continue; }
     const hash = payloadHash(a, params);
     const ident = a.allowDuplicate ? null : identityOf(a, params, { stepId: step.id, item, render });
     if (policyBlocked) { plans.push({ ...base, params, hash, ident, status: 'blocked', reason: 'la política «sin escrituras externas» no permite acciones' }); continue; }
+    const crash = crashKey(step.id, item, a.id);
     const prev = ident && ledger.filter((x) => x.ident === ident);
     const done = prev?.find((x) => x.status === 'done');
     if (done) { plans.push({ ...base, params, hash, ident, status: 'exists', key: done.key, url: done.url, reason: `ya se hizo en ${done.runId}${done.key ? ` (${done.key})` : ''}${done.hash !== hash ? '; los datos cambiaron desde entonces' : ''}` }); continue; }
-    const halfway = prev?.find((x) => x.status === 'started');
+    const halfway = ledger.find((x) => (ident ? x.ident === ident : x.crash === crash) && ['started', 'suspicious'].includes(x.status));
     let approval = run.rehearsal ? 'dryRun' : a.approval || ACTION_TYPES[a.type].approval;
     if (approval === 'auto' && (forceConfirm || halfway)) approval = 'confirm';
     plans.push({ ...base, params, hash, ident, approval, status: approval === 'auto' ? 'pending' : approval === 'confirm' ? 'awaiting_approval' : 'dry_run',
-      ...(halfway ? { reason: `quedó a medias en ${halfway.runId} (el servidor se cortó o se detuvo): revisa en el sistema si se hizo antes de aprobar` } : forceConfirm && (a.approval || ACTION_TYPES[a.type].approval) === 'auto' ? { reason: 'el step tiene un break después: confírmala tú' } : {}) });
+      crash, ...(halfway ? { reason: halfway.status === 'suspicious' ? `en ${halfway.runId} la llamada no coincidió con lo aprobado (${halfway.why || 'destino'}): revisa en el sistema antes de aprobar` : `quedó a medias en ${halfway.runId} (el servidor se cortó o se detuvo): revisa en el sistema si se hizo antes de aprobar` } : forceConfirm && (a.approval || ACTION_TYPES[a.type].approval) === 'auto' ? { reason: 'el step tiene un break después: confírmala tú' } : {}) });
   }
   return plans;
 }
@@ -215,13 +226,42 @@ const untrusted = (s) => `<untrusted-data>\n${String(s).replace(/<\/?untrusted-d
 let httpAuth = () => ({});
 export function init(d) { if (d.httpAuth) httpAuth = d.httpAuth; }
 
+const crashKey = (stepId, item, actionId) => sha(`crash|${stepId}|${item ?? ''}|${actionId}`);
+/** Ledger marks: started → done | suspicious (wrong target / several writes: a person checks) | failed (removed). */
 function mark(flowId, runId, plan, status, extra = {}) {
-  if (!plan.ident) return;
   const l = readLedger(flowId);
-  const i = l.findIndex((x) => x.ident === plan.ident && x.runId === runId && x.status === 'started');
-  const e = { ident: plan.ident, actionId: plan.actionId, hash: plan.hash, status, runId, at: Date.now(), ...extra };
-  if (i >= 0) { if (status === 'failed') l.splice(i, 1); else l[i] = e; } else if (status !== 'failed') l.push(e);
+  const same = (x) => x.runId === runId && (plan.ident ? x.ident === plan.ident : x.crash === plan.crash) && x.status === 'started';
+  const i = l.findIndex(same);
+  // without de-duplication (comments, webhooks) only the crash trace is kept: a "done" one is removed
+  const e = { ...(plan.ident ? { ident: plan.ident } : {}), crash: plan.crash, actionId: plan.actionId, hash: plan.hash, status, runId, at: Date.now(), ...extra };
+  if (status === 'failed' || (status === 'done' && !plan.ident)) { if (i >= 0) l.splice(i, 1); }
+  else if (i >= 0) l[i] = e; else l.push(e);
   writeLedger(flowId, l);
+}
+/** A person decided about a "halfway" / "suspicious" action: its old traces no longer ask for confirmation. */
+function settleTraces(flowId, plan) {
+  const l = readLedger(flowId).filter((x) => !(['started', 'suspicious'].includes(x.status) && (plan.ident ? x.ident === plan.ident : x.crash === plan.crash)));
+  writeLedger(flowId, l);
+}
+/** All string values of a tool input, by key ("issueIdOrKey" → ["SBK-1"]). */
+function leaves(v, key = '', out = []) {
+  if (v == null) return out;
+  if (typeof v === 'object') { for (const [k, x] of Object.entries(v)) leaves(x, k, out); return out; }
+  out.push([key, String(v).trim().toLowerCase()]);
+  return out;
+}
+// where each target param is expected in the MCP tool input (exact value; any of these keys, at any depth)
+const TARGET_KEYS = { issue: ['issueidorkey', 'issuekey', 'issue', 'key'], parent: ['parent', 'parentkey', 'key'], project: ['projectkey', 'project', 'key'], from: ['inwardissue', 'inwardissuekey', 'outwardissue', 'outwardissuekey', 'from', 'key'], to: ['inwardissue', 'inwardissuekey', 'outwardissue', 'outwardissuekey', 'to', 'key'], title: ['title'], page: ['pageid', 'id', 'page'] };
+/** Params whose EXACT value is not in the write call (by its expected keys when the input has them). */
+export function offTarget(def, params, input) {
+  const all = leaves(input);
+  return def.verify.filter((k) => {
+    const want = String(params[k] ?? '').trim().toLowerCase();
+    if (!want) return false;
+    const keys = TARGET_KEYS[k] || [k];
+    const keyed = all.filter(([kk]) => keys.includes(kk.toLowerCase()));
+    return !(keyed.length ? keyed : all).some(([, v]) => v === want);
+  });
 }
 
 /** Executes ONE planned action (ledger "started" first: a crash leaves a trace). Returns the plan with status done|error. */
@@ -257,10 +297,9 @@ export async function executeAction(flow, plan, { signal, runId } = {}) {
     const j = P.parseJsonLoose(r.text) || {};
     // the APP checks what really happened: the write tool called exactly once, on the rendered target
     if (!writes.length) throw new Error(j.error ? `No se hizo: ${clip(j.error, 300)}` : `No se llamó a ${def.write.map((x) => x.split('__').pop()).join('/')}`);
-    if (writes.length > 1) { const res = { ...out, status: 'error', ok: false, error: `Se llamó ${writes.length} veces a ${def.write[0].split('__').pop()} (debía ser una): revísalo en el sistema`, endedAt: Date.now() }; mark(flow.id, runId, plan, 'done', { key: j.key || null, suspicious: true }); return res; }
-    const input = JSON.stringify(writes[0].input || {}).toLowerCase();
-    const off = def.verify.filter((k) => String(plan.params[k] ?? '').trim() && !input.includes(String(plan.params[k]).trim().toLowerCase()));
-    if (off.length) { mark(flow.id, runId, plan, 'done', { suspicious: true }); return { ...out, status: 'error', ok: false, error: `La llamada no usó el destino aprobado (${off.map((k) => `${k}=${plan.params[k]}`).join(', ')}): revísalo en el sistema`, endedAt: Date.now() }; }
+    if (writes.length > 1) { const res = { ...out, status: 'error', ok: false, error: `Se llamó ${writes.length} veces a ${def.write[0].split('__').pop()} (debía ser una): revísalo en el sistema`, endedAt: Date.now() }; mark(flow.id, runId, plan, 'suspicious', { why: `${writes.length} escrituras` }); return res; }
+    const off = offTarget(def, plan.params, writes[0].input || {});
+    if (off.length) { mark(flow.id, runId, plan, 'suspicious', { why: off.join(', ') }); return { ...out, status: 'error', ok: false, error: `La llamada no usó el destino aprobado (${off.map((k) => `${k}=${plan.params[k]}`).join(', ')}): revísalo en el sistema`, endedAt: Date.now() }; }
     if (lastWriteErr || j.ok === false) throw new Error(clip(j.error || lastWriteErr, 300));
     const res = { ...out, status: 'done', ok: true, key: j.key ? clip(j.key, 120) : null, url: typeof j.url === 'string' && /^https?:\/\//.test(j.url) ? clip(j.url, 500) : null, endedAt: Date.now(), usage: r.costUsd ? { costUsd: r.costUsd } : undefined };
     mark(flow.id, runId, plan, 'done', { key: res.key, url: res.url });
@@ -283,7 +322,7 @@ export function addPending(flowId, runId, plans) {
 }
 export function clearPending(flowId) { try { fs.rmSync(APPROVALS(flowId), { force: true }); } catch {} }
 const locks = new Set();
-const LOCKED_EDIT = { 'jira.comment': ['issue'], 'jira.createSubtask': ['parent'], 'jira.createIssue': ['project'], 'jira.transition': ['issue', 'to'], 'jira.link': ['from', 'to'], 'confluence.createPage': ['space'], 'confluence.updatePage': ['page'], 'http.post': ['url', 'credential'] };
+const LOCKED_EDIT = { 'jira.comment': ['issue'], 'jira.createSubtask': ['parent', 'fields'], 'jira.createIssue': ['project', 'issueType', 'fields'], 'jira.transition': ['issue', 'to'], 'jira.link': ['from', 'to', 'type'], 'confluence.createPage': ['space', 'parent', 'title'], 'confluence.updatePage': ['page', 'title'], 'http.post': ['url', 'credential'] };
 
 /**
  * Approve (optionally with edited CONTENT; the target stays) or reject one waiting action. Locked while deciding (no
@@ -324,17 +363,21 @@ export async function decide(flowId, runId, stepKey, actionId, { approve, params
         const cleaned = cleanActions([{ type: plan.type, params, approval: 'confirm' }])?.[0]?.params;
         if (cleaned) {
           // the content may be edited; WHAT is changed (issue, project, page, URL…) stays the one shown
-          for (const k of LOCKED_EDIT[p.type] || []) if (String(cleaned[k] ?? '') !== String(p.params[k] ?? '')) { setStatus((x) => ({ ...x, status: 'awaiting_approval' }), (x) => x.status === 'executing'); throw Object.assign(new Error(`No se puede cambiar «${k}» al aprobar: rechaza esta y ajusta el step`), { status: 400, code: 'TARGET_LOCKED' }); }
+          const bad = Object.keys(cleaned).find((k) => !(k in p.params) || typeof cleaned[k] !== typeof p.params[k]);
+          if (bad) { setStatus((x) => ({ ...x, status: 'awaiting_approval' }), (x) => x.status === 'executing'); throw Object.assign(new Error(`Al aprobar solo se edita el contenido de los campos que ya tiene: «${bad}» no`), { status: 400, code: 'TARGET_LOCKED' }); }
+          for (const k of LOCKED_EDIT[p.type] || []) if (JSON.stringify(cleaned[k] ?? null) !== JSON.stringify(p.params[k] ?? null)) { setStatus((x) => ({ ...x, status: 'awaiting_approval' }), (x) => x.status === 'executing'); throw Object.assign(new Error(`No se puede cambiar «${k}» al aprobar: rechaza esta y ajusta el step`), { status: 400, code: 'TARGET_LOCKED' }); }
           p.params = cleaned; p.edited = true;
         }
         const missing = (ACTION_TYPES[p.type]?.params || []).filter((k) => !String(p.params[k] ?? '').trim());
         if (missing.length) { setStatus((x) => ({ ...x, status: 'awaiting_approval' }), (x) => x.status === 'executing'); throw Object.assign(new Error(`Faltan datos: ${missing.join(', ')}`), { status: 400, code: 'BAD_PARAMS' }); }
         p.hash = payloadHash({ type: p.type }, p.params);
+        // the identity stays the PLANNED one: editing the summary when approving must not make the next run propose it again
       }
       const done = p.ident && readLedger(flowId).find((x) => x.ident === p.ident && x.status === 'done');
       if (done && !plan.reason?.startsWith('quedó a medias')) res = { ...p, status: 'exists', key: done.key, url: done.url, reason: `ya se hizo en ${done.runId}`, decidedAt: Date.now() };
       else { res = await executeAction(flow, p, { runId }); res.decidedAt = Date.now(); }
     }
+    if (plan.reason && /quedó a medias|no coincidió/.test(plan.reason)) settleTraces(flowId, plan);
     const fresh = setStatus(() => res, (x) => x.status === 'executing');
     if (res.status === 'done' || res.status === 'exists') for (const k of new Set([realKey, realKey.split('~')[0]])) if (fresh.steps?.[k]) (fresh.steps[k].actions ||= []).push({ tool: res.type, server: 'declarada', ok: true, key: res.key, url: res.url });
     deps.saveRun(fresh);
@@ -362,4 +405,21 @@ export function attentionItem(flow) {
     title: `⚡ ${waiting.length} ${waiting.length === 1 ? 'acción' : 'acciones'} esperando aprobación`, detail: clip(`${oldest.label} (${step.name}${oldest.item ? ` · ${oldest.item}` : ''})${waiting.length > 1 ? ` y ${waiting.length - 1} más` : ''}`, 160),
     // keyed on the oldest pending one: deciding others does not re-raise it as new
     createdAt: oldest.at || Date.now(), stateKey: sha(`${oldest.runId}|${oldest.stepKey}|${oldest.actionId}`), target: { flowId: flow.id, stepId: step.id, open: 'approve' } };
+}
+
+/** Boot: an approval interrupted by a restart ("executing") goes back to waiting, marked as halfway. */
+export function recoverExecuting({ listFlows, getRun, saveRun }) {
+  let n = 0;
+  for (const f of listFlows()) {
+    for (const runId of [...new Set(pendingOf(f.id).map((x) => x.runId))]) {
+      const run = getRun(f.id, runId);
+      if (!run) continue;
+      let changed = false;
+      for (const s of Object.values(run.steps || {})) {
+        s.declaredActions = (s.declaredActions || []).map((p) => { if (p.status !== 'executing') return p; changed = true; return { ...p, status: 'awaiting_approval', reason: `quedó a medias en ${runId} (el servidor se reinició durante la aprobación): revisa en el sistema si se hizo antes de aprobar` }; });
+      }
+      if (changed) { saveRun(run); n++; }
+    }
+  }
+  return n;
 }

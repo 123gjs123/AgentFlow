@@ -800,7 +800,7 @@ ${cgit.block}`;
           const res = await OUT.executeAction(flow, p, { signal: sig, runId: run.id });
           done.push(res);
           log({ kind: res.status === 'done' ? 'hook_log' : 'error', text: res.status === 'done' ? `⚡ ${p.label}: ✓ ${res.key || 'hecho'}${res.url ? ` ${res.url}` : ''}` : `⚡ ${p.label}: ✗ ${res.error}` });
-          if (res.status === 'done') rs.actions.push({ tool: p.type, server: 'declarada', ok: true, key: res.key, url: res.url, input: JSON.stringify(p.params).slice(0, 600) });
+          if (res.status === 'done') rs.actions.push({ tool: p.type, server: 'declarada', ok: true, key: res.key, url: res.url });
           if (res.status === 'error' && !p.optional && rs.status === 'success') { rs.status = 'error'; rs.code = 'ACTION_FAILED'; rs.error = `${p.label}: ${res.error}`; }
         }
       };

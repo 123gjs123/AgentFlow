@@ -795,6 +795,8 @@ engine.bus.on('msg', (msg) => {
 });
 
 store.getConfig(); // ensure token exists
+// a stray rejected promise (a check, a hook, a socket) must not take the whole app down: log it loudly instead
+process.on('unhandledRejection', (e) => { console.error('[unhandledRejection]', e?.stack || e); });
 
 for (const f of store.listFlows()) { const full = store.getFlow(f.id); if (full) { engine.syncSchedule(full); W.syncPolling(full); } }
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `El puerto ${PORT} ya está en uso: ¿hay otro Agent Flow Studio corriendo?` : e.message); process.exit(1); });
@@ -807,6 +809,7 @@ server.listen(PORT, HOST, () => {
   review.init({ bus: engine.bus, emit: (m) => engine.bus.emit('msg', m), refreshAttention: (flowId) => attention.refreshFlow(flowId) });
   attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem, watchItem: W.attentionItem, approvalItem: OUT.attentionItem });
   OUT.init({ httpAuth: W.authHeader });
+  { const n = OUT.recoverExecuting({ listFlows: store.listFlows, getRun: store.getRun, saveRun: store.saveRun }); if (n) console.log(`${n} ejecución(es) con una aprobación interrumpida: vuelven a esperar decisión.`); }
   W.init({
     emit: (m) => engine.bus.emit('msg', m), onNews: (flowId) => attention.refreshFlow(flowId),
     // a run started by news has the guards of an external run (its input comes from outside)

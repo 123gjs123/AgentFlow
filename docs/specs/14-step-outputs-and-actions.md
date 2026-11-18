@@ -248,3 +248,20 @@ An architect review and an adversarial review (independent agents) checked 4548b
 | Pending approvals disappeared when the step ran again, or behind a pin. | An approvals index (`data/approvals/<flow>.json`) across runs feeds the attention item (keyed on the oldest one) and an "ejecuciones anteriores" list in the Data tab. |
 | `onFailure` did not fire for `ACTION_FAILED` or `DELIVERABLE_INVALID`, and "si falla" actions never ran then. | Both happen after the outputs. |
 | Data growth. | `lastRun` keeps params clipped; `clearRuns` removes outputs and approvals; the ledger is pruned by age (400 days). Each action call stops at 3 minutes. |
+
+### Second pass of the adversarial review
+
+Round-1 findings #1–#4: **FIXED**, re-proved. #5 (target check) and #6 (JSON escaping) had gaps, now closed. New findings and fixes, each covered by a test (e2e `29-*` "revisión 14b: …"):
+
+| Finding | Fix |
+|---|---|
+| **High, proved.** The target check was a substring: `SBK-10` passed for `SBK-1`, while a title with quotes failed. A mismatch was then recorded as "done", so the action never happened. | The comparison is EXACT, value by value of the parsed tool input. The expected keys are used when present (`issueIdOrKey`, `projectKey`, `pageId`, `title`…), any value otherwise. A mismatch, or several writes, is recorded as `suspicious`, which is never "done": the next run asks a person ("no coincidió con lo aprobado"). |
+| **High, proved.** A restart during an approval left the action stuck in `executing` forever. | At boot, `executing` goes back to waiting, marked "quedó a medias… se reinició durante la aprobación", and can be decided again. |
+| **Medium, proved.** Approving could still move the target: page parent and title, issue type, `fields`, link type, new keys, arrays. | Every target field is locked; there are no new keys and no type changes, and values are compared as JSON. |
+| **Medium, proved.** A fixed destination made the second run fail, because the file already existed. | The flow records what it copied where (`outputs/<flow>/copies.json`, sha). Its own unchanged copy can be replaced; anybody else's file, or ours edited since, never. |
+| **Medium, proved.** `{{{…}}}` in a webhook body skipped the escaping. | Raw run data (`{{{output|steps|item|input|upstream}}}`) in a webhook body is refused. |
+| An `idempotencyKey` could be steered by run data, or frozen by an unresolved placeholder. | No run data in the key, and an unresolved placeholder in a target field or in the key refuses the plan. Editing the content when approving keeps the PLANNED identity, so the next run does not propose it again. |
+| Comments and webhooks repeated after a crash. A rejected "halfway" kept asking forever. | A crash trace (step + element + action) is kept for every action until it finishes. Deciding a "halfway" or "suspicious" one settles its old traces. |
+| The run summary exposed params through `actions[].input`. | Declared actions add only type, key and url to the handoff. |
+
+The server now logs an unhandled promise rejection instead of exiting. A full-suite run once lost a test server mid-file; it could not be reproduced (16 s of polling against a closed endpoint, and three full runs green). The cause, if it happens again, is now logged.
