@@ -100,7 +100,7 @@ function compute(flowId, cachedPreflight) {
  *  manual single-step tests change nothing. */
 function track(flowId, r) {
   if (!r || r.status === 'stopped' || r.rehearsal || r.trigger === 'rehearsal') return; // a rehearsal (spec 28) is not news
-  const fullRun = !r.only;
+  const fullRun = !r.only && !r.from;
   if (FAILED.has(r.status) && (fullRun || !['manual', 'chat'].includes(r.trigger))) {
     const [stepId, st] = Object.entries(r.steps || {}).find(([, x]) => FAILED.has(x.status)) || [];
     failures.set(flowId, { runId: r.id, status: r.status, code: st?.code || (r.status === 'interrupted' ? 'INTERRUPTED' : r.status === 'timeout' ? 'DEADLINE' : null), stepId: stepId || null,
@@ -171,7 +171,7 @@ export function init(d) {
   recoveries.clear();
   for (const f of store.listFlows()) {
     const runs = store.listRuns(f.id).filter((r) => r.status !== 'running' && r.status !== 'paused').reverse(); // oldest → newest
-    for (const r of runs) if (FAILED.has(r.status) || (r.status === 'success' && !r.only)) track(f.id, FAILED.has(r.status) ? store.getRun(f.id, r.id) : r);
+    for (const r of runs) if (FAILED.has(r.status) || (r.status === 'success' && !r.only && !r.from)) track(f.id, FAILED.has(r.status) ? store.getRun(f.id, r.id) : r);
   }
   recoveries.clear(); // what was resolved while the server was down is not news
   const live = new Set();

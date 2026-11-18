@@ -86,6 +86,7 @@ In the first real test the coordinator could not check a ticket branch's new com
 - **Its chat:** the same, with write tools still disallowed.
 - **Never** for other steps, a command coordinator, a coordinator in `bypassPermissions` (Bash would be open), or a flow without git repositories.
 - e2e: `26-*` "el coordinador decide con git de solo lectura".
+- The helper was hardened after the adversarial review (spec 10, "Review fixes"): branch and tag need an explicit list mode, and `--no-index` / `--filters` are refused.
 
 ## Open questions
 

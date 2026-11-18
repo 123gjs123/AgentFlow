@@ -53,6 +53,11 @@ export function executableParts(flow) {
     for (const a of s.assertions || []) if (a?.type === 'command' && String(a.command || '').trim()) out.push(`aserción con comando en "${s.name}"`);
     if (s.kind !== 'command' && /(^|[\s,])(Bash|Edit|Write|NotebookEdit)\b/.test(String(s.allowedTools || ''))) out.push(`"${s.name}" puede usar la terminal o escribir archivos (${String(s.allowedTools).match(/(Bash|Edit|Write|NotebookEdit)[^\s,]*/g).slice(0, 4).join(', ')})`);
     if (s.permissionMode === 'bypassPermissions') out.push(`"${s.name}" salta los permisos (bypassPermissions)`);
+    // spec 10: a command watch runs on this machine; a URL watch with a credential would send it
+    for (const w of s.watches || []) {
+      if (w?.type === 'command' && String(w.target || '').trim()) out.push(`fuente vigilada con comando en "${s.name}": ${String(w.target).split(/\r?\n/)[0].slice(0, 120)}`);
+      if (w?.type === 'url' && w.options?.credential) out.push(`fuente vigilada en "${s.name}" que usa la credencial «${String(w.options.credential).slice(0, 40)}» con ${String(w.target || '').slice(0, 120)}`);
+    }
   }
   if (String(flow.finally?.command || '').trim()) out.push(`"Al terminar": ${String(flow.finally.command).split('\n')[0].slice(0, 120)}`);
   for (const r of flow.requirements || []) if (r.type === 'tool' && String(r.check || '').trim()) out.push(`comprobación de requisito: ${r.check}`);
@@ -79,6 +84,7 @@ export function importBundle(bundle, clean, { name } = {}) {
     if (!Array.isArray(st.memory)) st.memory = [];
     return st;
   });
+  if (clean.steps) clean.steps(steps);
   const ids = new Set(steps.map((s) => s.id));
   const edges = (Array.isArray(src.edges) ? src.edges : []).filter((e) => e && ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(clean.edge);
   const flow = {

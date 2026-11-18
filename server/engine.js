@@ -364,7 +364,7 @@ async function executeForEach(flow, step, input, run, signal, upstream, opts) {
   emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   const end = (status, extra = {}) => {
     Object.assign(rs, { status, ...extra }); rs.endedAt = now(); rs.durationMs = rs.endedAt - rs.startedAt;
-    setLast({ status: rs.status, endedAt: rs.endedAt, output: rs.output, json: rs.json, files: rs.files, actions: rs.actions, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, runId: run.id, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: 0 });
+    setLast({ status: rs.status, skipReason: rs.skipReason || null, endedAt: rs.endedAt, output: rs.output, json: rs.json, files: rs.files, actions: rs.actions, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, runId: run.id, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: 0 });
     emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
     store.saveRun(run); run.dirty = false;
     return rs;
@@ -403,7 +403,7 @@ async function executeForEach(flow, step, input, run, signal, upstream, opts) {
   rs.usage = done.reduce((a, r) => sumUsage(a, r.usage), undefined);
   for (const r of done) for (const w of r.warnings || []) if (!rs.warnings.includes(w)) rs.warnings.push(w);
   const bad = results.map((r, i) => [r, i]).filter(([r]) => !r || r.status !== 'success');
-  if (signal?.aborted && done.length < items.length) return end(run.timedOut ? 'timeout' : 'stopped', { code: run.timedOut ? 'DEADLINE' : 'STOPPED', error: run.timedOut ? 'Tiempo máximo de la ejecución agotado' : 'Detenido' });
+  if (signal?.aborted) return end(run.timedOut ? 'timeout' : 'stopped', { code: run.timedOut ? 'DEADLINE' : 'STOPPED', error: run.timedOut ? 'Tiempo máximo de la ejecución agotado' : 'Detenido' });
   if (bad.length) return end('error', { code: 'FOR_EACH_FAILED', error: `Fallaron ${bad.length} de ${items.length}: ${bad.map(([, i]) => rs.forEach.items[i].label).join(', ')}` });
   return end('success');
 }
@@ -833,7 +833,7 @@ export function externalRunProblem(flow, { only = null, vars = null } = {}) {
   for (const s of steps) {
     if (s.kind === 'command') {
       for (const k of P.rawPlaceholders(s.command)) {
-        const ext = k === 'input' || k === 'upstream' || k.startsWith('steps.') || (k.startsWith('vars.') && reqVars.has(k.slice(5).split('.')[0]));
+        const ext = k === 'input' || k === 'upstream' || k === 'item' || k.startsWith('item.') || k.startsWith('steps.') || (k.startsWith('vars.') && reqVars.has(k.slice(5).split('.')[0]));
         if (ext) return { status: 422, code: 'RAW_TEMPLATE_EXTERNAL', error: `El step "${s.name}" inserta {{{${k}}}} sin protección en un comando: no se permite con datos que vienen de fuera. Usa {{${k}}}.` };
       }
     }
@@ -888,13 +888,18 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
   const flow = store.getFlow(flowId);
   if (!flow) throw new Error('Flujo no encontrado');
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
-  if (from && !flow.steps.some((s) => s.id === from)) throw new Error('Step no encontrado');
+  if (from && !flow.steps.some((s) => s.id === from)) throw Object.assign(new Error('Step no encontrado'), { status: 404, code: 'STEP_NOT_FOUND' });
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
   { const cp = cwdProblem(flow); if (cp) throw Object.assign(new Error(cp.error), { status: cp.status, code: cp.code }); }
   // Spec 28 policy "noParallelRuns": shared environments are wiped by parallel runs of the same flow
   if (POL.has(flow, 'noParallelRuns') && isRunning(flowId)) throw Object.assign(new Error('Este flujo ya se está ejecutando y su política no permite dos ejecuciones a la vez (ambientes compartidos). Espera a que termine o detenla.'), { status: 409, code: 'FLOW_BUSY' });
   // spec 10: "desde este step" = that step and everything after it; the steps before keep their last output (not re-run)
   const fromSet = !only && from ? new Set([from, ...descendantsOf(flow, from)]) : null;
+  if (fromSet) {
+    const missing = [...new Set(flow.edges.filter((e) => fromSet.has(e.target) && !fromSet.has(e.source)).map((e) => e.source))]
+      .map((id) => flow.steps.find((s) => s.id === id)).filter((s) => s && !s.pinned && s.lastRun?.status !== 'success' && !(s.lastRun?.status === 'skipped' && s.lastRun?.skipReason === 'not_routed'));
+    if (missing.length) throw Object.assign(new Error(`No se puede ejecutar desde «${flow.steps.find((s) => s.id === from).name}»: ${missing.map((s) => `«${s.name}»`).join(', ')} no tiene una última salida buena para pasarle (${missing.map((s) => s.lastRun?.status || 'nunca se ejecutó').join(', ')}). Ejecuta el flujo completo o ese step primero.`), { status: 409, code: 'FROM_UPSTREAM_MISSING' });
+  }
   const levels = only ? [[only]] : topoLevels(flow).map((l) => (fromSet ? l.filter((id) => fromSet.has(id)) : l)).filter((l) => l.length);
   // Spec 28: an empty variable takes the policy default ("ambiente por defecto")
   const runVars = POL.withDefaults(flow, { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) });
@@ -1136,7 +1141,8 @@ function sumUsage(a, b) {
 
 function runTotals(run) {
   const t = { costUsd: 0, inputTokens: 0, outputTokens: 0, durationMs: (run.endedAt || now()) - run.startedAt };
-  for (const s of Object.values(run.steps || {})) {
+  for (const [id, s] of Object.entries(run.steps || {})) {
+    if (/~\d+$/.test(id)) continue; // a "para cada" element: its parent already carries the sum
     for (const u of [s.usage, s.usage?.judge]) { if (!u) continue; t.costUsd += Number(u.costUsd) || 0; t.inputTokens += u.inputTokens || 0; t.outputTokens += u.outputTokens || 0; }
   }
   t.costUsd = Math.round(t.costUsd * 1e6) / 1e6;
@@ -1211,6 +1217,7 @@ export function recoverStaleRuns() {
         const bootAt = now() - os.uptime() * 1000;
         for (const p of s.pids || []) if (p && typeof p === 'object' && p.at > bootAt) killPid(p.pid);
       }
+      for (const s of Object.values(r.steps || {})) for (const it of s.forEach?.items || []) if (['running', 'queued'].includes(it.status)) it.status = 'interrupted';
       r.totals = runTotals(r);
       delete r.dirty;
       store.saveRun(r); n++;
@@ -1231,10 +1238,11 @@ export function runEvents(flow, run, after = 0, max = 500) {
   const name = (id) => flow.steps.find((s) => s.id === id)?.name || id;
   const all = [];
   for (const [id, s] of Object.entries(run.steps || {})) {
+    const el = /^(.*)~(\d+)$/.exec(id);
     for (const e of s.events || []) {
       if (!(e.seq > after)) continue;
       const text = e.text ?? (e.kind === 'tool_result' ? e.content : undefined);
-      all.push({ seq: e.seq, stepId: id, step: name(id), kind: e.kind, name: e.name, text: typeof text === 'string' ? clipS(text, 2000) : undefined, input: e.kind === 'tool_use' && e.input ? clipS(JSON.stringify(e.input), 500) : undefined, isError: e.isError || undefined, t: e.t });
+      all.push({ seq: e.seq, stepId: el ? el[1] : id, step: el ? `${name(el[1])} [${el[2]}]` : name(id), ...(el ? { item: Number(el[2]) } : {}), kind: e.kind, name: e.name, text: typeof text === 'string' ? clipS(text, 2000) : undefined, input: e.kind === 'tool_use' && e.input ? clipS(JSON.stringify(e.input), 500) : undefined, isError: e.isError || undefined, t: e.t });
     }
   }
   all.sort((a, b) => a.seq - b.seq);
@@ -1983,7 +1991,8 @@ export function runSummary(flow, run) {
   if (!run) return null;
   const name = (id) => flow.steps.find((s) => s.id === id)?.name || id;
   const nz = (a) => (a?.length ? a : undefined);
-  const steps = Object.entries(run.steps || {}).map(([id, s]) => ({
+  const steps = Object.entries(run.steps || {}).filter(([id]) => !/~\d+$/.test(id)).map(([id, s]) => ({
+    ...(s.forEach ? { forEach: { total: s.forEach.total, from: s.forEach.from, items: s.forEach.items.map((x) => ({ i: x.i, label: x.label, status: run.steps[x.key]?.status || x.status, error: run.steps[x.key]?.error || undefined })) } } : {}),
     step: name(id), stepId: id, status: s.status, code: s.code || undefined, output: s.output || '', json: s.json,
     files: nz(s.files), actions: nz(s.actions), routes: nz(s.routes), reviewed: s.reviewed || undefined, pinned: s.pinned || undefined, error: s.error || undefined, skipReason: s.skipReason || undefined,
     exitCode: s.exitCode, durationMs: s.durationMs, usage: s.usage, attempts: nz(s.attempts), inputs: nz(s.inputs), assertions: nz(s.assertions), warnings: nz(s.warnings),

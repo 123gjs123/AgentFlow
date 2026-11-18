@@ -143,7 +143,7 @@ El chat no cambia nada por su cuenta: cada cambio (step, flujo, archivos de la s
     if (quoted.length) warn('TEMPLATE_IN_SINGLE_QUOTES', `{{${quoted[0]}}} está entre comillas simples: al ejecutar el step fallará.`, 'command');
     try { rendered = P.render(step.command, { flow: rflow, vars, input, upstream: up, data, ...rctx(true), quote: q.quote, onRaw: (k) => raws.push(k) }); }
     catch (e) { if (!e.refError) throw e; warn('NON_UPSTREAM_REF', e.message, 'command'); rendered = P.render(step.command, { flow: rflow, vars, input, upstream: up, data, ...rctx(false), quote: q.quote, onRaw: (k) => raws.push(k) }); }
-    for (const k of raws) warn('RAW_TEMPLATE', `{{{${k}}}} se inserta sin protección: una ejecución externa con datos de fuera se rechaza (422).`, 'command');
+    for (const k of raws) if (k === 'item' || k.startsWith('item.')) warn('RAW_TEMPLATE', `{{{${k}}}} inserta el elemento de "Para cada" sin protección: viene de datos de otro step (p. ej. un ticket) y una ejecución externa se rechaza (422). Usa {{${k}}} o $env:AFS_ITEM.`, 'command'); else warn('RAW_TEMPLATE', `{{{${k}}}} se inserta sin protección: una ejecución externa con datos de fuera se rechaza (422).`, 'command');
     result.command = { rendered, shell: step.shell || 'powershell', env: q.values, stdin: clip(up || input || '', 4000), envUpstream: { STEP_UPSTREAM: up.length, FLOW_INPUT: (input || '').length } };
     result.sections = [{ id: 'command', label: `Comando (${step.shell || 'powershell'})`, source: 'step.command', toModel: 'none', text: `${rendered}\n\n${q.values.map((v) => `${v.name} = {{${v.ref}}} → ${v.value}`).join('\n') || '(sin valores insertados)'}` }];
   }

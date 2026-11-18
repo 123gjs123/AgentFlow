@@ -95,3 +95,28 @@ test('UI: 🔁 Para cada se activa en el panel del step, se guarda saneado y el 
     assert.equal(g.forEach, undefined, 'desmarcar lo quita');
   } finally { await ui.close?.(); }
 });
+
+test('revisión: el costo de "para cada" no se cuenta dos veces; el resumen externo anida los elementos', async () => {
+  const coord = role('Coordinador', '[[mock:json {"t":[{"key":"A"},{"key":"B"}]}]]', { id: 's_tc', output: { format: 'json' } });
+  const each = role('Cada', 'Hace {{item.key}} [[mock:say ok]]', { id: 's_te', forEach: { path: 't' } });
+  const f = await s.flow('Costos', [coord, each], [['s_tc', 's_te']]);
+  const r = await run(f.id);
+  const per = (id) => r.steps[id].usage?.costUsd || 0;
+  const expected = Math.round((per('s_tc') + per('s_te~1') + per('s_te~2')) * 1e6) / 1e6;
+  assert.equal(r.totals.costUsd, expected, `${r.totals.costUsd} vs ${expected}`);
+  const sum = await s.ext('GET', `/flows/${f.id}/runs/${r.id}`);
+  assert.ok(!sum.body.steps.some((x) => /~/.test(x.stepId)), 'ningún "s_te~1" como step suelto');
+  assert.deepEqual(sum.body.steps.find((x) => x.stepId === 's_te').forEach.items.map((x) => [x.label, x.status]), [['A', 'success'], ['B', 'success']]);
+});
+
+test('revisión: "ejecutar desde" se niega si un step anterior que necesita no tiene una salida buena', async () => {
+  const a = cmd('Antes', 'exit 3', { id: 's_fa1' });
+  const b = role('Desde', '[[mock:say ok]]', { id: 's_fb1' });
+  const f = await s.flow('Desde roto', [a, b], [['s_fa1', 's_fb1']]);
+  await run(f.id); // Antes fails
+  const r = await s.ui('POST', `/api/flows/${f.id}/run`, { from: 's_fb1', breakpoints: false });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, 'FROM_UPSTREAM_MISSING');
+  assert.match(r.body.error, /«Antes» no tiene una última salida buena/);
+  assert.equal((await s.ui('POST', `/api/flows/${f.id}/run`, { from: 'nada', breakpoints: false })).status, 404);
+});

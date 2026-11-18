@@ -497,7 +497,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
             <span className="muted small save">{saveState}</span>
             {preflight?.missing > 0 && <button className="ghost small warn-chip" onClick={() => setPfModal({})} title="Este flujo necesita cosas que faltan en esta máquina">⚠ Faltan {preflight.missing} requisito{preflight.missing > 1 ? 's' : ''}</button>}
             {flow.steps.some((x) => x.watches?.length) && (
-              <button className="ghost" data-testid="watch-all" disabled={watchBusy} title="🔔 Comprueba las fuentes que vigilan los steps (git, URL, archivos, comandos, Jira, Confluence) y muestra qué hay de nuevo"
+              <button className="ghost" data-testid="watch-all" disabled={watchBusy || !!flow.quarantine} title="🔔 Comprueba las fuentes que vigilan los steps (git, URL, archivos, comandos, Jira, Confluence) y muestra qué hay de nuevo"
                 onClick={async () => { setWatchBusy(true); try { await pendingSave.flush(); const r = await api.post(`/api/flows/${flow.id}/watch/check`, {}); const n = r.results.reduce((a, x) => a + (x.changes?.length || 0), 0); const errs = r.results.filter((x) => x.state === 'error').length; notify(n ? `🔔 ${n} novedad${n === 1 ? '' : 'es'}${r.actions?.[0]?.runId ? ' · se lanzó una ejecución' : ''}` : errs ? `🔔 Sin novedades · ${errs} fuente(s) con error` : '🔔 Sin novedades'); } catch (e) { alert(e.message); } finally { setWatchBusy(false); } }}>
                 {watchBusy ? '🔔 Comprobando…' : (() => { const n = Object.values(watchView).reduce((a, v) => a + (v.pending?.length || 0), 0); return n ? `🔔 Novedades (${n})` : '🔔 Novedades'; })()}
               </button>

@@ -215,7 +215,7 @@ export function listRuns(flowId) {
     if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) { out.push(hit.meta); continue; }
     const r = readJson(p, null);
     if (!r) continue;
-    const meta = { id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: String(r.input ?? '').slice(0, 200), only: r.only, totals: r.totals };
+    const meta = { id: r.id, status: r.status, startedAt: r.startedAt, endedAt: r.endedAt, trigger: r.trigger, input: String(r.input ?? '').slice(0, 200), only: r.only, from: r.from, totals: r.totals };
     runMeta.set(p, { mtimeMs: st.mtimeMs, size: st.size, meta });
     out.push(meta);
   }

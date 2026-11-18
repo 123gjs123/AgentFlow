@@ -30,10 +30,11 @@ test('git de solo lectura: lee los repos del flujo y rechaza escrituras, program
   const run = (...a) => execFileSync('node', [GIT_HELPER, ...a], { encoding: 'utf8', env, stdio: 'pipe' });
   assert.match(run(repo, 'log', '--all', '--oneline', '--grep', 'Line History'), /Arreglo el texto/);
   assert.match(run(repo, 'branch', '-a', '--list', '*fix*'), /fix\/line-history/);
-  for (const bad of [[repo, 'push'], [repo, 'commit', '-m', 'x'], [repo, 'branch', 'nueva'], [repo, 'branch', '-D', 'fix/line-history'], [repo, 'log', '--output=x'], [repo, 'grep', '-O', 'x'], [repo, 'diff', '--ext-diff'], [s.dirs.home, 'log']]) {
+  for (const bad of [[repo, 'push'], [repo, 'commit', '-m', 'x'], [repo, 'branch', 'nueva'], [repo, 'branch', '-D', 'fix/line-history'], [repo, 'log', '--output=x'], [repo, 'grep', '-O', 'x'], [repo, 'diff', '--ext-diff'], [s.dirs.home, 'log'], [repo, 'tag', '--sort=refname', 'evil1'], [repo, 'tag', '--format=x', 'evil2'], [repo, 'branch', '--sort=refname', 'evil3'], [repo, 'tag', '-a', 'evil4'], [repo, 'diff', '--no-index', '--', 'a.txt', s.dirs.home], [repo, 'cat-file', '--filters', 'HEAD:a.txt']]) {
     assert.throws(() => run(...bad), undefined, bad.slice(1).join(' '));
   }
   assert.match(run(repo, 'branch', '--list'), /fix\/line-history/, 'nada se borró');
+  assert.doesNotMatch(run(repo, 'branch', '--list') + run(repo, 'tag', '--list'), /evil/, 'nada se creó');
 });
 
 test('revisión que investiga: evidencia completa y git en sus herramientas; parte un step; "aplicar las seguras" deja lo destructivo', async () => {
@@ -166,7 +167,7 @@ test('búsqueda determinística: los textos que esperaban las aserciones fallida
   assert.ok(hit, JSON.stringify(rv.facts));
   assert.match(hit.claim, /Update set-limit texts/);
   assert.match(hit.claim, /ramas: fix\/limit-texts/);
-  assert.match(hit.claim, /La rama actual NO lo tiene/);
+  assert.match(hit.claim, /La rama actual NO tiene ese commit/);
   assert.ok(hit.evidence[0].verified && /-S Bet limit: 100/.test(hit.evidence[0].ref));
   const invCall = s.callsSince(n0).find((c) => /Revisión de flujo — investigador/.test(c.system));
   assert.match(invCall.prompt, /Búsqueda en git que ya hizo la app[\s\S]*fix\/limit-texts/);

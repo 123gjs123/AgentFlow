@@ -277,7 +277,7 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   const d = v.flow;
   const steps = (d.steps || []).map((s) => { const p = prev.get(s.id); return p ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId, chatContextHash: p.chatContextHash } : { ...s, memory: [], lastRun: null }; });
   for (const s of cur.steps) if (!steps.some((x) => x.id === s.id)) store.clearChat(cur.id, s.id);
-  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, contextSources: d.contextSources, finally: d.finally, requirements: d.requirements, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
+  const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, watchPolling: d.watchPolling, contextSources: d.contextSources, finally: d.finally, requirements: d.requirements, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
   engine.topoLevels(next);
   const saved = store.saveFlow(next);
   engine.syncSchedule(saved); W.syncPolling(saved);
@@ -299,6 +299,26 @@ function cleanRequirements(list) {
   });
 }
 /** Blocks the start of a run when a required requirement is missing: 412 + what is missing and how to fix it. */
+/**
+ * Step fields added by spec 10 (watches) and spec 15 DATA-10 (forEach): sanitised on every save AND on import.
+ * Watch ids are unique across the flow (a duplicated step must not share another watch's snapshot).
+ */
+function cleanStepExtras(steps) {
+  const seen = new Set();
+  for (const s of steps) {
+    if ('watches' in s) {
+      const w = W.cleanWatches(s.watches);
+      if (w?.length) { for (const x of w) { if (seen.has(x.id)) x.id = `w_${crypto.randomBytes(4).toString('hex')}`; seen.add(x.id); } s.watches = w; } else Reflect.deleteProperty(s, 'watches');
+    }
+    if ('forEach' in s) {
+      const fe = s.forEach;
+      if (!fe || typeof fe !== 'object' || typeof fe.path !== 'string') { Reflect.deleteProperty(s, 'forEach'); continue; }
+      const n = (v, lo, hi, d) => Math.min(hi, Math.max(lo, Math.round(Number(v)) || d));
+      s.forEach = { path: fe.path.trim().slice(0, 200), ...(typeof fe.from === 'string' && fe.from.trim() ? { from: fe.from.trim().slice(0, 120) } : {}), parallel: n(fe.parallel, 1, 4, 1), max: n(fe.max, 1, 50, 20) };
+    }
+  }
+  return steps;
+}
 async function gate(flow, res, only = null) {
   const qp = quarantineProblem(flow);
   if (qp) { res.status(qp.status); return { error: qp.error, code: qp.code, reasons: flow.quarantine.reasons }; }
@@ -394,16 +414,7 @@ app.put('/api/flows/:id', wrap((req, res) => {
     const keep = marked.length > 1 ? marked.find((s) => !byId.get(s.id)?.coordinator) || marked[0] : marked[0];
     for (const s of steps) if (s !== keep && 'coordinator' in s) Reflect.deleteProperty(s, 'coordinator');
   }
-  // spec 10: watched sources (🔔 Novedades)
-  for (const s of steps) { if ('watches' in s) { const w = W.cleanWatches(s.watches); if (w?.length) s.watches = w; else Reflect.deleteProperty(s, 'watches'); } }
-  // spec 15 DATA-10: "para cada" — {path ("" = the JSON itself), from?, parallel 1-4, max 1-50}
-  for (const s of steps) {
-    if (!('forEach' in s)) continue;
-    const fe = s.forEach;
-    if (!fe || typeof fe !== 'object' || typeof fe.path !== 'string') { Reflect.deleteProperty(s, 'forEach'); continue; }
-    const n = (v, lo, hi, d) => Math.min(hi, Math.max(lo, Math.round(Number(v)) || d));
-    s.forEach = { path: fe.path.trim().slice(0, 200), ...(typeof fe.from === 'string' && fe.from.trim() ? { from: fe.from.trim().slice(0, 120) } : {}), parallel: n(fe.parallel, 1, 4, 1), max: n(fe.max, 1, 50, 20) };
-  }
+  cleanStepExtras(steps);
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
@@ -540,7 +551,7 @@ app.get('/api/flows/:id/export', wrap((req, res) => {
 app.post('/api/flows/import', wrap((req) => {
   const body = req.body || {};
   const policies = (x) => { if (!Array.isArray(x)) return undefined; const out = []; for (const p of x.slice(0, 50)) { try { out.push(POL.cleanPolicy({ ...p, source: 'import' }, 'flow')); } catch {} } return out; };
-  const { flow, warnings, chats, runs } = importBundle(body.bundle, { edge: cleanEdge, sources: (x) => cleanSources(x), finally: (x) => cleanFinally(x), requirements: (x) => cleanRequirements(x), policies }, { name: typeof body.name === 'string' ? body.name : undefined });
+  const { flow, warnings, chats, runs } = importBundle(body.bundle, { steps: cleanStepExtras, edge: cleanEdge, sources: (x) => cleanSources(x), finally: (x) => cleanFinally(x), requirements: (x) => cleanRequirements(x), policies }, { name: typeof body.name === 'string' ? body.name : undefined });
   engine.topoLevels(flow); // rejects cycles
   const saved = store.saveFlow(flow);
   if (chats) for (const [key, list] of Object.entries(chats)) {
@@ -769,7 +780,11 @@ server.listen(PORT, HOST, () => {
   // spec 28: the flow review (lint in the background, AI review on demand) feeds the 🔔 list with kind 'review'
   review.init({ bus: engine.bus, emit: (m) => engine.bus.emit('msg', m), refreshAttention: (flowId) => attention.refreshFlow(flowId) });
   attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem, watchItem: W.attentionItem });
-  W.init({ emit: (m) => engine.bus.emit('msg', m), onNews: (flowId) => attention.refreshFlow(flowId) });
+  W.init({
+    emit: (m) => engine.bus.emit('msg', m), onNews: (flowId) => attention.refreshFlow(flowId),
+    // a run started by news has the guards of an external run (its input comes from outside)
+    runGuard: async (flow, only) => { const p = engine.externalRunProblem(flow, { only }); if (p) return p.error; const g = await gate(flow, { status() {} }, only); return g?.error || null; },
+  });
   setOnChecked((flowId) => engine.bus.emit('msg', { type: 'preflight.checked', flowId }));
   notify.init({ getBaseUrl: () => `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}` });
   notify.bootSummary(recovered);

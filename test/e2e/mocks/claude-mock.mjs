@@ -171,6 +171,7 @@ else if (correcting) {
   reply = fix && !/^never/.test(fix) ? `Corregido.\n\`\`\`json\n${fix}\n\`\`\`` : 'Sigo sin JSON.';
 } else if (dir('badjson-then-fix') !== null) { if (STATE) fs.writeFileSync(statePath(`fix-${sessionId}`), dir('badjson-then-fix')); reply = 'Aquí va, pero sin bloque JSON.'; }
 else if (dir('json') !== null) reply = `Resultado del step.\n\`\`\`json\n${dir('json')}\n\`\`\``;
+else if (dir('say-file') !== null) reply = readFile(dir('say-file').trim()); // the answer changes between calls with the prompt unchanged
 else if (dir('say') !== null) reply = dir('say');
 else if (dir('echo') !== null) reply = `ECHO>>${prompt}<<ECHO`;
 else if (isChat) reply = `Respuesta de chat (mock) a: ${prompt.split('\n').pop().slice(0, 120)}`;

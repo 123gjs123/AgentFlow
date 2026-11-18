@@ -117,3 +117,22 @@ The flow-folder storage of spec 09 does not exist yet.
 | `confluence` | | "versión A → B" |
 
 **Not done:** history beyond the pending list, and per-source "dismiss" in a drawer. ✓ Visto acts per step.
+
+## Review fixes (2026-11-18)
+
+An architect review and an adversarial review (independent agents) checked commits b2ef816..2d0ec9b (specs 10, 15 DATA-10, 28 and 30). Everything they found was fixed, each with a regression test (e2e `25-*`, `27-*`, `28-*` "revisión: …").
+
+| Finding | Fix |
+|---|---|
+| **Critical, proved.** An imported flow could carry a `command` watch, or a `url` watch with `credential: "jira"`, without quarantine. One 🔔 click ran the command or sent the Jira token to any host. | Watches are sanitised on import. A command watch, and a url watch with a credential, are reasons for quarantine (`executableParts`). `checkFlow` refuses a quarantined flow (423), and the 🔔 button is disabled. A credential is only sent to the origin of its own `url` field. |
+| **High, proved.** The "read-only" git helper (bin/review-git.mjs, now also the coordinator's) could create refs (`tag --sort=x evil`, `branch --format=x evil`, `tag -a evil`) and read any file (`diff --no-index`). | A name or pattern needs an explicit list mode (`--list`; for tag, `-a` is not one). `--no-index`, `--filters`, `--textconv` and `--batch-command` are refused. |
+| **High, proved.** A command watch with `{{cred.x}}` stored the secret in `data/watch` and showed it in news, the UI and run input. | Output and errors are masked like command steps (`onSecret` + `maskSecrets`). |
+| Runs started by news skipped the guards of an external run, and their input was external text. | They go through `externalRunProblem` and the run gate (schemas, preflight). The news reach the run inside `<untrusted-data>`, after the flow's usual (scheduled) input. A raw `{{{item}}}` is treated as external data too, with a preview warning. |
+| "Para cada" counted cost twice; the external summary and events listed `id~n` as steps. | `runTotals` skips the elements (the parent carries the sum). The summary nests them as `forEach.items`. Events are named "Step [n]". After a crash, elements still running are marked interrupted. An abort is `stopped`/`timeout`, never `FOR_EACH_FAILED`. The review's evidence includes each element. |
+| A "from" run counted as a full run: a partial success cleared a failure and said "volvió a funcionar". It also fed stale or failed outputs silently. | `from` is kept in the run meta, and attention treats a "from" run as partial. A step before it with no good last output refuses the run (409 `FROM_UPSTREAM_MISSING`). An unknown `from` gives 404. |
+| Watch state: duplicated steps shared ids; a "Visto" during a long check came back; one check per flow returned another step's results; a `{{vars.x}}` change diffed against another source. | Watch ids are unique across the flow on save and import. Results merge per watch into the current file at the end. Checks are keyed by flow+step+watch. The baseline signature is the RENDERED target and branch. |
+| Checks during runs: `git fetch` competed with steps using git, and polling with Claude slots. A file glob walked the disk synchronously, even outside the folder. | Polling waits while the flow runs, and a manual check skips `fetch` then (and says so). File watches stay inside the flow folder (no `..`, no outside absolute paths, a flow folder is required). They use async glob and reads, with a 64 MB hash budget. |
+| Deterministic git search: a timeout read as "not found", and as "la rama actual NO lo tiene", all marked verified. Commit subjects could close `<untrusted-data>`. The 90 s cap could reach about 150 s. | Errors are told apart: exit 1 of `merge-base --is-ancestor` is "no", any other result is "no se pudo comprobar". Unfinished searches are listed as such. The claim says "se agrega o se quita". Tags are neutralised, and the no-hit texts go inside untrusted-data. Every git call gets at most the time left. |
+| Polling restarted on every autosave; restoring a version dropped `watchPolling`. | The timer only restarts when its config changes, and `watchPolling` is restored. |
+
+**Accepted risk (documented, not changed).** A Bash allow rule in the project's `.claude/settings*.json` would also apply to the coordinator (and to the review, spec 28), because they need `Bash` in `--tools` for the helper. Keep project Bash allow rules narrow.

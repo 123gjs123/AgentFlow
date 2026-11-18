@@ -12,7 +12,7 @@ import path from 'node:path';
 
 const READ = new Set(['log', 'show', 'branch', 'diff', 'status', 'rev-parse', 'ls-files', 'grep', 'for-each-ref', 'merge-base', 'blame', 'shortlog', 'describe', 'tag', 'cat-file', 'name-rev', 'rev-list']);
 // writes a file, runs a program (pager, textconv, external diff, hooks), changes config, or creates/deletes refs
-const BAD_ARG = /^(--output|-o$|--open-files-in-pager|-O|--ext-diff|--textconv|--exec|--upload-pack|--receive-pack|-c$|--config|--git-dir|--work-tree|-C$|--set-upstream|--unset-upstream|--edit-description|-[dDmMcC]$|--delete|--move|--copy|--force|-f$|--create-reflog|--track|--no-track)/;
+const BAD_ARG = /^(--no-index|--filters|--textconv|--batch-command|--output|-o$|--open-files-in-pager|-O|--ext-diff|--textconv|--exec|--upload-pack|--receive-pack|-c$|--config|--git-dir|--work-tree|-C$|--set-upstream|--unset-upstream|--edit-description|-[dDmMcC]$|--delete|--move|--copy|--force|-f$|--create-reflog|--track|--no-track)/;
 const MAX = 60000;
 
 const repos = String(process.env.AFS_REVIEW_REPOS || '').split(path.delimiter).map((r) => r.trim()).filter(Boolean).map((r) => path.resolve(r));
@@ -25,11 +25,16 @@ const allowed = repos.find((r) => r.toLowerCase() === repo.toLowerCase());
 if (!allowed) fail(`Repositorio no habilitado: ${repoArg}. Habilitados:\n${repos.join('\n') || '(ninguno)'}`);
 if (!fs.existsSync(path.join(allowed, '.git'))) fail(`${allowed} no es un repositorio git`);
 if (!READ.has(sub)) fail(`Solo lectura: ${[...READ].join(', ')}`);
-// branch/tag with a bare name would CREATE one: only listing forms
+// branch/tag with a bare name would CREATE one: a positional name is only allowed with an explicit list mode
+// (--sort/--format do NOT put git in list mode: "tag --sort=x evil" creates the tag — found by the adversarial review)
 if ((sub === 'branch' || sub === 'tag') && rest.some((a) => !a.startsWith('-'))) {
-  const listing = rest.some((a) => /^(-a|-r|--all|--remotes|-l|--list|--contains|--merged|--no-merged|--points-at|--sort.*|--format.*|-v|-vv)$/.test(a));
-  if (!listing) fail(`git ${sub} solo para listar (usa --list, -a, -r, --contains…)`);
+  // for tag, -a means ANNOTATE (creates a tag): only branch accepts -a/-r as list mode
+  const listRe = sub === 'tag' ? /^(-l|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/ : /^(-l|--list|-a|--all|-r|--remotes|--contains|--no-contains|--merged|--no-merged|--points-at)$/;
+  const listing = rest.some((a) => listRe.test(a));
+  if (!listing) fail(`git ${sub} solo para listar: con un nombre o patrón usa --list (o -a, -r, --contains…)`);
 }
+// diff/grep outside the repo (--no-index) would read any file on disk
+if (rest.includes('--no-index')) fail('Argumento no permitido en modo lectura: --no-index');
 for (const a of rest) if (BAD_ARG.test(a)) fail(`Argumento no permitido en modo lectura: ${a}`);
 
 try {
