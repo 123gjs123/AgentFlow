@@ -148,3 +148,13 @@ The adversarial reviewer re-attacked commit 26ef0d1. What it found, all fixed an
 | "From" with a parent that was not routed (or an empty "para cada") ran its child on empty input. A `when.from` pointing at a failed step outside the run evaluated on `''`. | Those parents are not routed in the "from" run, so their arrows are inactive, as in a full run. `when.from` only uses an outside step's last GOOD output. |
 | Overlapping checks of one flow duplicated news and fetched twice. A check could delete the state of a watch added in the meantime. | The checks of a flow are queued (the same request still joins the running one). The cleanup reads the current flow. |
 | File watches: a symlink or junction inside the folder, or `{..,x}`, could reach outside. The glob had no time limit. | No `..` anywhere in the pattern, braces included. Every file's real path must be inside the folder's real path. The glob has a 30 s cap. |
+
+### Third pass of the adversarial review
+
+| Finding | Fix |
+|---|---|
+| **Critical, proved.** The allowlist consumed "the next argument" as the value of `-U`, `--unified`, `--pretty` and `--abbrev`. Git does not take a next-argument value for those, so it read the next argument as an option: `--output=…` wrote any file, including a git hook, which means code execution. | Values go ONLY attached (`--format=x`, `-n20`, `-S"texto"`). A value-taking option given on its own is refused, with a hint to attach the value. |
+| **High, proved.** A positional absolute or UNC path made `git diff` fall back to no-index. It then read any file, or reached a network share (NTLM). | Positional arguments cannot be absolute, drive, UNC or `..` paths. |
+| Minor: a secret cut at 200 characters escaped the mask. "From" refused a parent skipped in a break or by a hook. AI checks had no time limit, so they could hold the flow's queue. | Fields are masked before any clip. `review`/`hook` skips are accepted. Each watch check stops at 3 minutes. |
+
+The reviewer's and coordinator's instructions now say that values go attached and paths are relative to the repo.

@@ -350,9 +350,9 @@ export function gitAccess(flow) {
   return {
     repos, allowed: `Bash(node ${REVIEW_GIT}:*)`, env: { AFS_REVIEW_REPOS: repos.join(path.delimiter) },
     block: `## Git de solo lectura (para decidir con lo que el código ya tiene)
-Comando exacto: node ${REVIEW_GIT} <repo> <log|show|branch|diff|grep|merge-base|for-each-ref|…> [args]. Ningún otro comando de Bash está permitido.
+Comando exacto: node ${REVIEW_GIT} <repo> <log|show|branch|diff|grep|merge-base|for-each-ref|…> [args]. Ningún otro comando de Bash está permitido. Los valores van pegados a su opción (--grep=x, --format=%h, -n20, -S"texto") y las rutas son relativas al repositorio.
 Repositorios: ${repos.map((r) => r.replace(/\\/g, '/')).join(' · ')}
-Ejemplos: node ${REVIEW_GIT} <repo> branch -a --list "*SBK-123*" · node ${REVIEW_GIT} <repo> log --all --oneline -20 --grep "SBK-123" · node ${REVIEW_GIT} <repo> log --all --oneline -S "texto esperado"`,
+Ejemplos: node ${REVIEW_GIT} <repo> branch -a --list "*SBK-123*" · node ${REVIEW_GIT} <repo> log --all --oneline -20 --grep="SBK-123" · node ${REVIEW_GIT} <repo> log --all --oneline -S"texto esperado"`,
   };
 }
 /** What the reviewer may use to investigate: read the evidence and its skills, and read-only git on the flow's repos. */
@@ -363,7 +363,7 @@ function investigation(flow, dir) {
   return {
     repos, readDirs, tools: ['Read', 'Grep', 'Glob', ...(git ? ['Bash'] : [])].join(','), allowed: ['Read', 'Grep', 'Glob', git].filter(Boolean).join(' '),
     env: { AFS_REVIEW_REPOS: repos.join(path.delimiter) },
-    block: `## Cómo investigar (solo lectura)\n- La evidencia COMPLETA de las ejecuciones del dossier está en archivos: ${dir.replace(/\\/g, '/')}/INDICE.md (una carpeta por ejecución, un archivo por step con cada comando, su resultado y la salida). Úsala con Read/Grep antes de afirmar una causa.\n${readDirs.length ? `- También puedes leer (Read/Grep/Glob) estas carpetas del flujo: ${readDirs.map((r) => r.replace(/\\/g, '/')).join(' · ')}\n` : ''}${repos.length ? `- Git de solo lectura sobre los repositorios del flujo, con este comando exacto: node ${REVIEW_GIT} <repo> <log|show|branch|diff|grep|merge-base|for-each-ref|…> [args]\n  Repositorios: ${repos.map((r) => r.replace(/\\/g, '/')).join(' · ')}\n  Ejemplos: node ${REVIEW_GIT} <repo> branch -a --list "*fix*" · node ${REVIEW_GIT} <repo> log --all --oneline -20 --grep "texto" · node ${REVIEW_GIT} <repo> log --oneline origin/master..origin/<rama>` : '- No hay repositorios git en la configuración del flujo.'}`,
+    block: `## Cómo investigar (solo lectura)\n- La evidencia COMPLETA de las ejecuciones del dossier está en archivos: ${dir.replace(/\\/g, '/')}/INDICE.md (una carpeta por ejecución, un archivo por step con cada comando, su resultado y la salida). Úsala con Read/Grep antes de afirmar una causa.\n${readDirs.length ? `- También puedes leer (Read/Grep/Glob) estas carpetas del flujo: ${readDirs.map((r) => r.replace(/\\/g, '/')).join(' · ')}\n` : ''}${repos.length ? `- Git de solo lectura sobre los repositorios del flujo, con este comando exacto: node ${REVIEW_GIT} <repo> <log|show|branch|diff|grep|merge-base|for-each-ref|…> [args] (valores pegados a su opción: --grep=x, -n20, -S"texto"; rutas relativas al repositorio)\n  Repositorios: ${repos.map((r) => r.replace(/\\/g, '/')).join(' · ')}\n  Ejemplos: node ${REVIEW_GIT} <repo> branch -a --list "*fix*" · node ${REVIEW_GIT} <repo> log --all --oneline -20 --grep="texto" · node ${REVIEW_GIT} <repo> log --oneline origin/master..origin/<rama>` : '- No hay repositorios git en la configuración del flujo.'}`,
   };
 }
 /**

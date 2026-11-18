@@ -28,9 +28,9 @@ test('git de solo lectura: lee los repos del flujo y rechaza escrituras, program
   const repo = makeRepo();
   const env = { ...process.env, AFS_REVIEW_REPOS: repo };
   const run = (...a) => execFileSync('node', [GIT_HELPER, ...a], { encoding: 'utf8', env, stdio: 'pipe' });
-  assert.match(run(repo, 'log', '--all', '--oneline', '--grep', 'Line History'), /Arreglo el texto/);
+  assert.match(run(repo, 'log', '--all', '--oneline', '--grep=Line History'), /Arreglo el texto/);
   assert.match(run(repo, 'branch', '-a', '--list', '*fix*'), /fix\/line-history/);
-  for (const bad of [[repo, 'push'], [repo, 'commit', '-m', 'x'], [repo, 'branch', 'nueva'], [repo, 'branch', '-D', 'fix/line-history'], [repo, 'log', '--output=x'], [repo, 'grep', '-O', 'x'], [repo, 'diff', '--ext-diff'], [s.dirs.home, 'log'], [repo, 'tag', '--sort=refname', 'evil1'], [repo, 'tag', '--format=x', 'evil2'], [repo, 'branch', '--sort=refname', 'evil3'], [repo, 'tag', '-a', 'evil4'], [repo, 'diff', '--no-index', '--', 'a.txt', s.dirs.home], [repo, 'cat-file', '--filters', 'HEAD:a.txt'], [repo, 'grep', "--open-files=node -e require('fs').writeFileSync('pwn','x')", 'x'], [repo, 'grep', '--open=x', 'x'], [repo, 'grep', '-Ox', 'x'], [repo, 'blame', '--contents', path.join(s.dirs.home, 'x.txt'), 'a.txt'], [repo, 'branch', '-uother'], [repo, 'log', '--out=x'], [repo, 'show', 'HEAD:../x.txt']]) {
+  for (const bad of [[repo, 'push'], [repo, 'commit', '-m', 'x'], [repo, 'branch', 'nueva'], [repo, 'branch', '-D', 'fix/line-history'], [repo, 'log', '--output=x'], [repo, 'grep', '-O', 'x'], [repo, 'diff', '--ext-diff'], [s.dirs.home, 'log'], [repo, 'tag', '--sort=refname', 'evil1'], [repo, 'tag', '--format=x', 'evil2'], [repo, 'branch', '--sort=refname', 'evil3'], [repo, 'tag', '-a', 'evil4'], [repo, 'diff', '--no-index', '--', 'a.txt', s.dirs.home], [repo, 'cat-file', '--filters', 'HEAD:a.txt'], [repo, 'grep', "--open-files=node -e require('fs').writeFileSync('pwn','x')", 'x'], [repo, 'grep', '--open=x', 'x'], [repo, 'grep', '-Ox', 'x'], [repo, 'blame', '--contents', path.join(s.dirs.home, 'x.txt'), 'a.txt'], [repo, 'branch', '-uother'], [repo, 'log', '--out=x'], [repo, 'show', 'HEAD:../x.txt'], [repo, 'diff', '-U', '--output=pwn'], [repo, 'diff', '--unified', '--output=pwn'], [repo, 'log', '--pretty', '--output=pwn', '-1'], [repo, 'log', '--abbrev', '--output=pwn', '-1'], [repo, 'diff', 'NUL', path.join(s.dirs.home, 'x.txt')], [repo, 'diff', '--', 'NUL', path.join(s.dirs.home, 'x.txt')], [repo, 'diff', 'NUL', '//localhost/C$/Windows/win.ini'], [repo, 'diff', 'HEAD', '../x.txt']]) {
     assert.throws(() => run(...bad), undefined, bad.slice(1).join(' '));
   }
   assert.match(run(repo, 'branch', '--list'), /fix\/line-history/, 'nada se borró');
@@ -38,8 +38,9 @@ test('git de solo lectura: lee los repos del flujo y rechaza escrituras, program
   assert.ok(!fs.existsSync(path.join(repo, 'pwn')) && !fs.existsSync('pwn'), 'ningún programa corrió');
   assert.throws(() => execFileSync('git', ['-C', repo, 'config', '--get', 'branch.master.merge'], { stdio: 'pipe' }), undefined, 'no escribió config');
   // the allowlist keeps the useful forms
-  assert.match(run(repo, 'log', '-n', '1', '--format=%s'), /Arreglo/);
-  assert.match(run(repo, 'grep', '-n', '-e', 'x'), /a\.txt:1/);
+  assert.match(run(repo, 'log', '-n1', '--format=%s'), /Arreglo/);
+  assert.match(run(repo, 'grep', '-n', '-ex'), /a\.txt:1/);
+  assert.throws(() => run(repo, 'log', '--grep', 'x'), /pegado/, 'el valor separado se rechaza: va pegado');
 });
 
 test('revisión que investiga: evidencia completa y git en sus herramientas; parte un step; "aplicar las seguras" deja lo destructivo', async () => {

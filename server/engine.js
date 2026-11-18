@@ -897,7 +897,7 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
   const fromSet = !only && from ? new Set([from, ...descendantsOf(flow, from)]) : null;
   if (fromSet) {
     const missing = [...new Set(flow.edges.filter((e) => fromSet.has(e.target) && !fromSet.has(e.source)).map((e) => e.source))]
-      .map((id) => flow.steps.find((s) => s.id === id)).filter((s) => s && !s.pinned && s.lastRun?.status !== 'success' && !(s.lastRun?.status === 'skipped' && ['not_routed', 'empty'].includes(s.lastRun?.skipReason)));
+      .map((id) => flow.steps.find((s) => s.id === id)).filter((s) => s && !s.pinned && s.lastRun?.status !== 'success' && !(s.lastRun?.status === 'skipped' && ['not_routed', 'empty', 'review', 'hook'].includes(s.lastRun?.skipReason)));
     // (not_routed / empty "para cada" are not failures: their arrows stay inactive in this run)
     if (missing.length) throw Object.assign(new Error(`No se puede ejecutar desde «${flow.steps.find((s) => s.id === from).name}»: ${missing.map((s) => `«${s.name}»`).join(', ')} no tiene una última salida buena para pasarle (${missing.map((s) => s.lastRun?.status || 'nunca se ejecutó').join(', ')}). Ejecuta el flujo completo o ese step primero.`), { status: 409, code: 'FROM_UPSTREAM_MISSING' });
   }
@@ -911,7 +911,7 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
   const limit = clampInt(deadlineSec, 10, 14400, clampInt(flow.runTimeoutSec, 10, 14400, 3600));
   const t0 = now();
   const run = {
-    id: store.uid('r_'), flowId, input, only, ...(fromSet ? { from, fromNotRouted: flow.steps.filter((s) => !fromSet.has(s.id) && !s.pinned && s.lastRun?.status !== 'success').map((s) => s.id) } : {}), trigger, vars: runVars, usePins: !!usePins, idempotencyKey: idempotencyKey || null,
+    id: store.uid('r_'), flowId, input, only, ...(fromSet ? { from, fromNotRouted: flow.steps.filter((s) => !fromSet.has(s.id) && !s.pinned && s.lastRun?.status === 'skipped' && ['not_routed', 'empty'].includes(s.lastRun?.skipReason)).map((s) => s.id) } : {}), trigger, vars: runVars, usePins: !!usePins, idempotencyKey: idempotencyKey || null,
     flowSnapshotHash: crypto.createHash('sha256').update(JSON.stringify(snap)).digest('hex'), flowUpdatedAt: flow.updatedAt,
     deadlineAt: t0 + limit * 1000, eventSeq: 0, status: 'running', startedAt: t0, steps: {}, usedPins: [], breakpoints: !!breakpoints, pauses: [],
     ...(rehearsal ? { rehearsal: true, rehearsalStepSec: REHEARSAL_STEP_SEC } : {}),

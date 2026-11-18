@@ -151,25 +151,25 @@ async function checkCommand(flow, step, w, signal) {
   for (const v of [...secrets]) { const j = JSON.stringify(String(v)).slice(1, -1); if (j !== v) secrets.add(j); }
   const hide = engine.maskSecrets(secrets);
   if (r.code !== 0) return { error: `El comando terminó con código ${r.code}: ${clip(hide(String(r.stderr || r.stdout || '')).trim().split('\n').pop(), 200)}` };
-  const items = itemsFromText(hide(String(r.stdout || '')));
-  return { items: Object.fromEntries(Object.entries(items).map(([k, v]) => [hide(k), Object.fromEntries(Object.entries(v).map(([f, x]) => [f, typeof x === 'string' ? hide(x) : x]))])) };
+  return { items: itemsFromText(hide(String(r.stdout || '')), hide) };
 }
 /** A JSON array of objects with id/key → one item each; JSON lines the same; any other text → one item "salida". */
-export function itemsFromText(text) {
+export function itemsFromText(text, hide = (x) => x) {
   const t = text.trim();
+  const h = (x) => hide(String(x ?? '')); // masked BEFORE any clip (a secret cut in half would escape the mask)
   const fromList = (arr) => {
     const items = {};
     for (const x of arr.slice(0, MAX_ITEMS)) {
       if (!x || typeof x !== 'object') continue;
       const id = x.id ?? x.key ?? x.name; if (id == null) continue;
-      items[String(id)] = { v: x.version != null ? String(x.version) : sha(JSON.stringify(x)), t: clip(x.title ?? x.summary ?? x.name ?? '', 200) };
+      items[h(id)] = { v: x.version != null ? h(x.version) : sha(JSON.stringify(x)), t: clip(h(x.title ?? x.summary ?? x.name ?? ''), 200) };
     }
     return Object.keys(items).length ? items : null;
   };
   try { const j = JSON.parse(t); if (Array.isArray(j)) { const r = fromList(j); if (r) return r; } } catch {}
   const lines = t.split(/\r?\n/).filter(Boolean);
   if (lines.length > 1 && lines.every((l) => /^\s*\{/.test(l))) { try { const r = fromList(lines.map((l) => JSON.parse(l))); if (r) return r; } catch {} }
-  return { salida: { v: sha(t), t: clip(lines[0] || '(vacía)', 200), text: clip(t, 4000) } };
+  return { salida: { v: sha(t), t: clip(h(lines[0] || '(vacía)'), 200), text: clip(h(t), 4000) } };
 }
 
 const AI_FORMAT = 'Devuelve SOLO un objeto JSON, sin texto ni bloques de código: {"items":[{"id":"<identificador estable>","version":"<lo que cambia cuando el elemento cambia>","title":"<título corto>","url":"<enlace o vacío>"}]}';
@@ -269,7 +269,9 @@ export function checkFlow(flowId, { stepId = null, watchId = null, trigger = 'ma
         const { step, w } = queue.shift();
         const prev = before[w.id];
         const t0 = Date.now();
-        let r; try { r = await checkOne(flow, step, { ...w, ...(running && w.type === 'git' ? { options: { ...w.options, fetch: false } } : {}) }, signal); } catch (e) { r = { error: clip(e.message, 300) }; }
+        const sig1 = AbortSignal.any([signal, AbortSignal.timeout(180000)].filter(Boolean));
+        let r; try { r = await checkOne(flow, step, { ...w, ...(running && w.type === 'git' ? { options: { ...w.options, fetch: false } } : {}) }, sig1); } catch (e) { r = { error: clip(e.message, 300) }; }
+        if (sig1.aborted && !signal?.aborted && !r.error) r = { error: 'Se cortó a los 3 minutos' };
         if (running && w.type === 'git' && !r.error) r.note = `${r.note || ''} (sin fetch: el flujo se está ejecutando)`;
         const at = Date.now();
         const sig = sigOf(flow, w);

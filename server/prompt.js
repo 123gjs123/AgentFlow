@@ -506,8 +506,8 @@ Método:
 1. Lee INDICE.md y abre los archivos de los steps que fallaron, se cortaron por tiempo o fueron denegados. Usa Grep para encontrar errores, tiempos y resultados de pruebas.
 2. Para cada problema, busca la causa concreta: qué comando, qué tardó, qué esperaba una prueba y qué encontró, qué se denegó y con qué forma.
 3. Git es OBLIGATORIO cuando hay repositorios (al menos un comando por cada fallo cuya causa pueda estar en el código):
-   - Prueba que falla porque espera un texto/valor: busca en el repositorio de pruebas si otra rama ya lo cambió: log --all --oneline -S "<fragmento del texto esperado>" y branch -a --contains <commit>; compara con la rama de la que parte el trabajo (log --oneline origin/<base>..origin/<rama>).
-   - De qué app/repositorio es el arreglo de un ticket y si está en la rama principal: log --all --oneline --grep "<CLAVE-DEL-TICKET>" en cada repositorio de código, y branch -a --contains <commit>.
+   - Prueba que falla porque espera un texto/valor: busca en el repositorio de pruebas si otra rama ya lo cambió: log --all --oneline -S"<fragmento del texto esperado>" y branch -a --contains <commit>; compara con la rama de la que parte el trabajo (log --oneline origin/<base>..origin/<rama>).
+   - De qué app/repositorio es el arreglo de un ticket y si está en la rama principal: log --all --oneline --grep="<CLAVE-DEL-TICKET>" en cada repositorio de código, y branch -a --contains <commit>.
    - Lo que veas en git es un hecho con evidencia {"type":"git",…}: no lo des por supuesto desde lo que dijo un step.
 4. Si una conclusión depende de un script o archivo de configuración (por ejemplo qué opciones acepta un runner), léelo: las carpetas de las variables del flujo se pueden leer.
 5. Respeta las políticas: son decisiones de la persona, no las discutas aquí.

@@ -53,7 +53,17 @@ if (!fs.existsSync(path.join(allowed, '.git'))) fail(`${allowed} no es un reposi
 const spec = ALLOW[sub];
 if (!spec) fail(`Solo lectura: ${Object.keys(ALLOW).join(', ')}`);
 
-/** Validates the arguments against the allowlist; returns the positional ones. */
+/**
+ * A positional argument (revision, path, pattern) never points outside the repo: no absolute, drive or UNC path (git
+ * diff falls back to --no-index by itself with an outside path, and a UNC path talks to the network), no ".." segment.
+ */
+const OUTSIDE = /^([a-zA-Z]:|[\\/])|(^|[\\/:])\.\.([\\/]|$)/;
+/**
+ * Validates the arguments against the allowlist; returns the positional ones.
+ * Values ONLY attached (--format=x, -n20, -Stext): an option whose value is "the next argument" for this helper but not
+ * for git (-U, --pretty, --abbrev take it optionally/attached only) let the next argument through unchecked, and git
+ * read it as an option (--output=… → wrote a hook: code execution — adversarial review, round 3).
+ */
 export function check(sub, args) {
   const s = ALLOW[sub]; const flags = new Set(s.flags || []); const val = new Set(s.val || []);
   const positional = [];
@@ -65,9 +75,12 @@ export function check(sub, args) {
     if (s.num && /^-\d{1,6}$/.test(a)) continue;
     const eq = a.indexOf('=');
     if (a.startsWith('--') && eq > 0 && val.has(a.slice(0, eq))) continue; // --format=x
-    if (val.has(a)) { if (i + 1 >= args.length) return { error: `Falta el valor de ${a}` }; i++; continue; } // --grep x / -n 20
     if (/^-[A-Za-z]/.test(a) && !a.startsWith('--') && val.has(a.slice(0, 2)) && a.length > 2) continue; // -n20, -Stext, -U5
+    if (val.has(a)) return { error: `Escribe el valor pegado a la opción: ${a.startsWith('--') ? `${a}=valor` : `${a}valor (p. ej. ${a}20)`}` };
     return { error: `Opción no permitida en modo lectura: ${a} (se aceptan solo las de la lista, escritas completas)` };
+  }
+  for (const p of positional) {
+    if (OUTSIDE.test(String(p))) return { error: `Solo rutas y revisiones dentro del repositorio (sin rutas absolutas, de red ni ".."): ${p}` };
   }
   return { positional };
 }
