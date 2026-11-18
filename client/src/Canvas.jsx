@@ -48,11 +48,12 @@ const BREAK_LABEL = { before: '⏸ antes', after: '⏸ después', both: '⏸ ant
 
 const OP_SYM = { equals: '=', notEquals: '≠', gte: '≥', lte: '≤', exists: 'existe', matches: '~', lengthGte: 'largo ≥', lengthLte: 'largo ≤' };
 /** Short text for an arrow: label · field · condition. */
-export function edgeText(e) {
+export function edgeText(e, steps = []) {
   const w = e.when;
+  const from = w?.from ? ` (en «${steps.find((x) => x.id === w.from)?.name || w.from}»)` : '';
   const cond = !w ? '' : w.type === 'route' ? '🧭 lo decide el step' : w.type === 'json' ? `si ${w.path || '(raíz)'} ${OP_SYM[w.op || 'exists'] || w.op}${w.op && w.op !== 'exists' ? ` ${typeof w.value === 'string' ? w.value : JSON.stringify(w.value)}` : ''}`
     : w.type === 'regex' ? `si /${w.pattern || ''}/` : w.type === 'contains' ? `si contiene "${w.value || ''}"` : w.type === 'notContains' ? `si no contiene "${w.value || ''}"` : '';
-  return [e.label, e.pick && `{ ${e.pick} }`, cond].filter(Boolean).join(' · ');
+  return [e.label, e.pick && `{ ${e.pick} }`, cond && cond + from].filter(Boolean).join(' · ');
 }
 
 function StepNode({ data, selected }) {
@@ -66,7 +67,7 @@ function StepNode({ data, selected }) {
       <Handles />
       <div className="node-top">
         <span className="order">{order}</span>
-        <span className="kind">{icon} {label}</span>
+        <span className="kind">{icon} {label}{step.coordinator ? <b title="Coordinador del flujo: atiende el chat general"> · 🧭</b> : null}</span>
         <span className={`status s-${status}`}>{status === 'running' ? <span className="spinner" /> : null}{notRouted ? 'no enrutado' : statusLabel(status)}</span>
       </div>
       <div className="node-name" title={step.name}>{step.name}</div>
@@ -121,7 +122,7 @@ export default function Canvas({ flow, live, selectedId, onSelect, onConnect, on
   const setEdgeSel = (id) => onSelectEdge?.(id);
   const edges = useMemo(() => flow.edges.map((e) => {
     const running = live[e.target]?.status === 'running' || live[e.source]?.status === 'running';
-    const text = edgeText(e);
+    const text = edgeText(e, flow.steps);
     const style = { ...(e.when ? { strokeDasharray: '6 4' } : {}), ...(e.id === edgeSel ? { stroke: 'var(--accent)', strokeWidth: 2 } : {}) };
     return { id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle || null, targetHandle: e.targetHandle || null, animated: running, selected: e.id === edgeSel, markerEnd: { type: MarkerType.ArrowClosed }, style, label: text || undefined, labelBgPadding: [6, 3], labelBgBorderRadius: 4, labelStyle: { fill: 'var(--text)', fontSize: 11 }, labelBgStyle: { fill: 'var(--bg3)', stroke: 'var(--line)' }, reconnectable: true };
   }), [flow.edges, edgeSel, live]);

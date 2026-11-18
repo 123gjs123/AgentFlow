@@ -336,6 +336,7 @@ function cleanEdge(e) {
   if (e.when && typeof e.when === 'object' && EDGE_WHEN.includes(e.when.type) && e.when.type !== 'always') {
     const w = { type: e.when.type };
     for (const k of ['value', 'pattern', 'flags', 'path', 'op']) if (e.when[k] !== undefined && e.when[k] !== '') w[k] = e.when[k];
+    if (typeof e.when.from === 'string' && e.when.from.trim() && e.when.type !== 'route') w.from = e.when.from.trim().slice(0, 120);
     out.when = w;
   }
   return out;
@@ -378,6 +379,12 @@ app.put('/api/flows/:id', wrap((req, res) => {
     const prev = byId.get(s.id);
     return prev ? { ...s, memory: prev.memory, lastRun: prev.lastRun, pinned: prev.pinned, chatSessionId: prev.chatSessionId, chatContextHash: prev.chatContextHash } : store.newStep({ ...s, pinned: undefined });
   });
+  // spec 30: one coordinator per flow: the one just marked wins over the previous one
+  {
+    const marked = steps.filter((s) => s.coordinator === true);
+    const keep = marked.length > 1 ? marked.find((s) => !byId.get(s.id)?.coordinator) || marked[0] : marked[0];
+    for (const s of steps) if (s !== keep && 'coordinator' in s) Reflect.deleteProperty(s, 'coordinator');
+  }
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);

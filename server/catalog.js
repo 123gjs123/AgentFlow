@@ -11,9 +11,18 @@ function frontmatter(file) {
     const m = txt.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     const meta = {};
     if (m) {
-      for (const line of m[1].split(/\r?\n/)) {
-        const kv = line.match(/^([A-Za-z_-]+):\s*(.*)$/);
-        if (kv) meta[kv[1]] = kv[2].replace(/^["']|["']$/g, '');
+      const lines = m[1].split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const kv = lines[i].match(/^([A-Za-z_-]+):\s*(.*)$/);
+        if (!kv) continue;
+        let v = kv[2];
+        // YAML block scalars (description: >- / |): the indented lines that follow are the value (the QA framework's format)
+        if (/^[>|][+-]?\s*$/.test(v)) {
+          const block = [];
+          while (i + 1 < lines.length && (/^\s+\S/.test(lines[i + 1]) || lines[i + 1].trim() === '')) block.push(lines[++i].trim());
+          v = v.startsWith('|') ? block.join('\n').trim() : block.join(' ').replace(/\s+/g, ' ').trim();
+        }
+        meta[kv[1]] = v.replace(/^["']|["']$/g, '');
       }
     }
     return meta;

@@ -132,6 +132,11 @@ export function StepPanel({ flow, step, catalog, live, running, tab, setTab, onC
               ))}
             </div>
           </Field>
+          {step.kind !== 'command' && (
+            <label className="toggle" data-testid="coordinator-toggle" title="El coordinador atiende el chat general: responde, consulta al step que corresponda o propone ejecutar. Hay uno por flujo.">
+              <input type="checkbox" checked={!!step.coordinator} onChange={(e) => onChange({ coordinator: e.target.checked || undefined })} /> 🧭 Coordinador del flujo <span className="muted small">(atiende el chat general y decide qué step responde{flow.steps.some((x) => x.coordinator && x.id !== step.id) ? `; hoy lo es «${flow.steps.find((x) => x.coordinator && x.id !== step.id).name}» y dejará de serlo` : ''})</span>
+            </label>
+          )}
           <div className="ctx-block" data-testid="step-context">
             <div className="ctx-title">📎 Contexto{(step.contextSources || []).length ? ` (${step.contextSources.length})` : ''}</div>
             {step.kind === 'command'
@@ -403,6 +408,12 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
 }
 
 // ---------------- arrow (edge) settings: spec 18 ----------------
+/** Steps that always run before `id` (its ancestors): a condition can look at one of their decisions. */
+function ancestorSteps(flow, id) {
+  const seen = new Set(); const stack = [id];
+  while (stack.length) { const cur = stack.pop(); for (const e of flow.edges) if (e.target === cur && !seen.has(e.source)) { seen.add(e.source); stack.push(e.source); } }
+  return flow.steps.filter((x) => seen.has(x.id) && x.id !== id);
+}
 const WHEN_OPTS = [['always', 'Siempre'], ['route', '🧭 Lo decide el step de origen'], ['json', 'Si un campo del JSON…'], ['contains', 'Si la salida contiene…'], ['notContains', 'Si la salida NO contiene…'], ['regex', 'Si la salida cumple una regex…']];
 const JSON_OPS = [['equals', '='], ['notEquals', '≠'], ['gte', '≥'], ['lte', '≤'], ['exists', 'existe'], ['matches', 'cumple regex'], ['lengthGte', 'largo ≥'], ['lengthLte', 'largo ≤']];
 export function EdgePanel({ flow, edge, onChange, onDelete, onClose }) {
@@ -440,6 +451,14 @@ export function EdgePanel({ flow, edge, onChange, onDelete, onClose }) {
           )}
           {(w.type === 'contains' || w.type === 'notContains') && <input value={w.value || ''} onChange={(e) => setWhen({ value: e.target.value })} placeholder="texto" />}
           {w.type === 'regex' && <input className="mono" value={w.pattern || ''} onChange={(e) => setWhen({ pattern: e.target.value })} placeholder="^APROBADO" />}
+          {w.type !== 'always' && w.type !== 'route' && (
+            <label className="small row" style={{ marginTop: 4 }}>Mirar la salida de
+              <select value={w.from || ''} onChange={(e) => setWhen({ from: e.target.value || undefined })} data-testid="edge-when-from">
+                <option value="">“{from?.name}” (origen de la flecha)</option>
+                {ancestorSteps(flow, edge.source).map((x) => <option key={x.id} value={x.id}>“{x.name}” (decide antes en el flujo)</option>)}
+              </select>
+            </label>
+          )}
           {w.type !== 'always' && <div className="muted small">Si no se cumple, “{to?.name}” no recibe nada por esta flecha; si ninguna de sus flechas pasa, queda “no enrutado” (no es un error) y tampoco corre lo que depende de él.</div>}
         </Field>
         <div className="row"><button className="ghost danger small" onClick={onDelete}>Eliminar flecha</button></div>

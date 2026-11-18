@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (238 tests)
+## Qué cubre (242 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -67,6 +67,7 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `23-flow-review` | Spec 28: seguridad de propuestas (bypassPermissions y Bash sin patrón nunca; ampliar acceso = 409 `WIDEN_CONFIRM` hasta confirmarlo aparte); lint sin llamar a Claude (skill inexistente, MCP no cargado según el CLI, escrituras externas, secreto enmascarado, suite larga); aplicar un arreglo, descartar con motivo y reaparecer si el step cambia; políticas validadas y aplicadas al ejecutar (herramientas bloqueadas, autor de git, sin trailer, ambiente por defecto, regla en el prompt, "nunca dos a la vez"); revisión de corridas (denegaciones por la forma del comando, falso éxito en segundo plano, comando cortado); ensayo (modo plan, comandos que escriben omitidos, sin "Al terminar", sin tocar lastRun ni 🔔); revisión con IA (2 llamadas read-only con el mismo dossier, evidencia verificada, desacuerdo y arreglo estructural, propuesta que inserta un step); nunca durante una ejecución y cancelada por una; chat de revisión (@rol, regla de flujo y de máquina); 🔔 kind review; políticas en el export |
 | `24-ui-flow-review` | Spec 28 en el navegador: el aviso lleva a 🩺 Revisión; aplicar un arreglo; el que amplía acceso pide confirmación (cancelar no cambia nada); descartar con motivo; agregar una regla del flujo y una de la instalación (⚙ › Reglas); "✅ Aplicar las seguras" parte un step y deja aparte lo que quita algo |
 | `25-flow-review-investigate` | Spec 28, ronda 2: git de solo lectura (lee los repos del flujo, rechaza escrituras, programas y otras carpetas); evidencia completa de las ejecuciones en archivos; el investigador y sus hechos verificados por la app (los inventados se descartan); partir, quitar y reconectar steps (todo o nada, sin ciclos); "aplicar las seguras" con versión previa; el chat de revisión también investiga; reparación de un JSON roto |
+| `26-coordinator` | Spec 30: el coordinador elige por dónde entra cada pedido (un step a mitad de camino corre aunque lo anterior no); una flecha que depende de su decisión (`when.from`); uno por flujo; en el chat general atiende él, consulta al step que sabe y responde con lo que dijo |
 
 Cómo se simula cada origen en `07-integrations`:
 

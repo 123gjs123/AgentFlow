@@ -908,7 +908,17 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
                 src = d.source; fromRunId = d.fromRunId; at = d.at;
               }
               // A single-step run tests the step: conditions are not evaluated, the field selection is.
-              const ep = P.edgePayload(only ? { ...e, when: null } : e, d, step, evalCond);
+              // when.from: the condition looks at ANOTHER step of this run ("solo si el Coordinador eligió automatizar");
+              // what travels is still the origin's output. That step must have run in this run, or the arrow is inactive.
+              let cond = evalCond;
+              if (!only && e.when?.from && e.when.type !== 'route') {
+                const fid = rflow.steps.find((x) => x.id === e.when.from || x.name === e.when.from)?.id;
+                const fd = fid ? data.get(fid) : null;
+                const fname = rflow.steps.find((x) => x.id === fid)?.name || e.when.from;
+                if (!fd || notRouted.has(fid)) { inactive.push(`"${s?.name || u}": la condición mira a "${fname}", que no se ejecutó en esta ejecución`); continue; }
+                cond = (w) => { const r = evalCond(w, fd.output, fd.json); return { ...r, message: `en la salida de "${fname}": ${r.message}` }; };
+              }
+              const ep = P.edgePayload(only ? { ...e, when: null } : e, d, step, cond);
               if (!ep.active) { inactive.push(`"${s?.name || u}": ${ep.reason}`); continue; }
               upstream.push({ id: u, name: s?.name || u, output: ep.output, json: ep.json, source: src, fromRunId, at, via: P.edgeVia(e) || (ep.routed ? 'elegido por el step' : ''), edgeId: e.id, warning: ep.warning });
             }
@@ -1199,7 +1209,7 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
     for (const k of keys) emit({ type: 'chat.event', flowId, key: k, messageId: asst.id, event: e, mirrorOf: k !== key ? key : undefined });
   };
 
-  const chatSystem = isReview ? P.reviewChatSystem() : isFlow ? P.flowChatSystem() : P.stepChatSystem();
+  const chatSystem = isReview ? P.reviewChatSystem() : isFlow ? P.flowChatSystem() : step.coordinator ? `${P.stepChatSystem()}\n\n${P.coordinatorChatAddendum(flow, step)}` : P.stepChatSystem();
   let r = await runClaude({
     prompt: parts.join('\n\n'),
     appendSystem: chatSystem,
@@ -1639,6 +1649,18 @@ export async function globalChat(flowId, message, { external = false } = {}) {
   store.appendChat(flowId, key, routing);
   emit({ type: 'chat.message', flowId, key, message: routing });
 
+  // Spec 30: a flow with a 🧭 coordinator: the coordinator attends the general chat (it answers, consults a step, or
+  // proposes a run). The Haiku router is only for flows without one.
+  const coord = flow.steps.find((s) => s.coordinator);
+  if (coord) {
+    routing.status = 'done';
+    routing.decision = { action: 'ask', target: coord.id, reason: 'coordinador del flujo' };
+    routing.text = `→ 🧭 Atiende el coordinador: **${coord.name}**`;
+    store.updateChatMsg(flowId, key, routing.id, (m) => Object.assign(m, routing));
+    emit({ type: 'chat.done', flowId, key, message: routing });
+    return coordinatorChat(flow, coord, message, { external });
+  }
+
   let decision = null;
   if (flow.steps.length) {
     const r = await runClaude({
@@ -1700,6 +1722,62 @@ export async function globalChat(flowId, message, { external = false } = {}) {
   store.updateChatMsg(flowId, key, mirror.id, (m) => Object.assign(m, mirror));
   emit({ type: 'chat.done', flowId, key, message: mirror });
   return mirror;
+}
+
+/** One answer of a step's chat (or the flow's), mirrored into the general chat. */
+async function relayedTurn(flowId, targetKey, targetName, message, { external = false, origin = 'global', note = '' } = {}) {
+  const key = '_global';
+  const mirror = { id: store.uid('c_'), role: 'assistant', text: '', at: now(), status: 'running', routedTo: targetName, routedKey: targetKey, events: [], ...(note ? { note } : {}) };
+  store.appendChat(flowId, key, mirror);
+  emit({ type: 'chat.message', flowId, key, message: mirror });
+  const relay = (msg) => {
+    if (msg.type === 'chat.event' && msg.flowId === flowId && msg.key === key && msg.mirrorOf === targetKey) {
+      if (msg.event.kind !== 'delta' && msg.event.kind !== 'thinking_delta') mirror.events.push(msg.event);
+      emit({ type: 'chat.event', flowId, key, messageId: mirror.id, event: msg.event, relayed: true });
+    }
+  };
+  bus.on('msg', relay);
+  try {
+    const ans = await chatTurn({ flowId, key: targetKey, message, origin: external ? 'api' : origin, mirrorKey: key, external });
+    Object.assign(mirror, { text: ans.text, status: ans.status, proposals: ans.proposals, remembered: ans.remembered, originMessageId: ans.id });
+  } catch (e) {
+    Object.assign(mirror, { text: `⚠️ ${e.message}`, status: 'error' });
+  } finally {
+    bus.off('msg', relay);
+  }
+  store.updateChatMsg(flowId, key, mirror.id, (m) => Object.assign(m, mirror));
+  emit({ type: 'chat.done', flowId, key, message: mirror });
+  return mirror;
+}
+const CONSULT_RE = /<consult\s+step\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\/consult>/g;
+export const MAX_CONSULTS = 2;
+/**
+ * Spec 30: the coordinator attends the general chat. It answers itself, or consults up to MAX_CONSULTS steps
+ * (<consult step="X">question</consult>): each step answers in its own chat (its context and memory), and the
+ * coordinator then answers the person with those answers. It proposes, never runs (spec 25).
+ */
+async function coordinatorChat(flow, coord, message, { external = false } = {}) {
+  const flowId = flow.id;
+  const first = await relayedTurn(flowId, coord.id, coord.name, message, { external, note: 'coordinador' });
+  const consults = [...String(first.text || '').matchAll(CONSULT_RE)].map((m) => ({ ref: m[1].trim(), q: m[2].trim() })).slice(0, MAX_CONSULTS);
+  if (!consults.length || first.status === 'error') return first;
+  // the consultation tags are the coordinator's working notes: the person sees a clean message
+  const clean = String(first.text).replace(CONSULT_RE, '').trim();
+  store.updateChatMsg(flowId, '_global', first.id, (m) => { m.text = clean || `🧭 Consulto a ${consults.map((c) => `«${c.ref}»`).join(' y ')}…`; });
+  emit({ type: 'chat.done', flowId, key: '_global', message: { ...first, text: clean } });
+  const answers = [];
+  for (const c of consults) {
+    const target = flow.steps.find((x) => x.id === c.ref || x.name.toLowerCase() === c.ref.toLowerCase());
+    if (!target || target.id === coord.id) { answers.push({ step: c.ref, text: '(ese step no existe en el flujo)' }); continue; }
+    const a = await relayedTurn(flowId, target.id, target.name, `(Consulta del coordinador «${coord.name}», para responderle a la persona)\n${c.q}`, { external, origin: 'coordinator', note: `consulta de ${coord.name}` });
+    answers.push({ step: target.name, text: a.status === 'error' ? `⚠️ ${a.text}` : a.text });
+  }
+  const follow = `<consult-answers>\n${answers.map((a) => `<answer step="${a.step}">\n${String(a.text || '').slice(0, 12000)}\n</answer>`).join('\n')}\n</consult-answers>\nCon estas respuestas, responde ahora a la persona (su mensaje era: «${message.slice(0, 2000)}»). No vuelvas a consultar.`;
+  const final = await relayedTurn(flowId, coord.id, coord.name, follow, { external, note: 'coordinador' });
+  // a second round of consultations is not allowed (no loops): strip any tag left
+  if (CONSULT_RE.test(String(final.text || ''))) { CONSULT_RE.lastIndex = 0; store.updateChatMsg(flowId, '_global', final.id, (m) => { m.text = String(m.text).replace(CONSULT_RE, '').trim(); }); }
+  CONSULT_RE.lastIndex = 0;
+  return store.getChat(flowId, '_global').find((m) => m.id === final.id) || final;
 }
 
 // ---------- external helpers ----------

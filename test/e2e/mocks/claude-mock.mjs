@@ -151,6 +151,13 @@ if (dir('bash-bg') !== null) toolUse('Bash', { command: dir('bash-bg').trim(), r
 if (dir('bash-timeout') !== null) toolUse('Bash', { command: dir('bash-timeout').trim() }, 'Command timed out after 10m 0s', true);
 if (dir('env-echo') !== null) toolUse('Bash', { command: 'env' }, `GIT_AUTHOR_EMAIL=${process.env.GIT_AUTHOR_EMAIL || ''} BASH_MAX_TIMEOUT_MS=${process.env.BASH_MAX_TIMEOUT_MS || ''}`);
 
+// spec 30: the coordinator consults a step ([[mock:consult Step|question]]) and then answers with what it said
+if (isChat && /<consult-answers>/.test(prompt)) {
+  const m = prompt.match(/<answer step="([^"]+)">\n([^\n]*)/);
+  await finish(`FINAL coordinador: «${m?.[1] || '?'}» dijo: ${m?.[2] || '-'}`);
+}
+if (isChat && dir('consult') !== null) { const [st, ...q] = dir('consult').split('|'); await finish(`Lo consulto.\n<consult step="${st.trim()}">${q.join('|').trim()}</consult>`); }
+
 let reply;
 if (dir('empty') !== null) reply = '';
 else if (correcting) {

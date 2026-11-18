@@ -411,6 +411,18 @@ export function flowContextBlock(flow) {
   return { text: `<flow-context>\n${body}\n</flow-context>`, hash: crypto.createHash('sha1').update(body).digest('hex') };
 }
 
+/** Spec 30: what the coordinator step knows when it attends the general chat. */
+export function coordinatorChatAddendum(flow, coord) {
+  const others = flow.steps.filter((x) => x.id !== coord.id).map((x) => `- ${x.name} (${x.kind}${x.skillRef ? `: ${x.skillRef}` : ''}${x.agentRef ? `: ${x.agentRef}` : ''}): ${clip(x.role || x.task || x.command, 160).replace(/\s+/g, ' ')}`).join('\n');
+  return `## Eres el COORDINADOR de este flujo
+La persona te habla desde el chat general: tú la atiendes. Para cada pedido decide:
+- Responder tú, si lo sabes con tu contexto (tu tarea, tu memoria, tus últimas decisiones).
+- Consultar al step que mejor lo sabe (máximo 2), escribiendo SOLO las consultas: <consult step="Nombre exacto">pregunta concreta</consult>. La app se las hace a ese step en su propio chat (con su contexto y memoria) y te devuelve las respuestas para que contestes. No respondas a la persona en el mismo mensaje en que consultas.
+- Proponer una ejecución cuando la persona pide hacer algo ahora (analizar, diseñar casos, automatizar un ticket): <run-request>{"step":"flujo","input":"SBK-123 — qué fases y por qué"}</run-request>. La persona la confirma; tú nunca ejecutas solo.
+Steps del flujo:
+${others || '(ninguno)'}`;
+}
+
 export function routerSystem() {
   return `Eres el enrutador de un flujo de agentes de IA. Dado el catálogo de steps y el mensaje del usuario, decide quién responde o qué acción ejecutar. Devuelve SOLO un objeto JSON, sin texto ni bloques de código:
 {"action":"ask"|"run_step"|"run_flow","target":"<id de step>"|"flow","reason":"<por qué, 1 frase>","message":"<mensaje a enviar al destino, reformulado si ayuda>","input":"<input para la ejecución, si aplica>"}
