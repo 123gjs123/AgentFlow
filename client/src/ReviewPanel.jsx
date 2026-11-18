@@ -68,7 +68,7 @@ export default function ReviewPanel({ flow, running, onChange }) {
     try {
       await pendingSave.flush();
       const r = await api.post(`/api/flows/${flow.id}/reviews/${rv.id}/apply-safe`, {});
-      setSafe({ busy: false, result: r.applied.length ? `Aplicadas ${r.applied.length}. Versión guardada antes: «${r.version?.label}».${r.skipped.length ? ` Quedan ${r.skipped.length} para decidir aparte (amplían acceso, quitan algo o tienen un problema).` : ''}` : `Nada seguro para aplicar${r.skipped.length ? `: las ${r.skipped.length} abiertas amplían acceso o quitan algo, decídelas una por una.` : '.'}` });
+      setSafe({ busy: false, result: r.applied.length ? `Aplicadas ${r.applied.length}. Versión guardada antes: «${r.version?.label}».${r.skipped.length ? ` Quedan ${r.skipped.length} para decidir una por una: ${r.skipped.map((x) => x.why).join(' · ')}` : ''}` : `Nada más para aplicar automáticamente.${r.skipped.length ? ` Quedan ${r.skipped.length} para decidir una por una: ${r.skipped.map((x) => x.why).join(' · ')}` : ''}` });
       load(); loadReviews();
     } catch (e) { setSafe({ busy: false, result: '' }); setErr(e.message); }
   };
@@ -164,8 +164,8 @@ export default function ReviewPanel({ flow, running, onChange }) {
               </details>
             )}
             {(rv.findings || []).map((f) => (
-              <Finding key={f.id} f={{ ...f, title: f.claim, detail: f.check ? `Cómo se comprueba: ${f.check}` : '' }} ai locked={running}
-                onApply={f.proposalId ? () => applyAi(f) : null} onDismiss={(r) => dismissAi(f, r)}
+              <Finding key={f.id} f={{ ...f, title: f.claim, detail: f.check ? `Cómo se comprueba: ${f.check}` : '', widens: f.proposal?.widens || [] }} ai locked={running}
+                onApply={f.proposalId && !f.proposal?.applied && !f.proposal?.discarded && !f.proposal?.error ? () => applyAi(f) : null} onDismiss={(r) => dismissAi(f, r)}
                 onDiscuss={() => discuss(`Sobre el hallazgo ${f.id}${f.stepName ? ` en «${f.stepName}»` : ''}: ${f.claim}${f.dissent ? ` (hay desacuerdo: ${f.dissent})` : ''}. ¿Qué recomiendan?`)} />
             ))}
           </>
@@ -210,6 +210,8 @@ function Finding({ f, ai, busy, locked, onApply, onDismiss, onDiscuss }) {
         <b>{f.title}</b>
         {f.stepName && <span className="chip">{f.stepName}</span>}
         {ai && (f.sources || []).map((r) => <span key={r} className="chip">{ROLE[r] || r}</span>)}
+        {f.proposal?.applied && <span className="chip ok" data-testid="finding-applied">✓ aplicado</span>}
+        {f.proposal?.discarded && <span className="chip">descartado</span>}
         {ai && !f.verified && <span className="chip warn" title="ninguna de sus citas se encontró en el flujo o en las ejecuciones">sin evidencia verificable</span>}
       </div>
       {f.detail && <div className="small">{f.detail}</div>}
@@ -218,7 +220,8 @@ function Finding({ f, ai, busy, locked, onApply, onDismiss, onDiscuss }) {
       {f.evidence?.length > 0 && <a className="small" onClick={() => setEv(!ev)}>{ev ? 'ocultar evidencia' : `evidencia (${f.evidence.length})`}</a>}
       {ev && <ul className="small evidence">{f.evidence.map((e, i) => <li key={i}><span className="chip">{e.type}{e.runId ? ` ${e.runId}` : ''}</span>{e.verified === false ? ' ✗ ' : ' '}<code>{e.quote}</code></li>)}</ul>}
       {f.fix?.label && <div className="small">Arreglo: {f.fix.label}{f.check ? ` · se comprueba: ${f.check}` : ''}</div>}
-      {f.widens?.length > 0 && <div className="widens small" data-testid="widens">⚠ Amplía el acceso (se confirma aparte): {f.widens.join(' · ')}</div>}
+      {f.proposal?.error && !f.proposal.applied && <div className="small danger">No se puede aplicar: {f.proposal.error}</div>}
+      {f.widens?.length > 0 && !f.proposal?.applied && <div className="widens small" data-testid="widens">⚠ Amplía el acceso (se confirma aparte): {f.widens.join(' · ')}</div>}
       <div className="proposal-actions">
         {onApply && <button className={`${f.widens?.length ? 'danger' : 'primary'} small`} disabled={busy || locked} onClick={onApply}>{f.fix?.kind === 'action' ? f.fix.label : f.widens?.length ? 'Aplicar (amplía acceso)' : 'Aplicar'}</button>}
         <button className="ghost small" onClick={onDiscuss}>Discutir</button>

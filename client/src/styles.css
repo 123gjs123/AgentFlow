@@ -384,19 +384,19 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 
 /* ---- spec 28: 🩺 Revisión del flujo ---- */
 .review-panel .row.wrap { flex-wrap: wrap; gap: 6px; align-items: center; }
-.finding { border: 1px solid var(--border, #d0d7de); border-left-width: 4px; border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: var(--panel, #fff); }
-.finding.sev-block { border-left-color: #cf222e; }
-.finding.sev-risk { border-left-color: #bf8700; }
-.finding.sev-improve { border-left-color: #8c959f; }
+.finding { border: 1px solid var(--line); border-left-width: 4px; border-radius: 6px; padding: 8px 10px; margin: 8px 0; background: var(--bg3); color: var(--text); }
+.finding.sev-block { border-left-color: var(--err); }
+.finding.sev-risk { border-left-color: var(--warn); }
+.finding.sev-improve { border-left-color: var(--muted); }
 .finding-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 4px; }
-.finding .dissent { color: #8250df; margin-top: 4px; }
+.finding .dissent { color: #c4a7ff; margin-top: 4px; }
 .finding .evidence { margin: 4px 0 4px 16px; padding: 0; }
 .finding .evidence code { white-space: pre-wrap; word-break: break-word; }
-.chip.sev-block { background: #ffebe9; color: #cf222e; }
-.chip.sev-risk { background: #fff8c5; color: #7d4e00; }
-.chip.sev-improve { background: #f6f8fa; color: #57606a; }
-.widens { color: #9a6700; background: #fff8c5; border-radius: 4px; padding: 4px 6px; margin: 4px 0; }
-.rehearsal-box { border: 1px dashed var(--border, #d0d7de); border-radius: 6px; padding: 8px; margin: 6px 0; }
-.policy-row { border-bottom: 1px solid var(--border, #eaeef2); padding: 4px 0; }
+.chip.sev-block { background: #3a1d22; color: #ff9a9a; border-color: #6b2b33; }
+.chip.sev-risk { background: #3a3018; color: #f2c96b; border-color: #6b5524; }
+.chip.sev-improve { background: var(--bg3); color: var(--muted); }
+.widens { color: #f2c96b; background: #3a3018; border: 1px solid #6b5524; border-radius: 4px; padding: 4px 6px; margin: 4px 0; }
+.rehearsal-box { border: 1px dashed var(--line); border-radius: 6px; padding: 8px; margin: 6px 0; }
+.policy-row { border-bottom: 1px solid var(--line); padding: 4px 0; }
 .policy-add { margin-top: 8px; gap: 6px; }
 .policy-add input, .policy-add select { min-width: 120px; }

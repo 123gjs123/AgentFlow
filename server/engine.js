@@ -1306,6 +1306,13 @@ export function widensOf(cur, patch, prefix = '') {
   // processes killed by name also close the person's own programs (seen in a real AI review)
   if (/\b(Stop-Process|taskkill|pkill|killall)\b[^\n]*\b(chrome|msedge|firefox|node|code|powershell)\b|\bGet-Process\s+[\w,]*(chrome|msedge|node)[\w,]*\s*[^\n]*\|\s*Stop-Process/i.test(String(patch.command || ''))) w.push(`${prefix}⚠ mata procesos por nombre: también cerraría los tuyos`);
   if (typeof patch.hooks === 'string' && patch.hooks !== (cur?.hooks || '')) w.push(`${prefix}cambia el código de hooks`);
+  // instructions replaced by a much shorter text that does not keep them: rules learned so far would be lost (seen on a
+  // real flow: a 1170-char PR procedure replaced by 334 chars). Never silent, never inside "apply the safe ones".
+  for (const [k, label] of [['task', 'la tarea'], ['role', 'el rol'], ['context', 'el contexto']]) {
+    const before = String(cur?.[k] || '').trim(); const after = typeof patch[k] === 'string' ? patch[k].trim() : null;
+    if (after === null || before.length < 300 || after.includes(before)) continue;
+    if (after.length < before.length * 0.7) w.push(`${prefix}reemplaza ${label} por un texto más corto (${before.length} → ${after.length} caracteres): se perderían instrucciones`);
+  }
   return w;
 }
 const findStepRef = (flow, ref) => flow.steps.find((x) => x.id === ref || x.name.toLowerCase() === String(ref).toLowerCase());
@@ -1463,10 +1470,16 @@ function applyStructure(f, patch) {
     const [first, ...rest] = r.split.into;
     const { kind: _k, after: _a, ...firstPatch } = first || {};
     const inherit = { kind: base.kind, skillRef: base.skillRef, agentRef: base.agentRef, allowedTools: base.allowedTools, permissionMode: base.permissionMode, model: base.model, effort: base.effort, shell: base.shell, role: base.role, context: base.context };
-    applyStepPatch(base, firstPatch); changed.push(base.name);
+    // a part's task never REPLACES the original instructions (they hold the rules learned so far: seen on a real flow,
+    // where a one-line part task dropped all of them): the part's scope goes first, the original task below it
+    const original = String(base.task || '').trim();
+    const originalName = base.name;
+    const withOriginal = (p) => (typeof p.task === 'string' && p.task.trim() && original && !p.task.includes(original)
+      ? { ...p, task: `${p.task.trim()}\n\n## Instrucciones del step original «${originalName}» (siguen valiendo, salvo en el alcance que fija esta parte)\n${original}` } : p);
+    applyStepPatch(base, withOriginal(firstPatch)); changed.push(base.name);
     let prev = base;
     for (const n of rest) {
-      const s = insertAfter(prev, { ...Object.fromEntries(Object.entries(inherit).filter(([, v]) => v != null)), ...n });
+      const s = insertAfter(prev, { ...Object.fromEntries(Object.entries(inherit).filter(([, v]) => v != null)), task: original, ...withOriginal(n) });
       // the new parts inherit the limits of the step they come from (unless the proposal sets them)
       for (const k of ['bashTimeoutMin', 'timeoutSec', 'allowDenials', 'output', 'retries']) if (!(k in n) && base[k] != null) s[k] = structuredClone(base[k]);
       prev = s;

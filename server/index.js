@@ -605,7 +605,13 @@ app.post('/api/flows/:id/review/suppress', wrap((req) => review.suppress(need(re
 app.post('/api/flows/:id/review/unsuppress', wrap((req) => review.unsuppress(need(req.params.id).id, String(req.body?.fp || ''))));
 app.get('/api/flows/:id/reviews', wrap((req) => { need(req.params.id); return { items: store.listReviews(req.params.id), active: review.activeReview(req.params.id) }; }));
 app.post('/api/flows/:id/reviews', wrap((req) => review.startReview(req.params.id)));
-app.get('/api/flows/:id/reviews/:rid', wrap((req) => { need(req.params.id); const rv = store.getReview(req.params.id, req.params.rid); if (!rv) throw fail(404, 'Revisión no encontrada', 'REVIEW_NOT_FOUND'); return { ...rv, stale: rv.flowHash !== store.definitionHash(store.getFlow(req.params.id)) }; }));
+app.get('/api/flows/:id/reviews/:rid', wrap((req) => {
+  need(req.params.id); const rv = store.getReview(req.params.id, req.params.rid); if (!rv) throw fail(404, 'Revisión no encontrada', 'REVIEW_NOT_FOUND');
+  // each finding carries the state of its proposal (applied, discarded, what it widens, why it cannot apply)
+  const props = rv.messageId ? store.getChat(req.params.id, '_review').find((m) => m.id === rv.messageId)?.proposals || [] : [];
+  const findings = (rv.findings || []).map((f) => { const p = props.find((x) => x.id === f.proposalId); return p ? { ...f, proposal: { applied: !!p.applied, discarded: !!p.discarded, widens: p.widens || [], error: p.error || null } } : f; });
+  return { ...rv, findings, stale: rv.flowHash !== store.definitionHash(store.getFlow(req.params.id)) };
+}));
 app.post('/api/flows/:id/reviews/:rid/apply-safe', wrap(async (req) => { need(req.params.id); return review.applySafe(req.params.id, req.params.rid); }));
 app.post('/api/flows/:id/reviews/:rid/cancel', wrap((req) => { need(req.params.id); if (!review.cancelReview(req.params.id, req.params.rid)) throw fail(409, 'Esa revisión no está en curso', 'REVIEW_FINISHED'); return { cancelled: true }; }));
 // Rehearsal: the whole flow, read-only AI (plan mode), commands that write outside skipped, each step capped

@@ -98,6 +98,11 @@ test('revisión que investiga: evidencia completa y git en sus herramientas; par
   const edge = (a, b) => g.edges.some((e) => e.source === by(a).id && e.target === by(b).id);
   assert.ok(edge('Pull', 'Auto dev') && edge('Auto dev', 'Auto qa') && edge('Auto qa', 'Auto ppd') && edge('Auto ppd', 'Cierre') && !edge('Auto dev', 'Cierre'), 'Pull → dev → qa → ppd → Cierre');
   assert.equal(by('Cierre').task, 'Junta los tres resultados');
+  // each part keeps the original instructions under its own scope (never a one-line task that drops them)
+  for (const [n, scope] of [['Auto dev', 'Ejecuta en dev'], ['Auto qa', 'Ejecuta en qa'], ['Auto ppd', 'Ejecuta en ppd']]) {
+    assert.ok(by(n).task.startsWith(scope), n);
+    assert.match(by(n).task, /Instrucciones del step original «Auto»[\s\S]*Ejecuta en dev, qa y ppd \[\[mock:say ok\]\]/, n);
+  }
 
   // the destructive one, confirmed apart: Extra goes and nothing points to it
   const msg = (await s.uiOk('GET', `/api/flows/${f.id}/chat/_review`)).find((m) => m.reviewId === reviewId);
@@ -119,6 +124,17 @@ test('revisión que investiga: evidencia completa y git en sus herramientas; par
   assert.equal(r.status, 400);
   assert.match(r.body.error, /ciclo/);
   assert.ok((await s.getFlow(f.id)).steps.some((x) => x.name === 'Pull'), 'todo o nada');
+});
+
+test('una propuesta que reemplaza instrucciones largas por un texto corto no es "segura": se confirma aparte', async () => {
+  const long = `Procedimiento del PR: ${'revisa el diff, haz push, escribe la descripción, abre el PR. '.repeat(10)}`;
+  const f = await s.flow('Instrucciones', [role('Cierre', long, { id: 's_ci' })], []);
+  await s.uiOk('POST', `/api/flows/${f.id}/chat/_review`, { message: '[[mock:propose-flow {"steps":{"Cierre":{"task":"Solo abre el PR si es verde."}}}]]' });
+  const m = await lastAnswer(f.id, '_review');
+  assert.ok(m.proposals[0].widens?.some((w) => /reemplaza la tarea por un texto más corto .*se perderían instrucciones/.test(w)), JSON.stringify(m.proposals[0]));
+  const r = await s.ui('POST', `/api/flows/${f.id}/chat/_review/apply`, { messageId: m.id, proposalId: m.proposals[0].id });
+  assert.equal(r.body.code, 'WIDEN_CONFIRM');
+  assert.equal((await s.getFlow(f.id)).steps[0].task, long);
 });
 
 test('un revisor que devuelve JSON roto: un reintento lo repara (no se pierde su revisión)', async () => {
