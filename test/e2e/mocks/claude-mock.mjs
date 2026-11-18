@@ -147,7 +147,23 @@ if (dir('transient-always') !== null) await fail('API Error: 529 overloaded (moc
 if (dir('write-then-transient') !== null) { toolUse('Write', { file_path: 'C:/tmp/mock-written.txt', content: 'x' }, 'ok'); await fail('API Error: 500 after write (mock)'); }
 if (dir('error') !== null) await fail(`mock fatal error: ${dir('error')}`);
 
-for (const t of [...scope.matchAll(/\[\[mock:tool\s+([^\s\]]+)(?:\s+([^\]]*))?\]\]/g)]) toolUse(t[1], { mock: t[2] || '' }, `resultado de ${t[1]}`);
+// Atlassian write tools get an input with their REAL fields (the app verifies them): [[mock:tool NAME value]]
+const realisticInput = (name, arg) => {
+  const n = name.split('__').pop();
+  if (n === 'addCommentToJiraIssue') return { cloudId: 'c', issueIdOrKey: arg, commentBody: 'x' };
+  if (n === 'createJiraIssue') return /-\d+$/.test(arg) ? { cloudId: 'c', projectKey: arg.split('-')[0], issueTypeName: 'Subtask', parent: arg, summary: 's' } : { cloudId: 'c', projectKey: arg, issueTypeName: 'Bug', summary: 's' };
+  if (n === 'transitionJiraIssue') return { cloudId: 'c', issueIdOrKey: arg, transition: { id: '31' } };
+  if (n === 'createConfluencePage') return { cloudId: 'c', spaceId: 'QA', title: arg, body: 'b' };
+  if (n === 'updateConfluencePage') return { cloudId: 'c', pageId: arg, body: 'b' };
+  if (n === 'createIssueLink') { const [a, b, ty] = arg.split(/\s+/); return { cloudId: 'c', inwardIssue: a, outwardIssue: b, type: ty || 'Relates' }; }
+  return { mock: arg };
+};
+for (const t of [...scope.matchAll(/\[\[mock:tool\s+([^\s\]]+)(?:\s+([^\]]*))?\]\]/g)]) {
+  if (t[1].endsWith('__transitionJiraIssue')) toolUse(t[1].replace(/transitionJiraIssue$/, 'getTransitionsForJiraIssue'), { issueIdOrKey: t[2] || '' }, JSON.stringify({ transitions: [{ id: '31', name: 'Done', to: { name: 'Done' } }, { id: '21', name: 'In Progress', to: { name: 'In Progress' } }] }));
+  toolUse(t[1], realisticInput(t[1], (t[2] || '').trim()), `resultado de ${t[1]}`);
+}
+// [[mock:tooljson NAME {"input":{…},"result":"…"}]]: exactly that input (attacks on the target check)
+for (const t of [...scope.matchAll(/\[\[mock:tooljson\s+(\S+)\s+(\{.*?\})\]\]/g)]) { let j = {}; try { j = JSON.parse(t[2]); } catch {} toolUse(t[1], j.input || {}, typeof j.result === 'string' ? j.result : JSON.stringify(j.result ?? 'ok')); }
 for (const w of [...scope.matchAll(/\[\[mock:write\s+([^\]]+)\]\]/g)]) toolUse('Write', { file_path: w[1].trim(), content: 'mock' }, 'File created');
 if (dir('deny') !== null) { denials.push({ tool_name: dir('deny').trim() || 'Bash', tool_use_id: 'x', tool_input: { command: 'rm -rf build' } }); }
 // spec 28: a denied Bash command with its text, and a Bash left in the background (false success)

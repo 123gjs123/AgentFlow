@@ -265,3 +265,16 @@ Round-1 findings #1–#4: **FIXED**, re-proved. #5 (target check) and #6 (JSON e
 | The run summary exposed params through `actions[].input`. | Declared actions add only type, key and url to the handoff. |
 
 The server now logs an unhandled promise rejection instead of exiting. A full-suite run once lost a test server mid-file; it could not be reproduced (16 s of polling against a closed endpoint, and three full runs green). The cause, if it happens again, is now logged.
+
+### Third pass of the adversarial review
+
+Round-2 findings N1–N8: **FIXED**, re-proved. New findings and fixes (e2e `29-*` "revisión 14c: …"):
+
+| Finding | Fix |
+|---|---|
+| **High, proved.** The target check accepted a decoy: the right value in another field (an extra `issue`, a label `key`, `version.id`), an unlisted field, a link in the opposite direction, or a transition to any state. | Each param is checked against the ONE field of the tool that carries it, taken from the Atlassian MCP input schemas: `issueIdOrKey`, `parent`, `projectKey`+`issueTypeName`, `inwardIssue`/`outwardIssue`+`type` by direction, `spaceId`+`title` (+`parentId` only if given), `pageId`(+`title`). There is no "any field" fallback. Fields that would change another target must be absent: `commentId` (it would edit another comment), `transition`/`parent` on create, `spaceId`/`parentId` on update. A transition's `transition.id` must be the one that `getTransitionsForJiraIssue` gave for the approved state in the same call. A space key resolved to its numeric id needs the same kind of evidence. |
+| **Medium, proved.** An action still in flight in ANOTHER live run was taken for a crash. Approving such a "halfway" one skipped the duplicate check. | `started` traces of live runs are ignored, and approving always re-checks the ledger. |
+| **Medium, proved.** "Reset → runs" deleted the copies record, so fixed destinations failed forever after. | The copies record lives in `data/copies/<flow>.json`, kept on reset and removed with the flow. |
+| **Low–medium, proved.** Model output containing `{{…}}` made the action fail. | Unresolved placeholders are detected in the TEMPLATE, never in the rendered value. A variable that renders empty in a target or key refuses the plan. |
+
+The mock CLI produces inputs with the real fields of those tools (`[[mock:tool NAME value]]`), plus `[[mock:tooljson NAME {"input":…,"result":…}]]` for exact inputs.

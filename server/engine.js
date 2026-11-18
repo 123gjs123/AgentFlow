@@ -785,7 +785,7 @@ ${cgit.block}`;
       }
     }
     if ((step.actions || []).length) {
-      const base = { output: rs.output, json: rs.json, render, evalCond: (w, o, j) => evalAssertion(w, o, j), stepKey: key, item: opts.item ? itemLabel(opts.item.value) : undefined, policyBlocked: POL.has(flow, 'noExternalWrites'), forceConfirm: !!opts.forceConfirm };
+      const base = { output: rs.output, json: rs.json, render, evalCond: (w, o, j) => evalAssertion(w, o, j), stepKey: key, item: opts.item ? itemLabel(opts.item.value) : undefined, policyBlocked: POL.has(flow, 'noExternalWrites'), forceConfirm: !!opts.forceConfirm, isLive: (rid) => activeRuns.has(rid) };
       const done = [];
       const runPlans = async (plans) => {
         for (const p of plans) {

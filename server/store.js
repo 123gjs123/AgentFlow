@@ -92,6 +92,7 @@ export function deleteFlow(id) {
   fs.rmSync(path.join(DATA, 'outputs', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'actions', `${safe(id)}.json`), { force: true });
   fs.rmSync(path.join(DATA, 'approvals', `${safe(id)}.json`), { force: true });
+  fs.rmSync(path.join(DATA, 'copies', `${safe(id)}.json`), { force: true });
 }
 
 // ---------- flow reviews (spec 28) ----------

@@ -163,7 +163,7 @@ test('HTTP POST: la credencial solo va a su propio sitio; un flujo importado con
   } finally { srv.close(); }
 });
 
-test('UI: agregar una acción "confirmar", ejecutar, aprobarla en Datos; el nodo muestra ⚡ y ⏳ mientras espera', async (t) => {
+test('UI: agregar una acción, ponerla en "confirmar", ejecutar, aprobarla en Datos; el nodo muestra ⚡ y ⏳ mientras espera', async (t) => {
   const { openUi } = await import('./helpers/browser.mjs');
   const ui = await openUi('outputs-ui');
   try {
@@ -174,12 +174,13 @@ test('UI: agregar una acción "confirmar", ejecutar, aprobarla en Datos; el nodo
     const nodeLoc = page.locator('.react-flow__node', { has: page.locator('.node-name', { hasText: 'Paso' }) });
     await nodeLoc.click();
     const box = page.getByTestId('outputs-box');
-    await box.getByTestId('action-add').selectOption('jira.transition');
+    await box.getByTestId('action-add').selectOption('jira.comment');
     await box.getByTestId('action-issue').fill('SBK-5');
-    await box.getByTestId('action-to').fill(`Done [[mock:tool ${ATL}__transitionJiraIssue SBK-5]] ${okJson('SBK-5')}`);
+    await box.getByTestId('action-approval').selectOption('confirm');
+    await box.getByTestId('action-item').locator('textarea').first().fill(`Listo [[mock:tool ${ATL}__addCommentToJiraIssue SBK-5]] ${okJson('SBK-5')}`);
     await nodeLoc.getByText('⚡ 1').waitFor();
     let g;
-    for (let i = 0; i < 40; i++) { g = await u.getFlow(f.id); if (g.steps[0].actions?.[0]?.params?.to?.includes('Done')) break; await sleep(150); }
+    for (let i = 0; i < 40; i++) { g = await u.getFlow(f.id); if (g.steps[0].actions?.[0]?.params?.body?.includes('Listo') && g.steps[0].actions[0].approval === 'confirm') break; await sleep(150); }
     assert.equal(g.steps[0].actions[0].approval, 'confirm');
     const { runId } = await u.uiOk('POST', `/api/flows/${f.id}/run`, { input: '', breakpoints: false });
     await u.waitRun(f.id, runId);
@@ -311,7 +312,7 @@ test('revisión 14: la llamada debe usar el destino aprobado y una sola vez; el 
     const f = await s.flow('Verificación', [st], []);
     const r = await run(f.id);
     const by = (id) => r.steps.s_v.declaredActions.find((p) => p.actionId === id);
-    assert.equal(by('a_other').status, 'error'); assert.match(by('a_other').error, /no usó el destino aprobado \(issue=SBK-1\)/);
+    assert.equal(by('a_other').status, 'error'); assert.match(by('a_other').error, /no usó el destino aprobado \(issue=SBK-1 /);
     assert.equal(by('a_twice').status, 'error'); assert.match(by('a_twice').error, /Se llamó 2 veces/);
     assert.equal(by('a_json').status, 'done', by('a_json').error);
     assert.deepEqual(JSON.parse(got), { text: 'hola "mundo"\n, "channel":"#general' }, 'una sola clave: el texto no inyecta campos');
@@ -328,7 +329,7 @@ test('revisión 14b: el destino se compara EXACTO (SBK-10 no es SBK-1; un títul
   const f = await s.flow('Exacto', [st], [], { vars: { n: '1' } });
   let r = await run(f.id);
   const by = (id) => r.steps.s_x.declaredActions.find((p) => p.actionId === id);
-  assert.equal(by('a_10').status, 'error'); assert.match(by('a_10').error, /no usó el destino aprobado \(issue=SBK-1\)/);
+  assert.equal(by('a_10').status, 'error'); assert.match(by('a_10').error, /no usó el destino aprobado \(issue=SBK-1 /);
   assert.equal(by('a_q').status, 'done', by('a_q').error);
   r = await run(f.id);
   assert.equal(by('a_10').status, 'awaiting_approval', 'no queda como "ya hecha": una persona revisa');
@@ -389,4 +390,66 @@ test('revisión 14b: un destino fijo admite reemplazar su propia copia anterior 
   r = await run(f.id);
   assert.equal(r.steps.s_d.status, 'error');
   assert.equal(fs.readFileSync(path.join(dest, 'mio.md'), 'utf8'), 'editado a mano');
+});
+
+// ---- third adversarial pass on spec 14 ----
+const tj = (name, input, result) => `[[mock:tooljson ${ATL}__${name} ${JSON.stringify({ input, ...(result !== undefined ? { result } : {}) })}]]`;
+test('revisión 14c: el destino se verifica en SU campo (sin señuelos), el vínculo por dirección, la transición por evidencia y sin mover páginas', async () => {
+  const A = (id, type, params, extra = '') => ({ id, type, approval: 'auto', optional: true, params: { ...params, [type === 'jira.comment' ? 'body' : type.startsWith('confluence') ? 'body' : 'summary']: `x ${extra} ${okJson('K')}` } });
+  const st = role('Paso', '[[mock:say ok]]', { id: 's_t', actions: [
+    A('decoy', 'jira.comment', { issue: 'SBK-1' }, tj('addCommentToJiraIssue', { issueIdOrKey: 'SBK-999', issue: 'SBK-1', commentBody: 'SBK-1' })),
+    A('edit', 'jira.comment', { issue: 'SBK-1' }, tj('addCommentToJiraIssue', { issueIdOrKey: 'SBK-1', commentId: '777', commentBody: 'x' })),
+    A('proj', 'jira.createIssue', { project: 'SBK', issueType: 'Bug' }, tj('createJiraIssue', { projectKey: 'OPS', issueTypeName: 'Bug', summary: 's', additional_fields: { labels: { key: 'SBK' } } })),
+    A('link', 'jira.link', { from: 'SBK-1', to: 'SBK-2', type: 'Blocks' }, tj('createIssueLink', { inwardIssue: 'SBK-2', outwardIssue: 'SBK-1', type: 'Blocks' })),
+    A('page', 'confluence.updatePage', { page: '123' }, tj('updateConfluencePage', { pageId: '999', version: { id: '123' }, body: 'b' })),
+    A('move', 'confluence.updatePage', { page: '123' }, tj('updateConfluencePage', { pageId: '123', parentId: '5', body: 'b' })),
+    A('trans', 'jira.transition', { issue: 'SBK-1', to: 'Done' }, `${tj('getTransitionsForJiraIssue', { issueIdOrKey: 'SBK-1' }, { transitions: [{ id: '31', name: 'Done' }, { id: '41', name: 'Won\'t do' }] })} ${tj('transitionJiraIssue', { issueIdOrKey: 'SBK-1', transition: { id: '41' } })}`),
+    A('transok', 'jira.transition', { issue: 'SBK-1', to: 'Done' }, `${tj('getTransitionsForJiraIssue', { issueIdOrKey: 'SBK-1' }, { transitions: [{ id: '31', name: 'Done' }] })} ${tj('transitionJiraIssue', { issueIdOrKey: 'SBK-1', transition: { id: '31' } })}`),
+    A('linkok', 'jira.link', { from: 'SBK-1', to: 'SBK-2', type: 'Blocks' }, tj('createIssueLink', { inwardIssue: 'SBK-1', outwardIssue: 'SBK-2', type: 'Blocks' })),
+  ] });
+  const f = await s.flow('Señuelos', [st], []);
+  const r = await run(f.id);
+  const by = (id) => r.steps.s_t.declaredActions.find((p) => p.actionId === id);
+  for (const id of ['decoy', 'edit', 'proj', 'link', 'page', 'move', 'trans']) { assert.equal(by(id).status, 'error', `${id}: ${by(id).status}`); assert.match(by(id).error, /no usó el destino aprobado/, id); }
+  assert.match(by('edit').error, /no debía usar commentId/);
+  assert.match(by('trans').error, /no es la de ese estado/);
+  for (const id of ['transok', 'linkok']) assert.equal(by(id).status, 'done', `${id}: ${by(id).error}`);
+});
+
+test('revisión 14c: {{…}} dentro de la salida del modelo no hace fallar la acción; una variable vacía en el destino sí la frena', async () => {
+  const st = role('Bugs', '[[mock:json {"title":"Falla al mostrar {{odds}}"}]]', { id: 's_b', output: { format: 'json' }, actions: [
+    { id: 'a_b', type: 'jira.createIssue', approval: 'confirm', params: { project: 'SBK', issueType: 'Bug', summary: '{{output.json.title}}' } },
+    { id: 'a_v', type: 'jira.comment', approval: 'confirm', optional: true, params: { issue: '{{vars.issue}}', body: 'x' } },
+  ] });
+  const f = await s.flow('Llaves', [st], [], { vars: { issue: '' } });
+  const r = await run(f.id);
+  const by = (id) => r.steps.s_b.declaredActions.find((p) => p.actionId === id);
+  assert.equal(by('a_b').status, 'awaiting_approval', by('a_b').error);
+  assert.equal(by('a_b').params.summary, 'Falla al mostrar {{odds}}');
+  assert.equal(by('a_v').status, 'error');
+});
+
+test('revisión 14c: "reiniciar ejecuciones" no rompe un destino fijo; una acción en curso de OTRA ejecución viva no se toma como caída', async () => {
+  const dest = path.join(s.dirs.work, `dest3-${Date.now()}`); fs.mkdirSync(dest, { recursive: true });
+  const st = role('Paso', '[[mock:say c]]', { id: 's_r', deliverables: [{ id: 'd_m', format: 'md', path: 'r.md', destination: [{ path: dest }] }] });
+  const f = await s.flow('Reset', [st], []);
+  await run(f.id);
+  await s.uiOk('POST', `/api/flows/${f.id}/reset`, { parts: ['runs'] });
+  const r = await run(f.id);
+  assert.equal(r.steps.s_r.status, 'success', r.steps.s_r.error);
+  // a webhook still in flight in run 1 while run 2 plans the same action: no "halfway"
+  let release; const gate = new Promise((ok) => { release = ok; });
+  const srv = http.createServer(async (req, res) => { req.resume(); await gate; res.writeHead(200); res.end(); });
+  await new Promise((rr) => srv.listen(0, '127.0.0.1', rr));
+  try {
+    const st2 = role('Hook', '[[mock:say y]]', { id: 's_h', actions: [{ id: 'a_h', type: 'http.post', approval: 'auto', params: { url: `http://127.0.0.1:${srv.address().port}/h`, body: 'x' } }] });
+    const f2 = await s.flow('Vivas', [st2], [], { policies: [] });
+    const { runId: r1 } = await s.uiOk('POST', `/api/flows/${f2.id}/run`, { input: '', breakpoints: false });
+    await until(async () => fs.existsSync(path.join(s.dirs.data, 'actions', `${f2.id}.json`)) && /started/.test(fs.readFileSync(path.join(s.dirs.data, 'actions', `${f2.id}.json`), 'utf8')), 8000);
+    const { runId: r2 } = await s.uiOk('POST', `/api/flows/${f2.id}/run`, { input: '', breakpoints: false });
+    await sleep(800); release();
+    const [x1, x2] = [await s.waitRun(f2.id, r1), await s.waitRun(f2.id, r2)];
+    assert.equal(x1.steps.s_h.declaredActions[0].status, 'done');
+    assert.equal(x2.steps.s_h.declaredActions[0].status, 'done', x2.steps.s_h.declaredActions[0].reason || '');
+  } finally { release(); srv.close(); }
 });
