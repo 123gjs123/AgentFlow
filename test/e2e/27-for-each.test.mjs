@@ -120,3 +120,20 @@ test('revisión: "ejecutar desde" se niega si un step anterior que necesita no t
   assert.match(r.body.error, /«Antes» no tiene una última salida buena/);
   assert.equal((await s.ui('POST', `/api/flows/${f.id}/run`, { from: 'nada', breakpoints: false })).status, 404);
 });
+
+test('revisión 2: "ejecutar desde" con un paso anterior no enrutado deja esa flecha inactiva (como una corrida completa)', async () => {
+  const coord = role('Coordinador', '[[mock:emit-route Automatizar]] [[mock:say ok]]', { id: 's_nc' });
+  const an = role('Analizar', '[[mock:say an]]', { id: 's_na' });
+  const auto = role('Automatizar', '[[mock:say au]]', { id: 's_nu' });
+  const cierre = role('Cierre', '[[mock:say ci]]', { id: 's_nz' });
+  const f = await s.flow('Desde no enrutado', [coord, an, auto, cierre], [['s_na', 's_nz'], ['s_nu', 's_nz']]);
+  const g = await s.getFlow(f.id);
+  g.edges.push({ id: 'e_ra', source: 's_nc', target: 's_na', when: { type: 'route' } }, { id: 'e_ru', source: 's_nc', target: 's_nu', when: { type: 'route' } });
+  await s.uiOk('PUT', `/api/flows/${f.id}`, g);
+  let r = await run(f.id);
+  assert.equal(r.steps.s_na.skipReason, 'not_routed');
+  const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { from: 's_nz', breakpoints: false });
+  r = await s.waitRun(f.id, runId);
+  assert.equal(r.status, 'success');
+  assert.deepEqual(r.steps.s_nz.inputs.map((x) => x.step), ['Automatizar'], 'solo la flecha de lo que sí corrió');
+});

@@ -119,7 +119,10 @@ async function checkFile(flow, w, signal) {
   const pat = renderPlain(flow, w.target).trim().replace(/\\/g, '/');
   if (!pat) return { error: 'Falta la ruta o el patrón' };
   const inside = (f) => { const r = path.relative(base, f); return r && !r.startsWith('..') && !path.isAbsolute(r); };
-  if (pat.split('/').includes('..') || (path.isAbsolute(pat) && !inside(path.resolve(pat)))) return { error: 'Solo se vigilan archivos dentro de la carpeta del flujo.' };
+  if (/(^|[/{,])\.\.($|[/},])/.test(pat) || (path.isAbsolute(pat) && !inside(path.resolve(pat)))) return { error: 'Solo se vigilan archivos dentro de la carpeta del flujo.' };
+  const realBase = await fs.promises.realpath(base).catch(() => base);
+  const insideReal = async (f) => { try { const r = path.relative(realBase, await fs.promises.realpath(f)); return r && !r.startsWith('..') && !path.isAbsolute(r); } catch { return false; } };
+  signal = AbortSignal.any([signal, AbortSignal.timeout(30000)].filter(Boolean));
   const files = [];
   try {
     if (/[*?[\]{}]/.test(pat)) { for await (const f of fs.promises.glob(pat, { cwd: base })) { if (signal?.aborted) break; const abs = path.resolve(base, f); if (inside(abs)) files.push(abs); if (files.length >= MAX_ITEMS) break; } }
@@ -128,7 +131,7 @@ async function checkFile(flow, w, signal) {
   const items = {};
   let budget = 64 * 1024 * 1024; // bytes hashed per check
   for (const f of files) {
-    if (!inside(f)) continue;
+    if (!inside(f) || !(await insideReal(f))) continue;
     let st; try { st = await fs.promises.stat(f); } catch { continue; }
     if (!st.isFile()) continue;
     let v = `${st.size}|${Math.round(st.mtimeMs)}`;
@@ -145,9 +148,11 @@ async function checkCommand(flow, step, w, signal) {
   try { cmd = P.render(w.target, { flow, vars: flow.vars || {}, quote: q.quote, cred: resolveCredential, onSecret: (v) => secrets.add(v) }); } catch (e) { return { error: e.message }; }
   const r = await engine.sh(cmd, { cwd: flowCwd(flow), shell: step?.shell || 'powershell', input: '', env: q.env, signal: AbortSignal.any([signal, AbortSignal.timeout(120000)].filter(Boolean)), delayed: q.values.length > 0 });
   // a credential's value never reaches the stored snapshot, the news, the UI or a run's input
+  for (const v of [...secrets]) { const j = JSON.stringify(String(v)).slice(1, -1); if (j !== v) secrets.add(j); }
   const hide = engine.maskSecrets(secrets);
   if (r.code !== 0) return { error: `El comando terminó con código ${r.code}: ${clip(hide(String(r.stderr || r.stdout || '')).trim().split('\n').pop(), 200)}` };
-  return { items: itemsFromText(hide(String(r.stdout || ''))) };
+  const items = itemsFromText(hide(String(r.stdout || '')));
+  return { items: Object.fromEntries(Object.entries(items).map(([k, v]) => [hide(k), Object.fromEntries(Object.entries(v).map(([f, x]) => [f, typeof x === 'string' ? hide(x) : x]))])) };
 }
 /** A JSON array of objects with id/key → one item each; JSON lines the same; any other text → one item "salida". */
 export function itemsFromText(text) {
@@ -231,7 +236,8 @@ export async function diffItems(type, prev, items, extra = {}) {
 }
 
 // ---------------- checking a flow ----------------
-const busy = new Map(); // `${flowId}|${stepId}|${watchId}` -> promise
+const busy = new Map(); // `${flowId}|${stepId}|${watchId}` -> promise (the same request joins the running one)
+const tail = new Map(); // flowId -> last queued check (checks of one flow run in order)
 const sigOf = (flow, w) => `${w.type}|${renderPlain(flow, w.target)}|${renderPlain(flow, w.options?.branch || '')}`;
 export const watchesOf = (flow, stepId = null) => flow.steps.filter((s) => (!stepId || s.id === stepId)).flatMap((s) => (s.watches || []).filter((w) => !w.disabled).map((w) => ({ step: s, w })));
 // what watched systems say is DATA for a run, never instructions (adversarial review)
@@ -246,7 +252,8 @@ const summaryOf = (step, list) => `Novedades en las fuentes de «${step.name}» 
 export function checkFlow(flowId, { stepId = null, watchId = null, trigger = 'manual', signal = undefined } = {}) {
   const key = `${flowId}|${stepId || ''}|${watchId || ''}`;
   if (busy.has(key)) return busy.get(key);
-  const p = (async () => {
+  const prevTail = tail.get(flowId) || Promise.resolve();
+  const p = prevTail.catch(() => {}).then(async () => {
     const flow = store.getFlow(flowId);
     if (!flow) throw Object.assign(new Error('Flujo no encontrado'), { status: 404 });
     const qp = quarantineProblem(flow);
@@ -288,15 +295,15 @@ export function checkFlow(flowId, { stepId = null, watchId = null, trigger = 'ma
       results.push({ watchId: id, stepId: step.id, stepName: step.name, type: w.type, target: w.target, onChange: w.onChange, ...strip(state[id]) });
     }
     // drop the state of watches that no longer exist
-    const ids = new Set(flow.steps.flatMap((s) => (s.watches || []).map((w) => w.id)));
+    const ids = new Set((store.getFlow(flowId) || flow).steps.flatMap((s) => (s.watches || []).map((w) => w.id))); // the CURRENT flow: a watch added meanwhile keeps its state
     for (const k of Object.keys(state)) if (!ids.has(k)) Reflect.deleteProperty(state, k);
     store.saveWatch(flowId, state);
     const actions = await onChangeActions(flow, results, trigger);
     deps.emit({ type: 'watch.updated', flowId, results, actions });
     if (results.some((r) => r.state === 'new')) deps.onNews(flowId);
     return { results, actions };
-  })().finally(() => busy.delete(key));
-  busy.set(key, p);
+  }).finally(() => { busy.delete(key); if (tail.get(flowId) === p) tail.delete(flowId); });
+  busy.set(key, p); tail.set(flowId, p);
   return p;
 }
 const strip = ({ snapshot, ...r }) => r;

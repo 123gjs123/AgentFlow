@@ -136,3 +136,15 @@ An architect review and an adversarial review (independent agents) checked commi
 | Polling restarted on every autosave; restoring a version dropped `watchPolling`. | The timer only restarts when its config changes, and `watchPolling` is restored. |
 
 **Accepted risk (documented, not changed).** A Bash allow rule in the project's `.claude/settings*.json` would also apply to the coordinator (and to the review, spec 28), because they need `Bash` in `--tools` for the helper. Keep project Bash allow rules narrow.
+
+### Second pass of the adversarial review
+
+The adversarial reviewer re-attacked commit 26ef0d1. What it found, all fixed and covered by tests (e2e "revisión 2: …" plus the extended git-helper test):
+
+| Finding | Fix |
+|---|---|
+| **Critical, proved.** The git helper still ran programs, through abbreviated options git accepts (`grep --open-files=…`, `--open=x`, `-Ox`). It also read any file (`blame --contents`) and wrote config (`branch -uother`). | `bin/review-git.mjs` is now an **allowlist**: per subcommand, only the options it names, written in full. Values go attached or as the next argument, only for options that take one. Positional arguments are revisions or paths, and git refuses paths outside the repo. Abbreviations, unknown options and attached short flags are refused. |
+| **High, proved.** A secret containing `"` or `\` leaked through JSON output, because the mask ran on the raw text before parsing. | The JSON-escaped form is masked too, and every parsed field is masked again. |
+| "From" with a parent that was not routed (or an empty "para cada") ran its child on empty input. A `when.from` pointing at a failed step outside the run evaluated on `''`. | Those parents are not routed in the "from" run, so their arrows are inactive, as in a full run. `when.from` only uses an outside step's last GOOD output. |
+| Overlapping checks of one flow duplicated news and fetched twice. A check could delete the state of a watch added in the meantime. | The checks of a flow are queued (the same request still joins the running one). The cleanup reads the current flow. |
+| File watches: a symlink or junction inside the folder, or `{..,x}`, could reach outside. The glob had no time limit. | No `..` anywhere in the pattern, braces included. Every file's real path must be inside the folder's real path. The glob has a 30 s cap. |

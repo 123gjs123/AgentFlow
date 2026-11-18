@@ -257,3 +257,26 @@ test('revisión: steps duplicados no comparten el estado de sus fuentes; cambiar
   g.vars.f = 'b.txt'; await s.uiOk('PUT', `/api/flows/${f.id}`, g);
   assert.ok((await check(f.id)).results.every((x) => x.state === 'first'), 'otro archivo: nueva referencia, no un "cambio"');
 });
+
+test('revisión 2: un secreto con comillas o barras tampoco queda en el estado (salida JSON); un enlace dentro de la carpeta no saca la vigilancia afuera', async () => {
+  await s.uiOk('POST', '/api/credentials', { type: 'generic', name: 'k2', fields: { value: 'TOP"SECRET\\42' } });
+  const dir = path.join(s.dirs.work, `wsec2-${Date.now()}`); fs.mkdirSync(path.join(dir, 'in'), { recursive: true });
+  const outside = path.join(s.dirs.work, `fuera-${Date.now()}`); fs.mkdirSync(outside, { recursive: true }); fs.writeFileSync(path.join(outside, 'secreto.txt'), 'x');
+  fs.symlinkSync(outside, path.join(dir, 'in', 'enlace'), 'junction');
+  const st = cmd('Paso', 'Write-Output x', { id: 's_sec2', watches: [
+    { id: 'w_json', type: 'command', target: '"[" + (@{ id = "T1"; title = {{cred.k2.value}} } | ConvertTo-Json -Compress) + "]"' },
+    { id: 'w_link', type: 'file', target: 'in/**/*.txt' },
+    { id: 'w_direct', type: 'file', target: 'in/enlace/secreto.txt' },
+    { id: 'w_brace', type: 'file', target: '{..,in}/**/*.txt' },
+  ] });
+  const f = await s.flow('Secretos 2', [st], [], { cwd: dir });
+  const r = await check(f.id);
+  const by = (id) => r.results.find((x) => x.watchId === id);
+  assert.equal(by('w_json').state, 'first', by('w_json').error);
+  const stored = fs.readFileSync(path.join(s.dirs.data, 'watch', `${f.id}.json`), 'utf8');
+  assert.ok(!stored.includes('SECRET'), stored.slice(0, 400));
+  for (const id of ['w_link', 'w_direct']) assert.ok(by(id).state === 'error' || by(id).count === 0, JSON.stringify(by(id)));
+  const st8 = JSON.parse(stored);
+  for (const id of ['w_link', 'w_direct']) assert.deepEqual(Object.keys(st8[id]?.snapshot || {}), [], 'el archivo de afuera (vía enlace) no se vigila');
+  assert.equal(by('w_brace').state, 'error');
+});
