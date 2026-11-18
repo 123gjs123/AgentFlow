@@ -66,7 +66,7 @@ test('acción automática (comentar en Jira): Haiku con SOLO las herramientas de
   assert.equal(r.steps.s_ac.status, 'success', r.steps.s_ac.error);
   const call = s.callsSince(n0).find((c) => /Ejecutas UNA acción/.test(c.system));
   assert.ok(call, 'llamada de la acción');
-  assert.equal(s.argOf(call, '--allowedTools'), `${ATL}__getAccessibleAtlassianResources,${ATL}__addCommentToJiraIssue`);
+  assert.equal(s.argOf(call, '--allowedTools'), `${ATL}__getAccessibleAtlassianResources,${ATL}__getJiraIssue,${ATL}__addCommentToJiraIssue`);
   assert.equal(s.argOf(call, '--model'), 'haiku');
   assert.equal(s.argOf(call, '--tools'), 'ToolSearch');
   assert.match(s.argOf(call, '--disallowedTools'), /Bash/);
@@ -452,4 +452,28 @@ test('revisión 14c: "reiniciar ejecuciones" no rompe un destino fijo; una acci�
     assert.equal(x1.steps.s_h.declaredActions[0].status, 'done');
     assert.equal(x2.steps.s_h.declaredActions[0].status, 'done', x2.steps.s_h.declaredActions[0].reason || '');
   } finally { release(); srv.close(); }
+});
+
+// ---- fourth adversarial pass on spec 14 ----
+test('revisión 14d: additional_fields no mueve el issue; el sub-task va al proyecto del padre; la transición vale solo con la evidencia de ESE issue; vínculo por nombre o frase', async () => {
+  const A = (id, type, params, extra, body = 'summary') => ({ id, type, approval: 'auto', optional: true, params: { ...params, [body]: `x ${extra} ${okJson('K')}` } });
+  const st = role('Paso', '[[mock:say ok]]', { id: 's_u', actions: [
+    A('xf', 'jira.createIssue', { project: 'SBK', issueType: 'Bug' }, tj('createJiraIssue', { projectKey: 'SBK', issueTypeName: 'Bug', summary: 's', additional_fields: { parent: { key: 'OPS-1' }, project: { key: 'OPS' } } })),
+    A('sp', 'jira.createSubtask', { parent: 'SBK-1' }, tj('createJiraIssue', { projectKey: 'OPS', issueTypeName: 'Subtask', parent: 'SBK-1', summary: 's' })),
+    A('tr', 'jira.transition', { issue: 'SBK-1', to: 'Done' }, `${tj('getTransitionsForJiraIssue', { issueIdOrKey: 'SBK-2' }, { transitions: [{ id: '31', name: 'Done' }] })} ${tj('transitionJiraIssue', { issueIdOrKey: 'SBK-1', transition: { id: '31' } })}`, 'issue2'),
+    A('trf', 'jira.transition', { issue: 'SBK-1', to: 'Done' }, `${tj('getTransitionsForJiraIssue', { issueIdOrKey: 'SBK-1' }, { transitions: [{ id: '31', name: 'Done' }] })} ${tj('transitionJiraIssue', { issueIdOrKey: 'SBK-1', transition: { id: '31' }, fields: { resolution: { name: "Won't Do" } } })}`, 'issue2'),
+    A('lk', 'jira.link', { from: 'SBK-1', to: 'SBK-2', type: 'relates to' }, `${tj('getIssueLinkTypes', {}, { issueLinkTypes: [{ id: '1', name: 'Relates', inward: 'relates to', outward: 'relates to' }] })} ${tj('createIssueLink', { inwardIssue: 'SBK-1', outwardIssue: 'SBK-2', type: 'Relates' })}`, 'note'),
+    A('num', 'jira.comment', { issue: 'SBK-1' }, `${tj('getJiraIssue', { issueIdOrKey: 'SBK-1' }, { id: '10234', key: 'SBK-1' })} ${tj('addCommentToJiraIssue', { issueIdOrKey: '10234', commentBody: 'x' })}`, 'body'),
+    A('ttl', 'confluence.updatePage', { page: '123' }, tj('updateConfluencePage', { pageId: '123', title: 'Otro título', body: 'b' }), 'body'),
+  ] });
+  const f = await s.flow('Señuelos 2', [st], []);
+  const r = await run(f.id);
+  const by = (id) => r.steps.s_u.declaredActions.find((p) => p.actionId === id);
+  assert.match(by('xf').error, /no debía usar additional_fields\.parent/);
+  assert.match(by('sp').error, /no es el del padre SBK-1/);
+  assert.match(by('tr').error, /getTransitionsForJiraIssue de SBK-1/);
+  assert.match(by('trf').error, /no debía usar fields/);
+  assert.equal(by('lk').status, 'done', by('lk').error);
+  assert.equal(by('num').status, 'done', by('num').error);
+  assert.match(by('ttl').error, /title=\(ninguno\)/);
 });

@@ -278,3 +278,17 @@ Round-2 findings N1–N8: **FIXED**, re-proved. New findings and fixes (e2e `29-
 | **Low–medium, proved.** Model output containing `{{…}}` made the action fail. | Unresolved placeholders are detected in the TEMPLATE, never in the rendered value. A variable that renders empty in a target or key refuses the plan. |
 
 The mock CLI produces inputs with the real fields of those tools (`[[mock:tool NAME value]]`), plus `[[mock:tooljson NAME {"input":…,"result":…}]]` for exact inputs.
+
+### Fourth pass of the adversarial review
+
+Round-3 findings R1–R5: **FIXED**, re-proved. New findings and fixes (e2e `29-*` "revisión 14d"):
+
+| Finding | Fix |
+|---|---|
+| **High, proved.** `additional_fields` could carry another parent, project or type. A sub-task could go to another project. | `additional_fields` may not contain `parent`, `project`, `projectKey`, `issuetype` or `issueTypeName`. A sub-task's `projectKey` must be its parent key's prefix. |
+| **Medium.** Transition evidence was not tied to the issue: any read result counted. Extras such as `fields` or `update` passed. | Every read is kept with its tool and its input. A transition id counts only if it comes from `getTransitionsForJiraIssue` OF THE APPROVED ISSUE. A space id counts only from `getConfluenceSpaces`. A transition may not carry `fields` or `update`. |
+| **Medium.** Exact matching rejected legitimate calls: a link type given by its phrase, or an issue sent as its numeric id. | A link type is accepted by name, inward or outward phrase, with `getIssueLinkTypes` evidence. A numeric id is accepted for a key with `getJiraIssue` evidence of that same key; `getJiraIssue` is now allowed for comment, transition and link. |
+| **Low.** A page update without a title could retitle the page. | Without a title in the step, the title must be absent or equal to the one `getConfluencePage` of that page returned. |
+| **Low.** An approval executing at that moment looked like a crash to a new run. | Open approvals count as live runs. |
+
+**Residual risk (documented).** Reading `getJiraIssue` puts ticket text inside the action call. The app's exact checks on the write call are what keep a prompt injection there from changing the target. The content (comment body, summary) is the approved one, but the model could still rephrase it.
