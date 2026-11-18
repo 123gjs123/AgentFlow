@@ -67,7 +67,7 @@ function StepNode({ data, selected }) {
       <Handles />
       <div className="node-top">
         <span className="order">{order}</span>
-        <span className="kind">{icon} {label}{step.coordinator ? <b title="Coordinador del flujo: atiende el chat general"> · 🧭</b> : null}</span>
+        <span className="kind">{icon} {label}{step.coordinator ? <b title="Coordinador del flujo: atiende el chat general"> · 🧭</b> : null}{step.forEach ? <b title={`Para cada elemento de ${step.forEach.path || 'la lista'}`}> · 🔁</b> : null}</span>
         <span className={`status s-${status}`}>{status === 'running' ? <span className="spinner" /> : null}{notRouted ? 'no enrutado' : statusLabel(status)}</span>
       </div>
       <div className="node-name" title={step.name}>{step.name}</div>

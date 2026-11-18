@@ -325,7 +325,91 @@ const assertionName = (a) => a.name || ({
   json: `json.${a.path || ''} ${a.op || 'exists'}${a.op && a.op !== 'exists' ? ` ${showV(a.value)}` : ''}`, command: 'comando de verificación', judge: 'juez IA',
 }[a.type] || a.type);
 
+/** Spec 15 DATA-10: a step with forEach runs once per element (pins and nested runs keep the single path). */
+const wantsEach = (step, run, opts) => !!step.forEach && !opts.nested && !(step.pinned && !opts.force && run.usePins);
+const itemLabel = (it) => {
+  if (it == null || typeof it !== 'object') return clipS(String(it ?? ''), 80);
+  for (const k of ['key', 'ticket', 'id', 'name', 'nombre', 'title']) if (typeof it[k] === 'string' || typeof it[k] === 'number') return clipS(String(it[k]), 80);
+  return clipS(JSON.stringify(it), 80);
+};
+/**
+ * The elements a forEach step iterates: forEach.path inside the JSON of forEach.from (a step of this run or its last
+ * output), or of the first upstream whose JSON has an array there. Returns {items, from, error}.
+ */
+export function eachItems(flow, step, run, upstream, data) {
+  const fe = step.forEach || {};
+  const p = String(fe.path || '').replace(/^json\.?/, '').trim();
+  let src = null; let val;
+  if (fe.from) {
+    const s = flow.steps.find((x) => x.id === fe.from || x.name === fe.from);
+    if (!s) return { error: `"Para cada": el step "${fe.from}" no existe` };
+    const up = upstream.find((u) => u.id === s.id);
+    const d = up || P.stepData(s, data, run.id, { usePins: run.usePins });
+    src = s.name; val = P.getPath(d.json, p);
+  } else {
+    for (const u of upstream) { const v = P.getPath(u.json, p); if (Array.isArray(v)) { src = u.name; val = v; break; } }
+    if (!src) return { error: `"Para cada": ninguna entrada trae una lista JSON en "${p || '(la raíz)'}"` };
+  }
+  if (!Array.isArray(val)) return { error: `"Para cada": "${p || '(la raíz)'}" en la salida de "${src}" no es una lista (es ${val === undefined ? 'nada' : typeof val})`, from: src };
+  return { items: val, from: src };
+}
+async function executeForEach(flow, step, input, run, signal, upstream, opts) {
+  const fe = step.forEach;
+  const parallel = clampInt(fe.parallel, 1, 4, 1);
+  const max = clampInt(fe.max, 1, 50, 20);
+  const rs = run.steps[step.id] = { status: 'running', startedAt: now(), events: [], output: '', files: [], actions: [], inputs: upstream.map((u) => ({ step: u.name, stepId: u.id, source: u.source || 'run', fromRunId: u.fromRunId || null, at: u.at || null, viaRef: false })), assertions: [], warnings: [], denials: [], attempts: [] };
+  const setLast = (patch) => { if (!run.rehearsal) setStepRun(flow.id, step.id, patch); };
+  const note = (text, kind = 'hook_log') => { const e = { kind, text, t: now(), seq: ++run.eventSeq }; rs.events.push(e); emit({ type: 'run.event', flowId: flow.id, runId: run.id, stepId: step.id, event: e }); };
+  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null });
+  emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
+  const end = (status, extra = {}) => {
+    Object.assign(rs, { status, ...extra }); rs.endedAt = now(); rs.durationMs = rs.endedAt - rs.startedAt;
+    setLast({ status: rs.status, endedAt: rs.endedAt, output: rs.output, json: rs.json, files: rs.files, actions: rs.actions, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, runId: run.id, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: 0 });
+    emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
+    store.saveRun(run); run.dirty = false;
+    return rs;
+  };
+  const got = eachItems(flow, step, run, upstream, opts.data || new Map());
+  if (got.error) { note(got.error, 'error'); return end('error', { error: got.error, code: 'FOR_EACH_SOURCE' }); }
+  let items = got.items;
+  if (!items.length) { note(`🔁 "${got.from}" no trae elementos: no hay nada que hacer.`); return end('skipped', { skipReason: 'empty', json: [], output: '' }); }
+  if (items.length > max) { rs.warnings.push(`"Para cada": ${items.length} elementos; se procesan los primeros ${max} (máximo del step).`); items = items.slice(0, max); }
+  rs.forEach = { total: items.length, from: got.from, parallel, items: items.map((it, i) => ({ i: i + 1, label: itemLabel(it), key: `${step.id}~${i + 1}`, status: 'queued' })) };
+  note(`🔁 Para cada elemento de "${got.from}": ${items.length} (${parallel === 1 ? 'de a uno' : `hasta ${parallel} a la vez`}) — ${rs.forEach.items.map((x) => x.label).join(' · ')}`);
+  store.saveRun(run);
+  const results = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length && !signal?.aborted) {
+      const i = next++;
+      const it = items[i]; const meta = rs.forEach.items[i];
+      meta.status = 'running';
+      note(`▶ ${i + 1}/${items.length}: ${meta.label}`);
+      const itemText = typeof it === 'string' ? it : JSON.stringify(it, null, 2);
+      const up = [...upstream, { id: '_item', name: 'Elemento', output: `Elemento ${i + 1} de ${items.length}${typeof it === 'string' ? '' : ' (JSON)'}:\n${itemText}`, json: typeof it === 'object' && it !== null ? it : undefined, source: 'run', via: 'para cada' }];
+      const r = await executeStep(flow, step, input, run, signal, up, { ...opts, nested: meta.key, item: { value: it, index: i + 1, total: items.length } });
+      meta.status = r.status; meta.durationMs = r.durationMs;
+      results[i] = r;
+      note(`${r.status === 'success' ? '✓' : '✗'} ${i + 1}/${items.length}: ${meta.label} — ${r.status}${r.error ? ` (${clipS(r.error, 200)})` : ''}`, r.status === 'success' ? 'hook_log' : 'error');
+      store.saveRun(run);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(parallel, items.length) }, worker));
+  const done = results.filter(Boolean);
+  rs.output = results.map((r, i) => (r ? `## ${rs.forEach.items[i].label} — ${r.status}\n${r.error ? `Error: ${r.error}\n` : ''}${r.output || ''}` : null)).filter(Boolean).join('\n\n');
+  rs.json = results.map((r, i) => ({ item: items[i], status: r?.status || 'cancelled', ...(r?.json !== undefined ? { json: r.json } : {}), output: clipS(r?.output || '', 4000), ...(r?.error ? { error: r.error } : {}) }));
+  rs.files = done.flatMap((r) => r.files || []); rs.actions = done.flatMap((r) => r.actions || []);
+  rs.routes = [...new Set(done.flatMap((r) => r.routes || []))];
+  rs.usage = done.reduce((a, r) => sumUsage(a, r.usage), undefined);
+  for (const r of done) for (const w of r.warnings || []) if (!rs.warnings.includes(w)) rs.warnings.push(w);
+  const bad = results.map((r, i) => [r, i]).filter(([r]) => !r || r.status !== 'success');
+  if (signal?.aborted && done.length < items.length) return end(run.timedOut ? 'timeout' : 'stopped', { code: run.timedOut ? 'DEADLINE' : 'STOPPED', error: run.timedOut ? 'Tiempo máximo de la ejecución agotado' : 'Detenido' });
+  if (bad.length) return end('error', { code: 'FOR_EACH_FAILED', error: `Fallaron ${bad.length} de ${items.length}: ${bad.map(([, i]) => rs.forEach.items[i].label).join(', ')}` });
+  return end('success');
+}
+
 async function executeStep(flow, step, input, run, signal, upstream, opts = {}) {
+  if (wantsEach(step, run, opts)) return executeForEach(flow, step, input, run, signal, upstream, opts);
   const data = opts.data || new Map();
   const rs = run.steps[opts.nested || step.id] = {
     status: 'running', startedAt: now(), events: [], output: '', files: [], actions: [], inputs: [], assertions: [], warnings: [], denials: [], attempts: [],
@@ -430,7 +514,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   // Provenance of every upstream edge (OBS-1); {{steps.X}} references are added as they resolve.
   const refs = [];
   const notePin = (name) => { if (!run.usedPins.includes(name)) run.usedPins.push(name); };
-  const rctx = { runId: run.id, refs, allowed: opts.ancestors && !step.input?.allowNonUpstream ? opts.ancestors : null, usePins: run.usePins, onPinned: notePin, reviewFeedback: opts.feedback || null, previousOutput: opts.previousOutput || null };
+  const rctx = { runId: run.id, refs, allowed: opts.ancestors && !step.input?.allowNonUpstream ? opts.ancestors : null, usePins: run.usePins, onPinned: notePin, reviewFeedback: opts.feedback || null, previousOutput: opts.previousOutput || null, ...(opts.item ? { item: opts.item } : {}) };
   // <route to="X"> tags (spec 18): the step chooses destinations; removed from the output that flows on.
   const takeRoutes = (txt) => { const x = P.extractRoutes(txt); rs.routes = x.routes; return x.clean; };
   rs.inputs = upstream.map((u) => ({ step: u.name, stepId: u.id, source: u.source || 'run', fromRunId: u.fromRunId || null, at: u.at || null, viaRef: false }));
@@ -508,7 +592,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         log({ kind: 'tool_use', name: `shell:${step.shell}`, input: { cmd } });
         // stdin = output of previous steps (or the flow input for the first step)
         if (sig.aborted) break;
-        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...polEnv, ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
+        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...polEnv, ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name, ...(opts.item ? { AFS_ITEM: typeof opts.item.value === 'string' ? opts.item.value : JSON.stringify(opts.item.value), AFS_ITEM_INDEX: String(opts.item.index), AFS_ITEM_TOTAL: String(opts.item.total) } : {}) }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
         r.stdout = hide(r.stdout); r.stderr = hide(r.stderr); // a credential printed by the command never reaches the output or the activity
         log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 20000), isError: r.code !== 0 });
         output = takeRoutes(r.stdout.trim());
@@ -781,7 +865,7 @@ export async function runFinally(flow, run, { input = '', data = new Map(), stat
 /** Paused runs waiting for a review decision: `${runId}:${stepId}` -> {when, resolve} (spec 18 breaks). */
 const pendingReviews = new Map();
 const REVIEW_ACTIONS = { before: ['continue', 'skip', 'stop'], after: ['continue', 'edit', 'retry', 'stop'] };
-const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed', 'rehearsal']);
+const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed', 'rehearsal', 'empty']);
 
 /**
  * Run the whole flow (or a single step with `only`). Returns runId immediately.
@@ -977,6 +1061,7 @@ export function startRun(flowId, { input = '', only = null, trigger = 'manual', 
               store.saveRun(run);
               break;
             }
+            if (r.status === 'skipped' && r.skipReason === 'empty') { notRouted.add(id); continue; } // "para cada" with no elements: what follows does not run
             data.set(id, { output: r.output, json: r.json, files: r.files || [], actions: r.actions || [], pinned: !!r.pinned, routes: r.routes || [] });
             if (FAILED.has(r.status) && !(r.status === 'skipped' && NOT_A_FAILURE.has(r.skipReason))) failed.add(id);
           }

@@ -385,6 +385,14 @@ app.put('/api/flows/:id', wrap((req, res) => {
     const keep = marked.length > 1 ? marked.find((s) => !byId.get(s.id)?.coordinator) || marked[0] : marked[0];
     for (const s of steps) if (s !== keep && 'coordinator' in s) Reflect.deleteProperty(s, 'coordinator');
   }
+  // spec 15 DATA-10: "para cada" — {path ("" = the JSON itself), from?, parallel 1-4, max 1-50}
+  for (const s of steps) {
+    if (!('forEach' in s)) continue;
+    const fe = s.forEach;
+    if (!fe || typeof fe !== 'object' || typeof fe.path !== 'string') { Reflect.deleteProperty(s, 'forEach'); continue; }
+    const n = (v, lo, hi, d) => Math.min(hi, Math.max(lo, Math.round(Number(v)) || d));
+    s.forEach = { path: fe.path.trim().slice(0, 200), ...(typeof fe.from === 'string' && fe.from.trim() ? { from: fe.from.trim().slice(0, 120) } : {}), parallel: n(fe.parallel, 1, 4, 1), max: n(fe.max, 1, 50, 20) };
+  }
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);

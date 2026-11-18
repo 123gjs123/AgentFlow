@@ -137,6 +137,7 @@ export function StepPanel({ flow, step, catalog, live, running, tab, setTab, onC
               <input type="checkbox" checked={!!step.coordinator} onChange={(e) => onChange({ coordinator: e.target.checked || undefined })} /> 🧭 Coordinador del flujo <span className="muted small">(atiende el chat general y decide qué step responde{flow.steps.some((x) => x.coordinator && x.id !== step.id) ? `; hoy lo es «${flow.steps.find((x) => x.coordinator && x.id !== step.id).name}» y dejará de serlo` : ''})</span>
             </label>
           )}
+          <ForEachBox flow={flow} step={step} onChange={onChange} />
           <div className="ctx-block" data-testid="step-context">
             <div className="ctx-title">📎 Contexto{(step.contextSources || []).length ? ` (${step.contextSources.length})` : ''}</div>
             {step.kind === 'command'
@@ -409,6 +410,41 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
 
 // ---------------- arrow (edge) settings: spec 18 ----------------
 /** Steps that always run before `id` (its ancestors): a condition can look at one of their decisions. */
+/** Spec 15 DATA-10: "🔁 Para cada" — the step runs once per element of a JSON list from a step before it. */
+function ForEachBox({ flow, step, onChange }) {
+  const fe = step.forEach;
+  const set = (patch) => onChange({ forEach: { path: '', parallel: 1, max: 20, ...(fe || {}), ...patch } });
+  return (
+    <div className="ctx-block" data-testid="foreach-box">
+      <label className="toggle" title="Corre este step una vez por cada elemento de una lista (por ejemplo, cada ticket que eligió el coordinador). Lo que sigue recibe la lista de resultados.">
+        <input type="checkbox" data-testid="foreach-toggle" checked={!!fe} onChange={(e) => onChange({ forEach: e.target.checked ? { path: '', parallel: 1, max: 20 } : undefined })} /> 🔁 Para cada elemento de una lista
+      </label>
+      {fe && (
+        <div className="foreach-fields">
+          <Field label="Lista" hint="ruta dentro del JSON (ej.: automatizacion, tickets, data.items); vacío = el JSON entero">
+            <input data-testid="foreach-path" value={fe.path || ''} placeholder="automatizacion" onChange={(e) => set({ path: e.target.value })} />
+          </Field>
+          <Field label="De la salida de" hint="por defecto, la primera entrada que trae una lista en esa ruta">
+            <select data-testid="foreach-from" value={fe.from || ''} onChange={(e) => set({ from: e.target.value || undefined })}>
+              <option value="">La entrada que la traiga</option>
+              {ancestorSteps(flow, step.id).map((x) => <option key={x.id} value={x.id}>“{x.name}”</option>)}
+            </select>
+          </Field>
+          <Field label="A la vez" hint="1 = de a uno (ambientes compartidos); hasta 4">
+            <select value={fe.parallel || 1} onChange={(e) => set({ parallel: Number(e.target.value) })}>
+              {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n === 1 ? '1 (de a uno)' : n}</option>)}
+            </select>
+          </Field>
+          <Field label="Máximo" hint="elementos por ejecución (1–50)">
+            <input type="number" min="1" max="50" value={fe.max || 20} onChange={(e) => set({ max: Number(e.target.value) || 20 })} />
+          </Field>
+          <p className="muted small">En la tarea o el comando: <code>{'{{item}}'}</code>, <code>{'{{item.key}}'}</code>, <code>{'{{item.index}}'}</code>/<code>{'{{item.total}}'}</code>. Los comandos también reciben <code>$env:AFS_ITEM</code>. Si la lista viene vacía, este step y lo que sigue no corren.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ancestorSteps(flow, id) {
   const seen = new Set(); const stack = [id];
   while (stack.length) { const cur = stack.pop(); for (const e of flow.edges) if (e.target === cur && !seen.has(e.source)) { seen.add(e.source); stack.push(e.source); } }

@@ -52,6 +52,14 @@ function resolveKey(key, ctx) {
   if (key === 'run.short') return String(ctx.runId ?? '').replace(/^r_/, '');
   if (key === 'run.date') return new Date().toISOString().slice(0, 10);
   if (key === 'upstream') return ctx.upstream ?? '';
+  // Spec 15 DATA-10: the element of a "para cada" step ({{item}}, {{item.key}}, {{item.index}}, {{item.total}})
+  if (key === 'item' || key.startsWith('item.')) {
+    if (!ctx.item) return null;
+    const sub = key.slice(5);
+    if (sub === 'index') return String(ctx.item.index);
+    if (sub === 'total') return String(ctx.item.total);
+    return show(sub ? getPath(ctx.item.value, sub) : ctx.item.value);
+  }
   if (key.startsWith('vars.')) { const k = key.slice(5); return show(ctx.vars?.[k] ?? getPath(ctx.vars, k)); }
   if (key.startsWith('steps.') && ctx.flow) return resolveStepRef(ctx.flow, key.slice(6), ctx.data, ctx);
   // Credentials (spec 26): only in commands (ctx.quote), where the value travels in an env var. A prompt never gets one.

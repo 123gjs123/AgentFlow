@@ -22,7 +22,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 12 | [Per-step external invocation](12-step-invocation.md) | Proposed |
 | 13 | [Skill sources: URL, folder, zip](13-skill-sources.md) | Proposed |
 | 14 | [Step outputs: handoff, actions, deliverables](14-step-outputs-and-actions.md) | Partial (handoff and detected actions via spec 15) |
-| 15 | [Data passing between steps](15-data-passing.md) | Implemented ("for each" proposed; amended by 16: pins and stale refs) |
+| 15 | [Data passing between steps](15-data-passing.md) | Implemented ("for each" 2026-11-18, e2e `test/e2e/27-*`; amended by 16: pins and stale refs) |
 | 16 | [Run reliability, observability and step verification](16-run-reliability-and-verification.md) | Implemented (round 1, 2026-11-10; exceptions listed in the spec) |
 | 17 | [Step context box and integration helper](17-step-context-and-integration-helper.md) | Implemented with exceptions (2026-11-11; round-3 fixes applied, see the spec) |
 | 18 | [Arrows on any side, routing, reusable boxes and breaks](18-routing-and-breaks.md) | Implemented (2026-11-12; e2e: `test/e2e/10-*`, `11-*`) |

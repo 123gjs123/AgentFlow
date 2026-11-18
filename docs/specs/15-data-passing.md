@@ -1,6 +1,6 @@
 # 15 — Data passing between steps
 
-**Status:** Implemented (DATA-1 … DATA-9). DATA-10 ("for each") is proposed. Amended by spec 16 (2026-11-10): DATA-4 and DATA-9 below.
+**Status:** Implemented (DATA-1 … DATA-10; DATA-10 "for each" on 2026-11-18, e2e `test/e2e/27-for-each.test.mjs`). Amended by spec 16 (2026-11-10): DATA-4 and DATA-9 below.
 
 ## Summary
 
@@ -31,7 +31,7 @@ What we **added** that n8n doesn't need: choosing how much upstream context goes
 | DATA-7 | **Command steps** receive upstream text on stdin and in `STEP_UPSTREAM`, upstream JSON as `{stepName: json}` in `STEP_UPSTREAM_JSON`, and the flow input in `FLOW_INPUT`. |
 | DATA-8 | **Input/Output view** (step → "Datos" tab). *Input:* each upstream step with its size, JSON flag and summarised flag, the exact prompt sent (copyable), the step's system instructions, or, for commands, the rendered command and stdin. *Output:* JSON, text, files written, and actions performed. |
 | DATA-9 | **Pin data.** Pin the last output, or write test data by hand (text and/or JSON). During a flow run a pinned step **is not executed**: the activity log says so, and downstream steps receive the pinned data. An explicit single-step run still executes the step and keeps the pin. Pins are server-managed (UI saves can't overwrite them), shown with 📌 on the node and the tab, and removed with "Desfijar". **Spec 16 EXT-10:** external runs (API, CLI, MCP, webhook) ignore pins unless the request sets `usePins: true` (CLI `--pins`); the summary lists `usedPins`. UI runs still use pins. |
-| DATA-10 | *(Proposed)* **For each.** Run a step once per element of an upstream JSON array (e.g. per ticket), with limited parallelism, and collect the results into an array. |
+| DATA-10 | **For each.** Run a step once per element of an upstream JSON array (e.g. per ticket), with limited parallelism, and collect the results into an array. See "For each (DATA-10)" below. |
 
 **Detected side effects.** During AI runs, files written with `Write` / `Edit` are listed as `files`. MCP calls whose tool name starts with create / add / edit / update / transition / delete / send / share / trash / copy / move / upload / post are listed as `actions` `{tool, server, ok, input, result}`. Nodes show ⚡ N. This is the "skill-managed actions" part of spec 14 (3.4).
 
@@ -44,6 +44,43 @@ What we **added** that n8n doesn't need: choosing how much upstream context goes
 "lastRun": { …, "json": {}, "files": [], "actions": [], "pinned": false }
 // run.steps[id]: + json, files, actions, pinned, inputView { kind: ai|command, mode, prompt, system, command, stdin, upstream[] }
 ```
+
+## For each (DATA-10)
+
+`step.forEach = { path, from?, parallel, max }`. It is saved sanitised, and unticking "🔁 Para cada" removes it.
+
+| Field | Meaning |
+|---|---|
+| `path` | Where the list is in the JSON (`automatizacion`, `data.items`). `""` means the JSON itself. |
+| `from` | The step whose output holds the list: an id or a name, in this run, or else its last output. Without it, the first incoming arrow whose JSON has an array at `path`. |
+| `parallel` | How many elements run at once, 1 to 4. The default is 1, one at a time, because the environments are shared. |
+| `max` | At most this many elements per run, 1 to 50, default 20. The rest are dropped with a warning. |
+
+**What each element gets**
+- An extra input "Elemento i de N" with the element, as text and as JSON.
+- Templates `{{item}}`, `{{item.<path>}}`, `{{item.index}}` and `{{item.total}}`. In commands they travel as environment variables, like every template value.
+- Command steps also get `AFS_ITEM` (the text, or the JSON for an object), `AFS_ITEM_INDEX` and `AFS_ITEM_TOTAL`.
+
+**The run**
+- Each element is a nested run of the same step, `run.steps["<id>~<i>"]`, with its own events, usage and limits.
+- The step's own record carries `forEach {total, from, parallel, items[{i, label, key, status}]}`. Its activity logs one line per element (▶ / ✓ / ✗).
+- The label of an element is its `key`, `ticket`, `id`, `name`, `nombre` or `title`, or else the start of its JSON.
+
+**The result**
+- `output`: one section per element ("## SBK-1 — success").
+- `json`: `[{item, status, json?, output, error?}]`, which is what the following steps receive.
+- Files, actions and routes are joined, and usage is added up.
+
+**Errors and the empty case**
+- If an element fails, the others still run. The step ends in `error` with code `FOR_EACH_FAILED` ("Fallaron 1 de 3: B").
+- A source that is not a list fails with `FOR_EACH_SOURCE` and says what it found.
+- An empty list skips the step with `skipReason: 'empty'`, which is not a failure, and the steps after it do not run (`not_routed`).
+
+**Exceptions**
+- A pinned step returns its pin; it does not iterate.
+- A "break after" pauses once, on the combined result. "Retry" runs every element again.
+
+**UI:** a "🔁 Para cada elemento de una lista" box in the step's config (list, "de la salida de" with the step's ancestors, how many at once, maximum), and 🔁 on the node.
 
 ## API
 
