@@ -158,3 +158,13 @@ The adversarial reviewer re-attacked commit 26ef0d1. What it found, all fixed an
 | Minor: a secret cut at 200 characters escaped the mask. "From" refused a parent skipped in a break or by a hook. AI checks had no time limit, so they could hold the flow's queue. | Fields are masked before any clip. `review`/`hook` skips are accepted. Each watch check stops at 3 minutes. |
 
 The reviewer's and coordinator's instructions now say that values go attached and paths are relative to the repo.
+
+### Fourth pass of the adversarial review
+
+Round-3 findings #1 and #2: **FIXED** (tested). No new way was found to write, run a program, reach the network or read outside the repo with the allowed options.
+
+Two low items were closed:
+- **Untracked listings removed.** `ls-files -o` and `status -unormal/-uall` are gone: a junction inside the working tree let them list file names outside the repo (not their contents).
+- **`blame` and `grep` get `--no-textconv`,** so the repo's textconv drivers never run.
+
+**Trust boundary (documented).** A malicious `.git/config` (`core.sshCommand`, hooks, `includeIf`, `gitdir:` files, alternates) in a repository the flow names is a hostile clone. The app's own `git fetch`/`log` calls and the person's own git use would follow it anyway. The helper neutralises the pager, `core.fsmonitor`, external diff and textconv for its own calls. Only add repositories you trust to a flow.

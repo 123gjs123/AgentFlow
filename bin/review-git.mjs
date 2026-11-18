@@ -26,9 +26,10 @@ const ALLOW = {
   diff: { flags: ['--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--cached', '--staged', '-w', '--ignore-all-space', '--minimal', '--word-diff', '--merge-base'], val: ['-U', '--unified', '--diff-filter'] },
   branch: { flags: ['-a', '--all', '-r', '--remotes', '-l', '--list', '-v', '-vv', '--show-current', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at'], val: ['--sort', '--format'] },
   tag: { flags: ['-l', '--list', '--contains', '--no-contains', '--merged', '--no-merged', '--points-at'], val: ['--sort', '--format'] },
-  status: { flags: ['-s', '--short', '-b', '--branch', '--porcelain', '--porcelain=v1', '--porcelain=v2', '-uno', '-unormal', '-uall'] },
+  // untracked listings are out: a junction inside the working tree would list file NAMES outside the repo (adversarial, round 4)
+  status: { flags: ['-s', '--short', '-b', '--branch', '--porcelain', '--porcelain=v1', '--porcelain=v2', '-uno'] },
   'rev-parse': { flags: ['--abbrev-ref', '--short', '--verify', '--quiet', '-q', '--symbolic-full-name', '--show-toplevel', '--is-inside-work-tree'] },
-  'ls-files': { flags: ['--cached', '-c', '--others', '-o', '--exclude-standard', '-m', '--modified', '-d', '--deleted'] },
+  'ls-files': { flags: ['--cached', '-c', '-m', '--modified', '-d', '--deleted'] },
   grep: { flags: ['-n', '--line-number', '-i', '--ignore-case', '-l', '--files-with-matches', '-L', '--files-without-match', '-c', '--count', '-w', '--word-regexp', '-v', '--invert-match', '-E', '--extended-regexp', '-F', '--fixed-strings', '-I', '--cached', '-h', '-H', '--heading', '--break', '--and', '--or', '--not', '--all-match'], val: ['-e', '-C', '-A', '-B', '--max-depth', '--context', '--after-context', '--before-context'] },
   'for-each-ref': { flags: [], val: ['--format', '--sort', '--count', '--contains', '--merged', '--no-merged', '--points-at'] },
   'merge-base': { flags: ['--is-ancestor', '--all', '--fork-point'] },
@@ -89,7 +90,7 @@ if (r.error) fail(r.error);
 if (LIST_MODE[sub] && r.positional.length && !rest.some((a) => LIST_MODE[sub].test(a))) fail(`git ${sub} solo para listar: con un nombre o patrón usa --list (o -a, -r, --contains…)`);
 
 try {
-  const out = execFileSync('git', ['-C', allowed, '-c', 'core.pager=cat', '-c', 'diff.external=', '-c', 'core.fsmonitor=false', '--no-pager', sub, ...(['diff', 'show', 'log'].includes(sub) ? ['--no-ext-diff', '--no-textconv'] : []), ...rest], {
+  const out = execFileSync('git', ['-C', allowed, '-c', 'core.pager=cat', '-c', 'diff.external=', '-c', 'core.fsmonitor=false', '--no-pager', sub, ...(['diff', 'show', 'log'].includes(sub) ? ['--no-ext-diff', '--no-textconv'] : sub === 'blame' || sub === 'grep' ? ['--no-textconv'] : []), ...rest], {
     encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, timeout: 60000, windowsHide: true,
     env: { ...process.env, GIT_PAGER: 'cat', PAGER: 'cat', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_EXTERNAL_DIFF: '' },
   });
