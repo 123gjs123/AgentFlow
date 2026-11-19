@@ -1,7 +1,7 @@
 // Spec 13: searchable skill picker grouped by source + "＋ Agregar skill" (URL / carpeta / zip → revisión → instalar
 // para este flujo o para tu Claude Code), quitar y actualizar las del flujo.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { api } from './api.js';
+import { api, onWs } from './api.js';
 import { Modal } from './Help.jsx';
 import { FsPicker } from './Sources.jsx';
 
@@ -17,6 +17,11 @@ export default function SkillPicker({ flow, catalog, value, onChange }) {
   const [updating, setUpdating] = useState(null);
   const [msg, setMsg] = useState('');
   const box = useRef(null);
+  const [upd, setUpd] = useState({ flow: {}, user: {} });
+  const loadUpd = () => api.get(`/api/flows/${encodeURIComponent(flow.id)}/skills/updates`).then(setUpd).catch(() => {});
+  useEffect(() => { loadUpd(); return onWs((m) => { if (m.type === 'skills.updates' || m.type === 'catalog.changed') loadUpd(); }); }, [flow.id]);
+  const updOf = (s) => (s.source === 'flow' ? upd.flow[s.name] : s.source === 'user' && s.managed ? upd.user[s.name] : null);
+  const scopeOf = (s) => (s.source === 'user' ? 'user' : 'flow');
   useEffect(() => { const h = (e) => { if (box.current && !box.current.contains(e.target)) setOpen(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
   const skills = catalog.skills || [];
   const sel = useMemo(() => { const order = ['flow', 'linked', 'project', 'user', 'claude.ai']; return skills.filter((s) => s.name === value).sort((a, b) => (order.indexOf(groupOf(a)) + 1 || 9) - (order.indexOf(groupOf(b)) + 1 || 9))[0]; }, [skills, value]);
@@ -24,12 +29,17 @@ export default function SkillPicker({ flow, catalog, value, onChange }) {
   const hits = skills.filter((s) => !needle || s.name.toLowerCase().includes(needle) || String(s.description || '').toLowerCase().includes(needle));
   const pick = (name) => { onChange(name); setOpen(false); setQ(''); };
   async function removeIt() {
-    if (!confirm(`¿Quitar «${sel.name}» de este flujo?${sel.source === 'linked' ? ' (tu carpeta no se toca)' : ''}`)) return;
-    try { await api.del(`/api/skills/${encodeURIComponent(sel.name)}?scope=flow&flowId=${encodeURIComponent(flow.id)}`); setMsg('Quitada del flujo'); } catch (e) { setMsg(e.message); }
+    const user = sel.source === 'user';
+    if (!confirm(user ? `¿Quitar «${sel.name}» de tu Claude Code? Dejará de estar en TODAS tus sesiones.` : `¿Quitar «${sel.name}» de este flujo?${sel.source === 'linked' ? ' (tu carpeta no se toca)' : ''}`)) return;
+    try { await api.del(`/api/skills/${encodeURIComponent(sel.name)}?scope=${user ? 'user&confirm=1' : 'flow'}&flowId=${encodeURIComponent(flow.id)}`); setMsg(user ? 'Quitada de tu Claude Code' : 'Quitada del flujo'); } catch (e) { setMsg(e.message); }
+  }
+  async function checkAll() {
+    setMsg('Buscando actualizaciones de las skills de este flujo…');
+    try { const r = await api.post(`/api/flows/${encodeURIComponent(flow.id)}/skills/check-updates`, {}); setUpd({ flow: r.flow, user: r.user }); const n = Object.values(r.flow).filter((x) => x.available).length; setMsg(n ? `${n} con actualización (⬆)` : 'Todas al día'); } catch (e) { setMsg(e.message); }
   }
   async function checkUpdate() {
     setMsg('Buscando actualización…');
-    try { const u = await api.post(`/api/skills/${encodeURIComponent(sel.name)}/update?scope=flow&flowId=${encodeURIComponent(flow.id)}`, {}); setMsg(''); if (!u.changed) setMsg('Ya está al día'); else setUpdating(u); } catch (e) { setMsg(e.message); }
+    try { const u = await api.post(`/api/skills/${encodeURIComponent(sel.name)}/update?scope=${scopeOf(sel)}&flowId=${encodeURIComponent(flow.id)}`, {}); setMsg(''); loadUpd(); if (!u.changed) setMsg('Ya está al día'); else setUpdating(u); } catch (e) { setMsg(e.message); }
   }
   return (
     <div className="skill-picker" ref={box} data-testid="skill-picker">
@@ -37,6 +47,7 @@ export default function SkillPicker({ flow, catalog, value, onChange }) {
         <input data-testid="skill-search" style={{ flex: 1 }} placeholder={value ? `${value} — escribe para buscar otra` : 'Buscar skill por nombre o descripción…'} value={q} onFocus={() => setOpen(true)} onChange={(e) => { setQ(e.target.value); setOpen(true); }}
           onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); if (e.key === 'Enter' && hits[0]) pick(hits[0].name); }} />
         <button className="small" data-testid="skill-add" onClick={() => setAdding(true)}>＋ Agregar skill</button>
+        {Object.keys(upd.flow).length + skills.filter((s) => s.managed).length > 0 && <button className="ghost small" data-testid="skill-check-all" title="Busca actualizaciones de las skills de este flujo" onClick={checkAll}>⟳</button>}
       </div>
       {open && (
         <div className="skill-list" role="listbox" data-testid="skill-list">
@@ -48,7 +59,7 @@ export default function SkillPicker({ flow, catalog, value, onChange }) {
                 <div className="skill-group">{label}</div>
                 {list.map((s) => (
                   <button key={s.path} role="option" aria-selected={s.name === value} className={`skill-opt ${s.name === value ? 'active' : ''}`} onMouseDown={(e) => { e.preventDefault(); pick(s.name); }} title={s.description}>
-                    <b>{s.name}</b><span className="muted small">{s.source !== g ? ` · ${s.source}` : ''} {String(s.description || '').slice(0, 140)}</span>
+                    <b>{s.name}{updOf(s)?.available && <span className="badge warn" title="Hay una versión nueva en su origen"> ⬆</span>}</b><span className="muted small">{s.source !== g ? ` · ${s.source}` : ''} {String(s.description || '').slice(0, 140)}</span>
                   </button>
                 ))}
               </div>
@@ -61,7 +72,10 @@ export default function SkillPicker({ flow, catalog, value, onChange }) {
       {sel && (
         <div className="muted small" data-testid="skill-desc">
           <b>{sel.name}</b> · {sel.source}{sel.description ? ` — ${sel.description}` : ''}
+          {updOf(sel)?.available && <span className="badge warn" data-testid="skill-update-badge"> ⬆ actualización disponible</span>}
+          {updOf(sel)?.error && <span className="warn-text" title={updOf(sel).error}> ⚠ no se pudo revisar su origen</span>}
           {(sel.source === 'flow' || sel.source === 'linked') && <> {' '}{sel.source === 'flow' && <button className="ghost small" onClick={checkUpdate}>Buscar actualización</button>}<button className="ghost small" onClick={removeIt}>Quitar del flujo</button></>}
+          {sel.source === 'user' && sel.managed && <> {' '}<button className="ghost small" onClick={checkUpdate}>Buscar actualización</button><button className="ghost small" data-testid="skill-remove-user" onClick={removeIt}>Quitar de mi Claude Code</button></>}
         </div>
       )}
       {msg && <div className="muted small" data-testid="skill-msg">{msg}</div>}
@@ -74,9 +88,10 @@ export default function SkillPicker({ flow, catalog, value, onChange }) {
 const toB64 = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = () => rej(new Error('No se pudo leer el archivo')); r.readAsDataURL(file); });
 
 /** "＋ Agregar skill": source → review → scope → install (SKSRC-1..8). `initial` = an inspection already made (import). */
-export function AddSkillModal({ flow, initial = null, onClose, onDone }) {
+export function AddSkillModal({ flow, initial = null, initialUrl = '', expectSha = null, onClose, onDone }) {
   const [tab, setTab] = useState('url');
-  const [url, setUrl] = useState('');
+  const [url, setUrl] = useState(initialUrl);
+  const [fetching, setFetching] = useState(null); // a skill of an imported bundle that travels as a reference
   const [folder, setFolder] = useState('');
   const [mode, setMode] = useState('copy');
   const [zipPath, setZipPath] = useState('');
@@ -156,8 +171,14 @@ export function AddSkillModal({ flow, initial = null, onClose, onDone }) {
       {insp && (
         <div className="pad" data-testid="skill-review">
           <p className="muted small">Revisa antes de instalar: nada se escribió todavía. Las skills pueden traer scripts que Claude podría ejecutar cuando la use.</p>
+          {expectSha && <div className={insp.skills.some((s) => s.sha256 === expectSha) ? 'small' : 'warn-text small'} data-testid="skill-sha-check">{insp.skills.some((s) => s.sha256 === expectSha) ? '✓ Coincide con la versión que se exportó' : '⚠ Cambió desde que se exportó el flujo: revisa los archivos'}</div>}
           <div className="small muted">Origen: {insp.origin?.type === 'bundle' ? 'paquete importado' : insp.origin?.source}{insp.origin?.ref ? ` · rama ${insp.origin.ref}` : ''}{insp.origin?.subPath ? ` · ${insp.origin.subPath}` : ''}</div>
-          {(insp.notEmbedded || []).length > 0 && <div className="warn-text small">No vinieron en el paquete (agrégalas a mano): {insp.notEmbedded.map((x) => `${x.name}${x.source ? ` (${x.source})` : ''}`).join(', ')}</div>}
+          {(insp.notEmbedded || []).length > 0 && (
+            <div className="callout warn small" data-testid="skill-not-embedded">No vinieron dentro del paquete:
+              <ul>{insp.notEmbedded.map((x) => <li key={x.name}><b>{x.name}</b>{x.fetchable ? <> — origen <code>{x.source}</code> <button className="small" data-testid={`fetch-${x.name}`} onClick={() => setFetching(x)}>Traer desde {(() => { try { return new URL(x.source).host; } catch { return 'el origen'; } })()}</button></> : ' — sin URL de origen: agrégala a mano'}</li>)}</ul>
+              <span className="muted">Traer descarga desde esa dirección (puede ser de tu red interna) y te muestra la revisión antes de instalar.</span>
+            </div>
+          )}
           <ul className="skill-review-list">
             {insp.skills.map((s) => (
               <li key={s.relDir + s.name} data-testid={`review-${s.name}`}>
@@ -166,6 +187,7 @@ export function AddSkillModal({ flow, initial = null, onClose, onDone }) {
                   <b>{s.name}</b>{s.hasScripts && <span className="badge warn" title="Contiene scripts o ejecutables">⚠ contiene scripts</span>}<span className="muted small">{s.files.length} archivo(s) · {kb(s.size)}</span>
                 </label>
                 <div className="small">{s.description}</div>
+                {s.importedFrom && <div className="small muted">Se buscarán actualizaciones en: <code>{s.importedFrom}</code></div>}
                 {s.allowedTools && <div className="small muted">allowed-tools: <code>{s.allowedTools}</code></div>}
                 {(s.warnings || []).map((w) => <div key={w} className="warn-text small">⚠ {w}</div>)}
                 <details className="small" open={(s.warnings || []).length > 0}><summary>Front matter (lo que Claude Code aplica)</summary><pre className="mono small">{s.frontmatter}</pre></details>
@@ -199,6 +221,7 @@ export function AddSkillModal({ flow, initial = null, onClose, onDone }) {
         <button className="ghost" onClick={onClose}>Cancelar</button>
         {insp && <button className="primary" data-testid="skill-install" disabled={busy || !chosen.size || (scope === 'user' && !confirmUser)} onClick={doInstall}>{busy ? 'Instalando…' : `Instalar ${chosen.size}`}</button>}
       </div>
+      {fetching && <AddSkillModal flow={flow} initialUrl={fetching.source} expectSha={fetching.sha256} onClose={() => setFetching(null)} onDone={(inst) => { setFetching(null); setInsp((i) => ({ ...i, notEmbedded: (i.notEmbedded || []).filter((x) => x.name !== fetching.name) })); onDone && insp.skills.length === 0 && (insp.notEmbedded || []).length <= 1 ? onDone(inst) : null; }} />}
     </Modal>
   );
 }
@@ -217,12 +240,14 @@ function lineDiff(a, b) {
 /** Line diff of SKILL.md (previous → new) and "Reemplazar" (SKSRC-11 v1). */
 function UpdateModal({ flow, u, onClose, onDone }) {
   const [err, setErr] = useState('');
+  const [ok, setOk] = useState(u.scope !== 'user');
   const a = u.previous.split(/\r?\n/); const b = u.current.split(/\r?\n/);
   const lines = lineDiff(a, b);
   async function apply() {
     try {
       const resolve = { [u.sourceName]: u.sourceName === u.name ? { action: 'replace' } : { action: 'rename', to: u.name, replace: true } };
-      await api.post('/api/skills/install', { token: u.token, names: [u.sourceName], scope: 'flow', flowId: flow.id, resolve });
+      const r = await api.post('/api/skills/install', { token: u.token, names: [u.sourceName], scope: u.scope || 'flow', flowId: flow.id, resolve, ...(u.scope === 'user' ? { confirmUser: true } : {}) });
+      if (r.shadows?.length) alert(`Actualizada. Ojo: ${r.shadows.length} flujo(s) tienen su propia skill «${u.name}».`);
       onDone();
     } catch (e) { setErr(e.message); }
   }
@@ -237,7 +262,7 @@ function UpdateModal({ flow, u, onClose, onDone }) {
       {(u.candidate?.warnings || []).map((w) => <div key={w} className="warn-text small">⚠ {w}</div>)}
       {(u.candidate?.problems || []).map((p) => <div key={p} className="warn-text small">✖ {p}</div>)}
       {err && <div className="error-bar">{err}</div>}
-      <div className="review-actions"><button className="ghost" onClick={onClose}>Cancelar</button><button className="primary" data-testid="skill-update-apply" disabled={(u.candidate?.problems || []).length > 0} onClick={apply}>Reemplazar</button></div>
+      <div className="review-actions"><button className="ghost" onClick={onClose}>Cancelar</button>{u.scope === 'user' && <label className="small warn-text"><input type="checkbox" checked={ok} onChange={(e) => setOk(e.target.checked)} /> Entiendo que cambia la skill en todas mis sesiones de Claude Code</label>}<button className="primary" data-testid="skill-update-apply" disabled={!ok || (u.candidate?.problems || []).length > 0} onClick={apply}>Reemplazar</button></div>
     </Modal>
   );
 }

@@ -5,14 +5,14 @@ import { Modal } from './Help.jsx';
 
 /** Download the flow as <name>.afsflow.json with the chosen options. */
 export function ExportModal({ flow, onClose }) {
-  const [o, setO] = useState({ memory: true, chats: false, runs: false, pins: false, secrets: false });
+  const [o, setO] = useState({ memory: true, chats: false, runs: false, pins: false, secrets: false, skills: 'embed' });
   const [err, setErr] = useState('');
   const hasSecretVars = Object.keys(flow.vars || {}).some((k) => /(token|secret|password|passwd|pwd|apikey|api_key|credential|private|auth)/i.test(k));
   async function download() {
     setErr('');
     try {
       await pendingSave.flush();
-      const q = new URLSearchParams({ memory: o.memory ? '1' : '0', chats: o.chats ? '1' : '0', runs: o.runs ? '1' : '0', pins: o.pins ? '1' : '0', secrets: o.secrets ? '1' : '0' });
+      const q = new URLSearchParams({ memory: o.memory ? '1' : '0', chats: o.chats ? '1' : '0', runs: o.runs ? '1' : '0', pins: o.pins ? '1' : '0', secrets: o.secrets ? '1' : '0', skills: o.skills === 'none' ? '0' : o.skills });
       const r = await fetch(`/api/flows/${flow.id}/export?${q}`);
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
       const name = (r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'flujo.afsflow.json';
@@ -28,6 +28,13 @@ export function ExportModal({ flow, onClose }) {
       <p className="muted small">Se descarga un archivo <code>.afsflow.json</code> con los steps, flechas, variables, contexto, requisitos y “Al terminar”. Nunca incluye sesiones de Claude, ejecuciones en curso, tu token ni la clave de la interfaz. La programación se exporta desactivada. Quien lo importe verá los requisitos y, si trae comandos o acceso a terminal, lo tendrá que revisar antes de ejecutarlo.</p>
       <div className="col">
         {box('memory', 'Incluir memoria', 'hechos aprendidos por los steps')}
+        <label className="small" data-testid="export-skills">Skills de este flujo:{' '}
+          <select value={o.skills} onChange={(e) => setO({ ...o, skills: e.target.value })}>
+            <option value="embed">incluir sus archivos (hasta 5 MB cada una)</option>
+            <option value="ref">solo la URL de origen (quien importa la trae y la revisa)</option>
+            <option value="none">no incluir</option>
+          </select>
+        </label>
         {box('chats', 'Incluir chats')}
         {box('runs', 'Incluir historial de ejecuciones', 'las últimas 50')}
         {box('pins', 'Incluir salidas fijadas', 'pueden contener datos reales')}

@@ -1,6 +1,6 @@
 # 13 — Skill sources: load skills from a URL, a folder or a zip
 
-**Status:** Implemented (v1, 2026-11-19) — closed after architect review, 4 adversarial passes + closing check
+**Status:** Implemented in full (2026-11-19): v1 + completion (SKSRC-11 update checks, SKSRC-12 references, SKSRC-15 explicit proxy, SKSRC-14 user skills), each with architect review, adversarial passes and real simulations
 
 ## Summary
 
@@ -211,3 +211,84 @@ Spec 13 v1 is closed. It went through one architect review, four adversarial pas
 - an explicit corporate proxy (`HTTPS_PROXY`);
 - replacing a user skill while a flow has one with the same name;
 - `afs-skill-*` folders left by a hard kill, which are swept after 1 h.
+
+## Completion (everything deferred in v1)
+
+An architect review came first. It caught three things in the v1 design, all fixed:
+- Imported skills lost their origin.
+- Background checks could push a person's open review out of the queue.
+- Git failed behind a proxy-only network.
+
+**SKSRC-11: update checks, in the 🔔 Novedades model.** The app does the comparing, and nothing is installed without a review.
+- **What is checked:** `checkSkillUpdates(flowId | '_user')` checks every app-managed skill that is not linked:
+  - **Git:** `git ls-remote` of the ref, with the same hardening as a clone. A peeled tag counts, and a ref that is a 40-hex SHA is pinned and never checked. The repo is re-read only when its head moved. A commit outside the skill moves the head but is not an update, and the new head is stored so the next check does not clone again.
+  - **zip or SKILL.md URL:** `If-None-Match` / `If-Modified-Since`, so an unchanged source answers 304 with no full download.
+  - **Copied folder:** the hash of its source.
+- **State:** it lives in `<DATA>/skill-updates/<key>.json`, and each result is bound to the installed version (`forSha`). Installing the update clears the flag on its own. A result computed for an origin that changed meanwhile, for example by an install during the check, is dropped. The write merges per skill into the current file, so a newer manual check wins.
+- **Background scheduler:** first look about 2 min after boot, then every 6 h. It runs one check at a time, at most once an hour per skill, and never on quarantined flows. In the background:
+  - there are no credential prompts (`GCM_INTERACTIVE=never`, `credential.interactive=never`, empty askPass);
+  - a source that asks for credentials is marked and not retried until a manual check works, which avoids account lockouts;
+  - an origin that came in a bundle waits for one manual check.
+- **Endpoints:**
+  - `GET /api/flows/:id/skills/updates`
+  - `POST /api/flows/:id/skills/check-updates`
+  - `POST /api/skills/check-updates` (user scope)
+- **🔔 attention item `skillupd:<flow>`:** it covers the flow's own skills plus the user skills its steps use, and it opens the step.
+- **Picker:** ⬆ on the skill, plus "⟳" to check them all.
+- **Running flows:** replacing or removing a skill while a flow that uses it is running is refused (`FLOW_RUNNING`). That includes user skills.
+
+**SKSRC-12: reference by origin URL.**
+- **Export:** you choose how skills travel: "incluir sus archivos", "solo la URL de origen" or "no incluir". Only https origins travel; this PC's local paths never do. A skill over 5 MB with an https origin travels as a reference.
+- **Import:**
+  - Every origin is re-parsed; its kind, url, ref and subPath come from its source, and a head is never taken from a bundle.
+  - Each skill in the review shows the URL where updates will be looked for.
+  - A referenced skill has a "Traer desde <host>" button. It runs only on a click, opens the normal review and says whether the result matches the exported version (sha256).
+
+**SKSRC-15: explicit corporate proxy.**
+- **Which proxy:** `HTTPS_PROXY` / `NO_PROXY`, and also git's `http.proxy`, so Node and git take the same path.
+- **How it connects:** a `CONNECT` goes to each checked address of the host in turn, and TLS is verified over the tunnel through a dedicated agent, still against the host name. A 407 is a clean `PROXY_AUTH`, and the proxy credentials never appear in errors, origins or state.
+- **Names this PC cannot resolve:** they go to the proxy by name only when a person asked, never in the background. `*.localhost` names and names ending in a dot are blocked before any proxy decision.
+- **Accepted:** an internal name that only the proxy resolves follows the proxy's network policy.
+
+**SKSRC-14 and E:**
+- **Managing your skills:** the catalog marks the user skills the app installed (`managed`), and the picker can update them (with confirmation) or remove them from your Claude Code.
+- **Updating with a same-name flow skill:** updating a managed user skill no longer gets stuck when a flow skill with the same name already coexists. It is reported as `shadows`, and a new name still clashes.
+
+**Not applicable:** duplicating flows, because the app has no such feature.
+
+**Tests:** `32-skill-updates`, 12 tests, offline:
+- a local git repo, an HTTPS server with ETag and delays, a local CONNECT proxy (target IP, man-in-the-middle certificate, NO_PROXY, 407, blocked IP) and a git server that asks for credentials;
+- the scheduler with quarantine, and races;
+- the UI.
+
+**Bugs the tests themselves found:**
+- With `agent:false`, Node ignored the tunnel and went direct. It now uses a dedicated agent.
+- `localhost` was pinned only to `::1`. Every checked address is offered now.
+- Git's "unable to get password" was not recognised as `AUTH_REQUIRED`.
+
+**Real simulation on the real network:**
+- **Inspect:** the real public repo github.com/anthropics/skills was cloned through this machine's TLS proxy in 5.5 s and its skills listed. A tree URL of a single skill gave that skill only.
+- **Run:** the skill was installed for one flow, and the real Claude CLI used it.
+- **Update check:** it worked over the real network (`ls-remote`, no windows).
+- **Export:** a reference export carried its URL.
+
+**Adversarial pass on the completion.** It found no high findings. It found two medium ones, both fixed with tests:
+- by-name tunnelling and `localhost..` reached this machine's loopback through a local proxy;
+- a background check overwrote a manual result.
+
+Five low ones were fixed too:
+- user skills used by a running flow;
+- state left behind for a flow deleted mid-check;
+- bundle origin fields that were trusted;
+- background checks of imported origins before any manual check;
+- the git and Node proxy decisions disagreeing.
+
+**Closing check (closed).** It found nothing high or medium, and the five fixes held against 24 host forms (full-width, percent-encoded, numeric, IPv6 and NAT64 variants). Two low items are fixed too:
+- the "checked by hand" mark no longer carries over to another version;
+- a person's check never joins a background check that is already running.
+
+Accepted:
+- **Precedence, unverified.** Claude Code's own precedence between a user skill and an add-dir skill with the same name has not been verified. The app avoids the case: a new name clashes both ways.
+- **Running flows.** The running-flow guard looks at skill steps only.
+- **Proxies git sees and Node doesn't.** git can use proxies `proxyFor` doesn't read (`http.<url>.proxy`, `ALL_PROXY`, SOCKS); TLS still applies.
+- **A hand-copied skill can look app-installed.** If you copy a skill into `~/.claude/skills` yourself and it carries `.afs-origin.json`, the app treats it as installed by the app.

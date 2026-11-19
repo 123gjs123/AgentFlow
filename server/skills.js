@@ -10,7 +10,9 @@ import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import https from 'node:https';
-import { execFile } from 'node:child_process';
+import http from 'node:http';
+import tls from 'node:tls';
+import { execFile, execFileSync } from 'node:child_process';
 import { DATA } from './store.js';
 import { frontmatter, listSkills } from './catalog.js';
 import { SAFE_GIT } from './safe.js';
@@ -156,6 +158,7 @@ export function parseSource(input) {
   if (!raw || /\s/.test(raw) || raw.startsWith('-')) throw fail(400, 'Pega una URL https:// sin espacios', 'BAD_SOURCE');
   const [base, frag] = raw.split('#');
   let u; try { u = new URL(base); } catch { throw fail(400, 'No es una URL válida', 'BAD_SOURCE'); }
+  if (/\.$/.test(u.hostname)) throw fail(400, 'La URL no puede terminar el nombre del servidor en un punto', 'BAD_SOURCE');
   if (u.protocol !== 'https:') throw fail(400, 'Solo se aceptan URLs https://', 'BAD_SOURCE');
   if (u.username || u.password) throw fail(400, 'La URL no puede llevar usuario o contraseña: el acceso a repos privados usa tu git (administrador de credenciales)', 'BAD_SOURCE');
   const segs = u.pathname.split('/').filter(Boolean).map(decodeURIComponent);
@@ -208,71 +211,139 @@ function blockList() {
 }
 export const blockedIp = (ip) => { const a = String(ip).split('%')[0]; const v = net.isIP(a); if (!v) return true; return blockList().check(a, v === 6 ? 'ipv6' : 'ipv4'); };
 const seam = () => process.env.AFS_SKILLS_ALLOW_LOOPBACK === '1';
-/** Resolves the host and checks EVERY address; returns the addresses (the connection is pinned to them). */
-export async function checkHost(url) {
-  const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
-  const ips = net.isIP(host) ? [host] : (await dns.lookup(host, { all: true }).catch(() => { throw fail(502, `No se pudo resolver ${host}`, 'DOWNLOAD_FAILED'); })).map((x) => x.address);
+/** The explicit proxy for a host (HTTPS_PROXY / https_proxy, minus NO_PROXY), or null. Only http:// proxies. */
+// git's own http.proxy (gitconfig) counts too, so Node downloads and git clones take the same path (L5)
+let gitProxyCache;
+const gitProxy = () => { if (gitProxyCache !== undefined) return gitProxyCache; try { gitProxyCache = execFileSync('git', ['config', '--get', 'http.proxy'], { encoding: 'utf8', timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { gitProxyCache = ''; } return gitProxyCache; };
+export function proxyFor(host) {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy || gitProxy() || '';
+  if (!raw.trim()) return null;
+  const h = String(host).toLowerCase().replace(/^\[|\]$/g, '');
+  const np = String(process.env.NO_PROXY || process.env.no_proxy || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (np.some((n) => n === '*' || h === n.replace(/^\./, '') || h.endsWith(n.startsWith('.') ? n : `.${n}`))) return null;
+  let u; try { u = new URL(raw.includes('://') ? raw : `http://${raw}`); } catch { return null; }
+  return u.protocol === 'http:' ? u : null;
+}
+/** Resolves the host and checks EVERY address; returns the addresses (the connection is pinned to them). Behind an
+ *  explicit proxy a name this PC cannot resolve goes to the proxy as is (it resolves it outside this machine). */
+const LOCAL_NAME = /(^|\.)localhost$/i;
+export async function checkHost(url, { background = false } = {}) {
+  const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.+$/, '');
+  if (!seam() && LOCAL_NAME.test(host)) throw fail(400, 'La URL apunta a esta máquina o a una dirección interna no permitida', 'SOURCE_BLOCKED');
+  const viaProxy = !!proxyFor(host);
+  let ips;
+  if (net.isIP(host)) ips = [host];
+  else {
+    try { ips = (await dns.lookup(host, { all: true })).map((x) => x.address); }
+    catch {
+      if (viaProxy && !background) return []; // the proxy resolves it outside this machine (its network policy applies)
+      throw fail(502, viaProxy ? `${host} solo lo resuelve el proxy: búscala a mano` : `No se pudo resolver ${host}`, 'DOWNLOAD_FAILED');
+    }
+  }
   if (!seam() && ips.some(blockedIp)) throw fail(400, 'La URL apunta a esta máquina o a una dirección interna no permitida', 'SOURCE_BLOCKED');
   return ips;
 }
 const TLS_CODES = /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ALTNAME|UNABLE_TO_GET_ISSUER/i;
 /** One HTTPS GET connected to an address that was checked (no DNS rebinding); system CAs via certs.js, TLS verified. */
-const getOnce = (url, ips, { signal }) => new Promise((resolve, reject) => {
-  const lookup = (hostname, opts, cb) => { const ip = ips[0]; const fam = net.isIP(ip); if (opts?.all) cb(null, [{ address: ip, family: fam }]); else cb(null, ip, fam); };
-  const req = https.get(url, { lookup, headers: { 'User-Agent': 'agent-flow-studio' }, signal: signal || AbortSignal.timeout(60000), timeout: 60000 }, resolve);
-  req.on('error', reject);
+/** CONNECT tunnel through an http proxy to ip:port (the checked address; the name only when the PC cannot resolve it). */
+const tunnel = (proxy, target, signal) => new Promise((resolve, reject) => {
+  const headers = { Host: target };
+  if (proxy.username) headers['Proxy-Authorization'] = `Basic ${Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString('base64')}`;
+  const req = http.request({ host: proxy.hostname, port: Number(proxy.port) || 80, method: 'CONNECT', path: target, headers, signal, timeout: 30000 });
+  req.on('connect', (r, socket) => { if (r.statusCode === 200) resolve(socket); else { socket.destroy(); reject(Object.assign(new Error(`el proxy respondió ${r.statusCode}`), { code: `PROXY_${r.statusCode}` })); } });
+  req.on('timeout', () => req.destroy(Object.assign(new Error('el proxy no responde'), { code: 'PROXY_TIMEOUT' })));
+  req.on('error', reject); req.end();
 });
-async function download(url, { signal: outer, max = MAX_BYTES } = {}) {
+const getOnce = async (url, ips, { signal, conditional = null }) => {
+  const u = new URL(url); const host = u.hostname.replace(/^\[|\]$/g, ''); const port = Number(u.port) || 443;
+  const proxy = proxyFor(host);
+  const opts = { headers: { 'User-Agent': 'agent-flow-studio', ...(conditional?.etag ? { 'If-None-Match': conditional.etag } : {}), ...(conditional?.lastModified ? { 'If-Modified-Since': conditional.lastModified } : {}) }, signal: signal || AbortSignal.timeout(60000), timeout: 60000 };
+  if (proxy) {
+    const targets = ips.length ? ips.map((ip) => `${net.isIP(ip) === 6 ? `[${ip}]` : ip}:${port}`) : [`${host}:${port}`];
+    let socket; let last;
+    for (const target of targets) { try { socket = await tunnel(proxy, target, opts.signal); break; } catch (e) { last = e; if (e.code === 'PROXY_407') break; } }
+    if (!socket) throw last;
+    // TLS over the tunnel, verified against the real host name (system CAs via certs.js)
+    // an agent whose only connection is the tunnel (with agent:false Node would ignore createConnection and go direct)
+    const agent = new https.Agent({ keepAlive: false, maxSockets: 1 });
+    agent.createConnection = () => tls.connect({ socket, servername: net.isIP(host) ? undefined : host, host, rejectUnauthorized: true });
+    opts.agent = agent;
+  } else opts.lookup = (hostname, o, cb) => { if (o?.all) cb(null, ips.map((ip) => ({ address: ip, family: net.isIP(ip) }))); else cb(null, ips[0], net.isIP(ips[0])); }; // only the checked addresses, all of them (IPv6 + IPv4)
+  return new Promise((resolve, reject) => { const req = https.get(url, opts, resolve); req.on('error', reject); });
+};
+async function download(url, { signal: outer, max = MAX_BYTES, conditional = null, background = false } = {}) {
   let cur = url;
   const signal = outer ? AbortSignal.any([outer, AbortSignal.timeout(90000)]) : AbortSignal.timeout(90000);
   for (let hop = 0; hop <= 5; hop++) {
     if (!/^https:\/\//i.test(cur)) throw fail(400, 'La descarga redirigió a una URL que no es https://', 'BAD_SOURCE');
-    const ips = await checkHost(cur);
+    const ips = await checkHost(cur, { background });
     let r;
-    try { r = await getOnce(cur, ips, { signal }); }
+    try { r = await getOnce(cur, ips, { signal, conditional }); }
     catch (e) {
       const c = `${e?.code || ''} ${e?.message || ''}`;
       if (TLS_CODES.test(c)) throw fail(502, 'Certificado no confiable: revisa que el certificado del proxy esté en el almacén del sistema', 'TLS_ERROR');
+      if (e?.code === 'PROXY_407') throw fail(502, 'El proxy pide credenciales (407): revisa HTTPS_PROXY', 'PROXY_AUTH');
+      if (/^PROXY_/.test(e?.code || '')) throw fail(502, `No se pudo descargar a través del proxy: ${e.message}`, 'PROXY_FAILED');
       throw fail(502, `No se pudo descargar: ${e?.code || 'error de red'}`, 'DOWNLOAD_FAILED');
     }
+    if (r.statusCode === 304 && conditional) { r.resume(); return { notModified: true }; }
     if ([301, 302, 303, 307, 308].includes(r.statusCode)) { r.resume(); const loc = r.headers.location; if (!loc) break; cur = new URL(loc, cur).toString(); continue; }
     if (r.statusCode < 200 || r.statusCode >= 300) { r.resume(); throw fail(502, `No se pudo descargar: HTTP ${r.statusCode}`, 'DOWNLOAD_FAILED'); }
     if (Number(r.headers['content-length'] || 0) > max) { r.destroy(); throw fail(413, `La descarga supera ${max / 1048576} MB`, 'ZIP_TOO_BIG'); }
     const chunks = []; let n = 0;
     try { for await (const c of r) { n += c.length; if (n > max) { r.destroy(); throw fail(413, `La descarga supera ${max / 1048576} MB`, 'ZIP_TOO_BIG'); } chunks.push(c); } }
     catch (e) { if (e.status) throw e; throw fail(502, `No se pudo descargar: la conexión se cortó o tardó demasiado (${e.code || 'error'})`, 'DOWNLOAD_FAILED'); }
-    return { buf: Buffer.concat(chunks), type: String(r.headers['content-type'] || '') };
+    return { buf: Buffer.concat(chunks), type: String(r.headers['content-type'] || ''), etag: r.headers.etag ? String(r.headers.etag).slice(0, 200) : null, lastModified: r.headers['last-modified'] ? String(r.headers['last-modified']).slice(0, 100) : null };
   }
   throw fail(502, 'Demasiadas redirecciones', 'DOWNLOAD_FAILED');
 }
 
 // git without hooks, templates, LFS filters, submodules or symlinks; only https (file:// for offline tests behind a
 // flag); no redirects and the connection pinned to the checked addresses (http.curloptResolve).
-const gitArgs = (hooks, pin = []) => [
+export const gitArgs = (hooks, pin = [], { background = false } = {}) => [
+  ...(background ? ['-c', 'credential.interactive=never', '-c', 'core.askPass='] : []),
   '-c', `core.hooksPath=${hooks}`, '-c', 'core.symlinks=false', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
   ...(process.env.AFS_SKILLS_ALLOW_FILE_GIT === '1' ? ['-c', 'protocol.file.allow=always'] : []),
   '-c', 'http.followRedirects=false', ...pin.flatMap((p) => ['-c', `http.curloptResolve=${p}`]),
   '-c', 'submodule.recurse=false', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false', '-c', 'core.longpaths=true', ...SAFE_GIT,
 ];
-const git = (args, { cwd, signal } = {}) => new Promise((resolve, reject) => {
-  execFile('git', args, { cwd, encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024, windowsHide: true, signal: signal || undefined, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1', GIT_OPTIONAL_LOCKS: '0' } },
+/** git's environment: background checks never open a credential prompt (no account lockouts, no pop-ups). */
+export function gitEnv({ background = false } = {}) {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1', GIT_OPTIONAL_LOCKS: '0' };
+  if (background) { env.GCM_INTERACTIVE = 'never'; env.GIT_ASKPASS = ''; delete env.SSH_ASKPASS; env.SSH_ASKPASS_REQUIRE = 'never'; }
+  return env;
+}
+const git = (args, { cwd, signal, background = false } = {}) => new Promise((resolve, reject) => {
+  execFile('git', args, { cwd, encoding: 'utf8', timeout: 120000, maxBuffer: 8 * 1024 * 1024, windowsHide: true, signal: signal || undefined, env: gitEnv({ background }) },
     (err, stdout, stderr) => {
       if (!err) return resolve(stdout);
       if (err.code === 'ENOENT') return reject(fail(502, 'git no está instalado en esta PC', 'GIT_FAILED'));
       const last = String(stderr || err.message).trim().split(/\r?\n/).filter(Boolean).pop() || 'git falló';
+      if (/Authentication failed|could not read Username|unable to get password|Username for|terminal prompts disabled|\b40[13]\b|access denied|credential/i.test(String(stderr || ''))) return reject(fail(401, 'La fuente pide credenciales', 'AUTH_REQUIRED'));
       const tls = TLS_CODES.test(last) || /SSL certificate/i.test(last);
       reject(fail(502, tls ? `Certificado no confiable al clonar: ${last}` : `git: ${last}`, tls ? 'TLS_ERROR' : 'GIT_FAILED'));
     });
 });
-async function gitClone(src, dest, signal) {
-  const ips = await checkHost(src.url);
-  const u = new URL(src.url);
-  const pin = !seam() && !net.isIP(u.hostname.replace(/^\[|\]$/g, '')) ? [`${u.hostname}:${u.port || 443}:${ips.map((ip) => (net.isIP(ip) === 6 ? `[${ip}]` : ip)).join(',')}`] : [];
+const pinFor = (url, ips) => { const u = new URL(url); return !seam() && ips.length && !proxyFor(u.hostname) && !net.isIP(u.hostname.replace(/^\[|\]$/g, '')) ? [`${u.hostname}:${u.port || 443}:${ips.map((ip) => (net.isIP(ip) === 6 ? `[${ip}]` : ip)).join(',')}`] : []; };
+/** The head commit of the origin's ref (branch, tag — peeled — or HEAD), without cloning. */
+async function lsRemote(src, { background = false, signal } = {}) {
+  const ips = await checkHost(src.url, { background });
   const hooks = newTmp();
   try {
-    const base = gitArgs(hooks, pin);
-    await git([...base, 'clone', '--template=', '--depth', '1', '--no-tags', '--single-branch', ...(src.branch ? ['--branch', src.branch] : []), ...(src.subPath ? ['--filter=blob:none', '--sparse'] : []), '--', src.url, dest], { signal });
-    if (src.subPath) await git([...base, 'sparse-checkout', 'set', '--', src.subPath], { cwd: dest, signal });
+    const refs = src.branch ? [`refs/heads/${src.branch}`, `refs/tags/${src.branch}`, `refs/tags/${src.branch}^{}`] : ['HEAD'];
+    const out = await git([...gitArgs(hooks, pinFor(src.url, ips), { background }), 'ls-remote', '--', src.url, ...refs], { signal, background });
+    const rows = out.trim().split(/\r?\n/).filter(Boolean).map((l) => l.split('\t'));
+    const by = (r) => rows.find((x) => x[1] === r)?.[0];
+    return (src.branch ? by(`refs/tags/${src.branch}^{}`) || by(`refs/heads/${src.branch}`) || by(`refs/tags/${src.branch}`) : by('HEAD')) || null;
+  } finally { fs.rmSync(hooks, { recursive: true, force: true }); }
+}
+async function gitClone(src, dest, signal, { background = false } = {}) {
+  const ips = await checkHost(src.url, { background });
+  const hooks = newTmp();
+  try {
+    const base = gitArgs(hooks, pinFor(src.url, ips), { background });
+    await git([...base, 'clone', '--template=', '--depth', '1', '--no-tags', '--single-branch', ...(src.branch ? ['--branch', src.branch] : []), ...(src.subPath ? ['--filter=blob:none', '--sparse'] : []), '--', src.url, dest], { signal, background });
+    if (src.subPath) await git([...base, 'sparse-checkout', 'set', '--', src.subPath], { cwd: dest, signal, background });
     let head = ''; try { head = (await git([...base, 'rev-parse', 'HEAD'], { cwd: dest })).trim(); } catch {}
     fs.rmSync(path.join(dest, '.git'), { recursive: true, force: true });
     return head;
@@ -294,22 +365,24 @@ function writeEntries(dir, entries) {
 }
 
 /**
- * Inspect a source (SKSRC-2/3/4/5/8): { url } | { path } | { zipBase64, fileName } → { token, origin, skills }.
- * Downloads/extracts into a temp folder kept for 15 minutes; nothing is installed.
+ * Reads a source into a temp folder: { url } | { path } | { zipBase64, fileName } → { dir, tmp, origin, skills }, or
+ * { notModified: true } for a conditional URL fetch (ETag / Last-Modified). Nothing is kept: the caller owns `tmp`.
  */
-export async function inspect(body = {}, { signal } = {}) {
-  let dir; let tmp = null; let origin;
+async function fetchSource(body = {}, { signal, background = false, conditional = null } = {}) {
+  let dir; let tmp = null; let origin; let meta = {};
   try {
     if (body.url !== undefined) {
       const src = parseSource(body.url);
       tmp = newTmp();
       if (src.type === 'git') {
-        const dest = path.join(tmp, 'src'); const head = await gitClone(src, dest, signal);
+        const dest = path.join(tmp, 'src'); const head = await gitClone(src, dest, signal, { background });
         dir = src.subPath ? path.join(dest, ...src.subPath.split('/')) : dest;
         if (!fs.existsSync(dir)) throw fail(422, `La carpeta «${src.subPath}» no existe en el repo`, 'NO_SKILLS');
         origin = { type: 'url', kind: 'git', source: strip(body.url), url: strip(src.url), ref: src.branch || '', subPath: src.subPath || '', head };
       } else {
-        const { buf, type } = await download(src.url, { signal });
+        const d = await download(src.url, { signal, conditional, background });
+        if (d.notModified) { fs.rmSync(tmp, { recursive: true, force: true }); return { notModified: true }; }
+        const { buf, type } = d; meta = { etag: d.etag || null, lastModified: d.lastModified || null };
         dir = path.join(tmp, 'src'); fs.mkdirSync(dir);
         const isZip = src.type === 'zip' || /zip/i.test(type) || buf.subarray(0, 2).toString() === 'PK';
         if (isZip) writeEntries(dir, readZip(buf));
@@ -338,10 +411,16 @@ export async function inspect(body = {}, { signal } = {}) {
     } else throw fail(400, 'Indica url, path o zipBase64', 'BAD_SOURCE');
     const skills = scan(dir);
     if (!skills.length) throw fail(422, 'No se encontró ninguna carpeta con SKILL.md', 'NO_SKILLS');
-    const token = crypto.randomUUID();
-    remember(token, { dir, tmp, origin, skills, expires: Date.now() + TTL_MS });
-    return { token, origin, expiresInSec: Math.round(TTL_MS / 1000), skills: skills.map(({ hash, ...s }) => s) };
+    return { dir, tmp, origin, skills, ...meta };
   } catch (e) { if (tmp) fs.rmSync(tmp, { recursive: true, force: true }); throw e; }
+}
+
+/** Inspect a source for a person's review (SKSRC-2/3/4/5/8): kept 15 minutes behind a token; nothing is installed. */
+export async function inspect(body = {}, { signal } = {}) {
+  const r = await fetchSource(body, { signal });
+  const token = crypto.randomUUID();
+  remember(token, { dir: r.dir, tmp: r.tmp, origin: r.origin, skills: r.skills, expires: Date.now() + TTL_MS });
+  return { token, origin: r.origin, expiresInSec: Math.round(TTL_MS / 1000), skills: r.skills.map(({ hash, ...x }) => ({ ...x, sha256: hash })) };
 }
 
 // ---------- installed skills ----------
@@ -390,7 +469,7 @@ export function install({ token, names, scope = 'flow', flow = null, mode = 'cop
   // folder sources are read in place: what is installed must be what was reviewed
   if (p.origin.type === 'folder') for (const c of picked) { const abs = c.relDir ? path.join(p.dir, ...c.relDir.split('/')) : p.dir; if (!fs.existsSync(abs) || skillHash(abs) !== c.hash) throw fail(409, `«${c.name}» cambió desde la revisión: vuelve a cargar la carpeta`, 'SOURCE_CHANGED'); }
   const target = scope === 'flow' ? flowSkillsDir(flow.id) : USER_SKILLS();
-  const plan = []; const conflicts = []; const skipped = [];
+  const plan = []; const conflicts = []; const skipped = []; const shadows = [];
   for (const c of picked) {
     const r = resolve?.[c.name] || null;
     if (r?.action === 'cancel') { skipped.push(c.name); continue; }
@@ -403,7 +482,12 @@ export function install({ token, names, scope = 'flow', flow = null, mode = 'cop
     const replacing = r?.action === 'replace' || (r?.action === 'rename' && r.replace === true); // an update of a renamed skill
     const dest0 = path.join(target, name);
     const managedDir = (d) => (isLink(d) ? scope === 'flow' && !!readLinks(flow.id)[path.basename(d)] : !!readOrigin(d));
-    const clash = conflictsFor(name, scope, flow).filter((s) => !(replacing && path.resolve(path.dirname(s.path)) === path.resolve(dest0) && managedDir(dest0)));
+    const replacingManaged = replacing && (fs.existsSync(dest0) || isLink(dest0)) && managedDir(dest0);
+    const all = conflictsFor(name, scope, flow);
+    // updating the managed user skill: flow skills with that name already coexisted with it (they are reported, not blocking)
+    const shadowed = scope === 'user' && replacingManaged ? all.filter((s) => s.source === 'flow' && s.flowId) : [];
+    const clash = all.filter((s) => !shadowed.includes(s) && !(replacingManaged && path.resolve(path.dirname(s.path)) === path.resolve(dest0)));
+    for (const s of shadowed) shadows.push({ name, flowId: s.flowId });
     if (clash.length) { conflicts.push({ name, source: c.name, existing: clash.map((s) => ({ source: s.source, path: s.path })), canReplace: clash.every((s) => path.resolve(path.dirname(s.path)) === path.resolve(dest0) && managedDir(dest0)) }); continue; }
     const dest = path.join(target, name);
     const exists = fs.existsSync(dest) || isLink(dest);
@@ -419,7 +503,8 @@ export function install({ token, names, scope = 'flow', flow = null, mode = 'cop
   const installed = [];
   for (const { c, name, dest, replace } of plan) {
     const src = c.relDir ? path.join(p.dir, ...c.relDir.split('/')) : p.dir;
-    const origin = { ...p.origin, mode, name, originalName: c.name, sha256: c.hash, installedAt: new Date().toISOString() };
+    const base = p.origin.type === 'bundle' ? { type: 'bundle', ...(urlOrigin(p.origin.origins?.[c.name]) ? { importedFrom: urlOrigin(p.origin.origins[c.name]) } : {}) } : p.origin;
+    const origin = { ...base, mode, name, originalName: c.name, sha256: c.hash, installedAt: new Date().toISOString() };
     const backup = replace ? path.join(staging, `old-${name}-${crypto.randomBytes(4).toString('hex')}`) : null;
     if (mode === 'link') {
       if (backup) mv(dest, backup);
@@ -441,7 +526,7 @@ export function install({ token, names, scope = 'flow', flow = null, mode = 'cop
     installed.push({ name, scope, source: mode === 'link' ? 'linked' : scope === 'flow' ? 'flow' : 'user', path: path.join(dest, 'SKILL.md') });
   }
   pending.delete(String(token)); if (p.tmp) fs.rm(p.tmp, { recursive: true, force: true }, () => {});
-  return { installed, skipped };
+  return { installed, skipped, ...(shadows.length ? { shadows } : {}) };
 }
 
 /** The installed skill of a scope → { dir, origin, linked } or a 403/404 error (SKSRC-14). */
@@ -478,16 +563,34 @@ export function remove(name, scope, flow, { confirm = false } = {}) {
   return { removed: name, scope };
 }
 
-/** Re-inspect the stored origin (SKSRC-11 v1): previous and new SKILL.md, changed = content differs. */
+// ---------- update sources (SKSRC-11) ----------
+const SHA_RE = /^[0-9a-f]{40}$/i;
+/** A url origin re-validated (bundles bring origins from another machine: only https URLs survive). */
+function urlOrigin(o, { trustHead = false } = {}) {
+  if (!o || o.type !== 'url' || typeof o.source !== 'string') return null;
+  let p; try { p = parseSource(o.source); } catch { return null; }
+  return { type: 'url', kind: p.type === 'http' ? 'url' : p.type, source: strip(o.source), url: strip(p.url), ref: p.branch || '', subPath: p.subPath || '', ...(trustHead && /^[0-9a-f]{40}$/i.test(String(o.head || '')) ? { head: String(o.head) } : {}) };
+}
+/** What to re-read for an installed skill, or null (browser uploads, linked folders, local paths that came in a bundle). */
+function updateSource(o) {
+  if (!o) return null;
+  if (o.type === 'bundle') { const u = urlOrigin(o.importedFrom); return u ? { kind: u.kind, body: { url: u.source }, origin: u } : null; }
+  if (o.type === 'url') { const u = urlOrigin(o, { trustHead: true }); return u ? { kind: u.kind, body: { url: u.source }, origin: u } : null; }
+  if ((o.type === 'folder' || o.type === 'zip') && path.isAbsolute(o.source || '')) return { kind: o.type, body: { path: o.source }, origin: o };
+  return null;
+}
+const pickCandidate = (skills, s) => skills.find((x) => x.name === (s.origin?.originalName || s.name)) || (skills.length === 1 ? skills[0] : null);
+
+/** Re-inspect the stored origin by hand: previous and new SKILL.md, the files that change, changed = content differs. */
 export async function checkUpdate(name, scope, flow, { signal } = {}) {
   const l = locate(name, scope, flow);
   if (l.linked) throw fail(400, 'Una carpeta vinculada se usa en vivo: no hace falta actualizarla', 'LINKED_LIVE');
   const o = l.origin;
   if (!o) throw fail(400, 'Esta skill no tiene origen registrado', 'NO_UPDATE_SOURCE');
-  const body = o.type === 'url' ? { url: o.source } : o.type === 'folder' || (o.type === 'zip' && path.isAbsolute(o.source || '')) ? { path: o.source } : null;
-  if (!body) throw fail(400, 'Este zip se subió desde el navegador: vuelve a subirlo para actualizar', 'NO_UPDATE_SOURCE');
-  const r = await inspect(body, { signal });
-  const cand = r.skills.find((s) => s.name === (o.originalName || name)) || (r.skills.length === 1 ? r.skills[0] : null);
+  const src = updateSource(o);
+  if (!src) throw fail(400, o.type === 'bundle' ? 'Esta skill vino en un paquete sin una URL de origen: no se puede actualizar sola' : 'Este zip se subió desde el navegador: vuelve a subirlo para actualizar', 'NO_UPDATE_SOURCE');
+  const r = await inspect(src.body, { signal });
+  const cand = pickCandidate(r.skills, { name, origin: o });
   if (!cand) throw fail(422, `La fuente ya no tiene la skill «${o.originalName || name}»`, 'NO_SKILLS');
   const p = pending.get(r.token);
   const newDir = cand.relDir ? path.join(p.dir, ...cand.relDir.split('/')) : p.dir;
@@ -496,14 +599,119 @@ export async function checkUpdate(name, scope, flow, { signal } = {}) {
   const sums = (d) => { const m = new Map(); try { for (const f of walkFiles(d, { followLinks: true }).files) if (f.path !== '.afs-origin.json') m.set(f.path, crypto.createHash('sha256').update(fs.readFileSync(path.join(fs.realpathSync(d), f.path))).digest('hex')); } catch {} return m; };
   const before = sums(l.dir); const after = sums(newDir); const scriptOf = new Map(cand.files.map((f) => [f.path, f.script]));
   const files = [...new Set([...before.keys(), ...after.keys()])].sort().map((pth) => ({ path: pth, status: !before.has(pth) ? 'added' : !after.has(pth) ? 'removed' : before.get(pth) !== after.get(pth) ? 'changed' : 'same', script: !!scriptOf.get(pth) })).filter((f) => f.status !== 'same');
-  return { token: r.token, name, sourceName: cand.name, skills: r.skills, candidate: cand, files, previous: read(l.dir), current: read(newDir), changed: hash !== o.sha256 };
+  // a manual check that worked lifts a background auth block and refreshes the 🔔 state
+  const key = scope === 'user' ? '_user' : flow.id;
+  const st = readUpd(key); st[name] = { ...(st[name] || {}), checkedAt: Date.now(), forSha: o.sha256, available: hash !== o.sha256, authBlocked: false, manualOk: true, error: undefined, ...(p.origin.head ? { head: p.origin.head } : {}) }; writeUpd(key, st); emitFn({ type: 'skills.updates', key });
+  return { token: r.token, name, scope, sourceName: cand.name, skills: r.skills, candidate: cand, files, previous: read(l.dir), current: read(newDir), changed: hash !== o.sha256 };
 }
+
+// ---------- background update checks (the 🔔 Novedades model: the app compares, nothing is installed) ----------
+const HOUR = 3600 * 1000 * SCALE;
+const updFile = (key) => path.join(DATA, 'skill-updates', `${safeId(key)}.json`);
+const readUpd = (key) => { try { const j = JSON.parse(fs.readFileSync(updFile(key), 'utf8')); return j && typeof j === 'object' ? j : {}; } catch { return {}; } };
+const writeUpd = (key, j) => { fs.mkdirSync(path.dirname(updFile(key)), { recursive: true }); fs.writeFileSync(updFile(key), JSON.stringify(j, null, 2)); };
+let emitFn = () => {};
+/** App-managed, non-linked skills of a flow (key = flowId) or of the user's Claude Code (key = '_user'). */
+function managedSkills(key) {
+  if (key === '_user') {
+    let entries = []; try { entries = fs.readdirSync(USER_SKILLS()); } catch { return []; }
+    return entries.filter((e) => !e.startsWith('.')).map((e) => ({ name: e, dir: path.join(USER_SKILLS(), e), origin: readOrigin(path.join(USER_SKILLS(), e)) })).filter((s) => s.origin);
+  }
+  return flowSkills(key).filter((s) => !s.linked && s.origin).map((s) => ({ name: s.name, dir: path.join(flowSkillsDir(key), s.name), origin: s.origin }));
+}
+const checking = new Map();
+/**
+ * Looks for updates of a flow's skills (or '_user'). background: no credential prompts, at most once an hour per
+ * skill, a skill whose source asked for credentials is skipped until a manual check works. A result computed for
+ * an origin that changed meanwhile (an install) is dropped.
+ */
+export function checkSkillUpdates(key, { background = false, signal } = {}) {
+  const ck = `${key}|${background ? 'bg' : 'manual'}`; // a person's check never joins (and inherits) a background one
+  if (checking.has(ck)) return checking.get(ck);
+  const p = (async () => {
+    const st = readUpd(key); const computed = new Set();
+    for (const s of managedSkills(key)) {
+      const prev = st[s.name] || {};
+      const same = prev.forSha === s.origin.sha256;
+      const src = updateSource(s.origin);
+      if (!src) { st[s.name] = { checkedAt: Date.now(), forSha: s.origin.sha256, available: false, unsupported: true }; continue; }
+      if (src.kind === 'git' && SHA_RE.test(src.origin.ref || '')) { st[s.name] = { checkedAt: Date.now(), forSha: s.origin.sha256, available: false, pinned: true }; continue; }
+      if (background && same && prev.authBlocked) continue;
+      if (background && s.origin.type === 'bundle' && !prev.manualOk) continue;
+      if (background && same && Date.now() - (prev.checkedAt || 0) < HOUR) continue;
+      const entry = { checkedAt: Date.now(), forSha: s.origin.sha256, available: false, ...(same && prev.manualOk ? { manualOk: true } : {}), ...(same && prev.head ? { head: prev.head } : {}), ...(same && prev.etag ? { etag: prev.etag } : {}), ...(same && prev.lastModified ? { lastModified: prev.lastModified } : {}) };
+      try {
+        if (src.kind === 'git') {
+          const head = await lsRemote(parseSource(src.body.url), { background, signal });
+          if (head && head === (entry.head || src.origin.head)) entry.available = same ? !!prev.available : false; // nothing moved
+          else {
+            const r = await fetchSource(src.body, { signal, background });
+            try { const c = pickCandidate(r.skills, s); entry.available = !!c && c.hash !== s.origin.sha256; if (!c) entry.error = 'La fuente ya no tiene esta skill'; entry.head = r.origin.head || head || undefined; }
+            finally { if (r.tmp) fs.rmSync(r.tmp, { recursive: true, force: true }); }
+          }
+        } else {
+          const conditional = src.kind === 'zip' || src.kind === 'file' || src.kind === 'url' ? { etag: entry.etag, lastModified: entry.lastModified } : null;
+          const r = await fetchSource(src.body, { signal, background, conditional });
+          if (r.notModified) entry.available = same ? !!prev.available : false;
+          else {
+            try { const c = pickCandidate(r.skills, s); entry.available = !!c && c.hash !== s.origin.sha256; if (!c) entry.error = 'La fuente ya no tiene esta skill'; if (r.etag) entry.etag = r.etag; if (r.lastModified) entry.lastModified = r.lastModified; }
+            finally { if (r.tmp) fs.rmSync(r.tmp, { recursive: true, force: true }); }
+          }
+        }
+      } catch (e) {
+        entry.available = same ? !!prev.available : false;
+        entry.error = e.code === 'AUTH_REQUIRED' ? 'La fuente pide credenciales: búscala a mano (botón «Buscar actualización»)' : String(e.message || 'error').slice(0, 300);
+        if (e.code === 'AUTH_REQUIRED' && background) entry.authBlocked = true;
+      }
+      // an install while we checked: this result belongs to the previous version
+      const now = managedSkills(key).find((x) => x.name === s.name);
+      if (!now || now.origin.sha256 !== entry.forSha) { computed.add(s.name); delete st[s.name]; continue; }
+      st[s.name] = entry; computed.add(s.name);
+    }
+    if (key !== '_user' && !fs.existsSync(flowSkillRoot(key))) return {}; // the flow was deleted meanwhile
+    const cur = readUpd(key);
+    for (const n of computed) { if (cur[n]?.checkedAt > (st[n]?.checkedAt || 0)) continue; if (st[n]) cur[n] = st[n]; else delete cur[n]; }
+    for (const [n, v] of Object.entries(st)) if (!computed.has(n) && !cur[n]) cur[n] = v;
+    const live = new Set(managedSkills(key).map((x) => x.name));
+    for (const k of Object.keys(cur)) if (!live.has(k)) delete cur[k];
+    writeUpd(key, cur);
+    emitFn({ type: 'skills.updates', key });
+    return updatesOf(key);
+  })().finally(() => checking.delete(ck));
+  checking.set(ck, p);
+  return p;
+}
+/** What the UI shows: per skill {available, checkedAt, error…}; "available" only for the version installed now. */
+export function updatesOf(key) {
+  const st = readUpd(key); const out = {};
+  for (const s of managedSkills(key)) {
+    const e = st[s.name]; if (!e) continue;
+    out[s.name] = { checkedAt: e.checkedAt, available: !!e.available && e.forSha === s.origin.sha256, ...(e.error ? { error: e.error } : {}), ...(e.pinned ? { pinned: true } : {}), ...(e.unsupported ? { unsupported: true } : {}), ...(e.authBlocked ? { authBlocked: true } : {}) };
+  }
+  return out;
+}
+/** Background scheduler: first look ~2 min after boot, then every 6 h; one check at a time; never quarantined flows. */
+export function startUpdateScheduler({ flows, skip, emit }) {
+  emitFn = emit || emitFn;
+  if (process.env.AFS_SKILL_UPDATES === '0') return;
+  let busyTick = false;
+  const tick = async () => {
+    if (busyTick) return; busyTick = true;
+    try {
+      for (const f of flows()) { if (skip(f) || !managedSkills(f.id).some((s) => updateSource(s.origin))) continue; try { await checkSkillUpdates(f.id, { background: true }); } catch {} }
+      if (managedSkills('_user').some((s) => updateSource(s.origin))) { try { await checkSkillUpdates('_user', { background: true }); } catch {} }
+    } finally { busyTick = false; }
+  };
+  setTimeout(() => { tick(); setInterval(tick, 6 * HOUR).unref(); }, Math.max(1000, 2 * 60000 * SCALE)).unref();
+}
+export const setEmit = (fn) => { emitFn = fn; };
 
 /** Removes a flow's skills when the flow is deleted: links are unlinked first, their targets are never touched. */
 export function removeFlowSkills(flowId) {
   const dir = flowSkillsDir(flowId);
   try { for (const e of fs.readdirSync(dir)) { const p = path.join(dir, e); if (isLink(p)) unlinkDir(p); } } catch {}
   fs.rmSync(flowSkillRoot(flowId), { recursive: true, force: true });
+  fs.rmSync(updFile(flowId), { force: true });
 }
 
 /** The flow's skills for listing in the UI (with origin and update ability). */
@@ -517,30 +725,41 @@ export function flowSkills(flowId) {
   });
 }
 
-// ---------- export / import (SKSRC-12 v1: embedded files, ≤5 MB per skill) ----------
+// ---------- export / import (SKSRC-12: embedded files ≤5 MB, or a reference to the https origin) ----------
 const EMBED_MAX = 5 * 1024 * 1024;
-export function embedForExport(flowId) {
+/** Only an https origin travels (local paths of this PC never leave it). */
+const exportOrigin = (o) => { const u = updateSource(o)?.origin; const url = u && u.type === 'url' ? urlOrigin(u) : null; return url ? { ...url, ...(o?.sha256 ? { sha256: o.sha256 } : {}) } : { type: o?.type === 'bundle' ? 'bundle' : o?.type || 'desconocido' }; };
+export function embedForExport(flowId, { mode = 'embed' } = {}) {
   const out = [];
   for (const s of flowSkills(flowId)) {
     const dir = path.join(flowSkillsDir(flowId), s.name);
-    if (s.broken) { out.push({ name: s.name, origin: s.origin, missing: true }); continue; }
+    const origin = exportOrigin(s.origin);
+    const ref = () => ({ name: s.name, reference: true, origin });
+    if (s.broken) { out.push(origin.type === 'url' ? ref() : { name: s.name, origin, missing: true }); continue; }
+    if (mode === 'ref' && origin.type === 'url') { out.push(ref()); continue; }
     let files;
-    try { files = walkFiles(dir, { followLinks: true }); } catch { out.push({ name: s.name, origin: s.origin, tooBig: true }); continue; }
-    if (files.size > EMBED_MAX) { out.push({ name: s.name, origin: s.origin, tooBig: true }); continue; }
+    try { files = walkFiles(dir, { followLinks: true }); } catch { out.push(origin.type === 'url' ? ref() : { name: s.name, origin, tooBig: true }); continue; }
+    if (files.size > EMBED_MAX) { out.push(origin.type === 'url' ? ref() : { name: s.name, origin, tooBig: true }); continue; }
     const real = fs.realpathSync(dir);
-    out.push({ name: s.name, origin: s.origin ? { ...s.origin, ...(s.linked ? { mode: 'copy', linkedFrom: s.origin.target } : {}) } : null, files: files.files.filter((f) => f.path !== '.afs-origin.json').map((f) => ({ path: f.path, b64: fs.readFileSync(path.join(real, f.path)).toString('base64') })) });
+    out.push({ name: s.name, origin, files: files.files.filter((f) => f.path !== '.afs-origin.json').map((f) => ({ path: f.path, b64: fs.readFileSync(path.join(real, f.path)).toString('base64') })) });
   }
   return out;
 }
-/** Imported bundle skills → an inspection token (same review as a zip) or null; skills that did not travel are listed. */
+/**
+ * Imported bundle skills → an inspection token bound to the imported flow (same review as a zip). Skills that did
+ * not travel are listed; those with an https origin can be fetched by the person from the review ("Traer").
+ */
 export function stageImport(skills, flowId = null) {
   if (!Array.isArray(skills) || !skills.length) return null;
-  const entries = []; const notEmbedded = [];
+  const entries = []; const notEmbedded = []; const origins = {};
   for (const s of skills) {
     if (!s || typeof s !== 'object') continue;
-    if (!Array.isArray(s.files)) { notEmbedded.push({ name: String(s.name || ''), source: s.origin?.source || null }); continue; }
-    if (!NAME_RE.test(String(s.name || ''))) continue;
-    for (const f of s.files) entries.push({ name: `${s.name}/${f.path}`, data: Buffer.from(String(f.b64 || ''), 'base64') });
+    const name = String(s.name || '').slice(0, 64);
+    const url = urlOrigin(s.origin);
+    if (!Array.isArray(s.files)) { notEmbedded.push({ name, source: url?.source || null, fetchable: !!url, sha256: typeof s.origin?.sha256 === 'string' ? s.origin.sha256.slice(0, 64) : null }); continue; }
+    if (!NAME_RE.test(name)) continue;
+    if (url) origins[name] = url;
+    for (const f of s.files) entries.push({ name: `${name}/${f.path}`, data: Buffer.from(String(f.b64 || ''), 'base64') });
   }
   if (!entries.length) return { token: null, skills: [], notEmbedded };
   const zip = buildZip(entries); // the same validation as an uploaded zip (paths, limits)
@@ -549,8 +768,8 @@ export function stageImport(skills, flowId = null) {
   const found = scan(dir);
   if (!found.length) { fs.rmSync(tmp, { recursive: true, force: true }); return { token: null, skills: [], notEmbedded }; }
   const token = crypto.randomUUID();
-  const origins = Object.fromEntries(skills.filter((s) => s?.origin).map((s) => [s.name, s.origin]));
   remember(token, { dir, tmp, flowId, origin: { type: 'bundle', source: 'importado', origins }, skills: found, expires: Date.now() + TTL_MS });
-  return { token, skills: found.map(({ hash, ...s }) => s), notEmbedded };
+  // each skill shows the https origin it would be checked against (the person sees it before consenting)
+  return { token, skills: found.map(({ hash, ...s }) => ({ ...s, ...(origins[s.name] ? { importedFrom: origins[s.name].source } : {}) })), notEmbedded };
 }
 export const _rank = rankOf;

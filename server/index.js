@@ -647,7 +647,7 @@ app.post('/api/flows/:id/chat/:key/discard', wrap((req) => engine.discardProposa
 app.get('/api/flows/:id/export', wrap((req, res) => {
   const flow = need(req.params.id);
   const b = exportFlow(flow, { chats: req.query.chats === '1', runs: req.query.runs === '1', memory: req.query.memory !== '0', pins: req.query.pins === '1', secrets: req.query.secrets === '1' });
-  if (req.query.skills !== '0') { const sk = SK.embedForExport(flow.id); if (sk.length) b.skills = sk; }
+  if (req.query.skills !== '0') { const sk = SK.embedForExport(flow.id, { mode: req.query.skills === 'ref' ? 'ref' : 'embed' }); if (sk.length) b.skills = sk; }
   res.setHeader('Content-Disposition', `attachment; filename="${slug(flow.name)}.afsflow.json"`);
   return b;
 }));
@@ -785,8 +785,23 @@ app.get('/api/catalog', wrap((req) => ({
 })));
 app.post('/api/catalog/probe', wrap(async (req) => probeInit(req.body?.cwd)));
 
+/** 🧩 updates of the skills a flow uses (spec 13 SKSRC-11): flow skills + user skills (installed by the app) its steps reference. */
+function skillUpdateItem(flow) {
+  const own = Object.entries(SK.updatesOf(flow.id)).filter(([, v]) => v.available).map(([n]) => n);
+  const user = SK.updatesOf('_user');
+  const used = flow.steps.filter((s) => s.kind === 'skill' && s.skillRef).map((s) => s.skillRef);
+  const mine = Object.entries(user).filter(([n, v]) => v.available && used.includes(n) && !own.includes(n) && listSkills(flow.cwd, flow.id).filter((x) => x.name === n).sort((a, b) => (SK._rank[a.source] ?? 9) - (SK._rank[b.source] ?? 9))[0]?.source === 'user').map(([n]) => n);
+  const names = [...own, ...mine];
+  if (!names.length) return null;
+  const step = flow.steps.find((s) => s.kind === 'skill' && names.includes(s.skillRef));
+  return { flowId: flow.id, flowName: flow.name, id: `skillupd:${flow.id}`, kind: 'skill_update', severity: 'warn', stepId: step?.id || null, stepName: step?.name || null,
+    title: `🧩 ${names.length} skill${names.length === 1 ? '' : 's'} con actualización`, detail: `${names.join(', ')}: revisa los cambios con «Buscar actualización» en el step`,
+    createdAt: Date.now(), stateKey: crypto.createHash('sha1').update(names.sort().join('|')).digest('hex').slice(0, 12), target: { flowId: flow.id, ...(step ? { stepId: step.id, open: 'watch' } : {}) } };
+}
 // ----- skill sources (spec 13): inspect → review → install for this flow or for the user's Claude Code -----
 const skillFlow = (id, required) => { if (!id) { if (required) throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND'); return null; } const f = store.getFlow(String(id)); if (!f) throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND'); return f; };
+/** A running flow whose skill step uses one of these user skills (resolved as Claude would: no flow skill of that name). */
+const userSkillInUse = (names) => { for (const f of store.listFlows().map((x) => store.getFlow(x.id)).filter(Boolean)) { if (!engine.isRunning(f.id)) continue; const n = f.steps.find((s) => s.kind === 'skill' && names.includes(s.skillRef) && listSkills(f.cwd, f.id).filter((x) => x.name === s.skillRef).sort((p, q) => (SK._rank[p.source] ?? 9) - (SK._rank[q.source] ?? 9))[0]?.source === 'user'); if (n) return { flow: f, name: n.skillRef }; } return null; };
 const skillsChanged = (flowId) => engine.bus.emit('msg', { type: 'catalog.changed', flowId: flowId || null });
 app.post('/api/skills/inspect', wrap((req) => {
   const b = req.body || {};
@@ -798,16 +813,23 @@ app.post('/api/skills/install', wrap((req) => {
   const b = req.body || {};
   const scope = b.scope || 'flow';
   const flow = skillFlow(b.flowId, scope === 'flow');
+  if (flow && engine.isRunning(flow.id) && Object.values(b.resolve || {}).some((x) => x?.action === 'replace' || x?.replace === true)) throw fail(409, 'El flujo se está ejecutando: reemplaza la skill cuando termine', 'FLOW_RUNNING');
+  if (scope === 'user' && Object.values(b.resolve || {}).some((x) => x?.action === 'replace' || x?.replace === true)) { const busy = userSkillInUse(Object.keys(b.resolve || {}).concat(Object.values(b.resolve || {}).map((x) => x?.to).filter(Boolean))); if (busy) throw fail(409, `«${busy.flow.name}» se está ejecutando y usa esa skill: reemplázala cuando termine`, 'FLOW_RUNNING'); }
   const r = SK.install({ token: b.token, names: b.names, scope, flow, mode: b.mode || 'copy', confirmUser: b.confirmUser === true, resolve: b.resolve && typeof b.resolve === 'object' ? b.resolve : {} });
   skillsChanged(flow?.id);
   return r;
 }));
 app.get('/api/flows/:id/skills', wrap((req) => SK.flowSkills(need(req.params.id).id)));
+app.get('/api/flows/:id/skills/updates', wrap((req) => ({ flow: SK.updatesOf(need(req.params.id).id), user: SK.updatesOf('_user') })));
+app.post('/api/flows/:id/skills/check-updates', wrap(async (req) => { const f = need(req.params.id); const qp = quarantineProblem(f); if (qp) throw fail(qp.status, qp.error, qp.code); return { flow: await SK.checkSkillUpdates(f.id, { background: req.body?.background === true }), user: SK.updatesOf('_user') }; }));
+app.post('/api/skills/check-updates', wrap(async () => ({ user: await SK.checkSkillUpdates('_user') })));
 app.get('/api/skills/:name/origin', wrap((req) => SK.originOf(req.params.name, String(req.query.scope || 'flow'), skillFlow(req.query.flowId, req.query.scope !== 'user'))));
 app.post('/api/skills/:name/update', wrap((req) => SK.checkUpdate(req.params.name, String(req.query.scope || req.body?.scope || 'flow'), skillFlow(req.query.flowId || req.body?.flowId, (req.query.scope || req.body?.scope || 'flow') !== 'user'))));
 app.delete('/api/skills/:name', wrap((req) => {
   const scope = String(req.query.scope || 'flow');
   const flow = skillFlow(req.query.flowId, scope === 'flow');
+  if (flow && scope === 'flow' && engine.isRunning(flow.id)) throw fail(409, 'El flujo se está ejecutando: quita la skill cuando termine', 'FLOW_RUNNING');
+  if (scope === 'user') { const busy = userSkillInUse([req.params.name]); if (busy) throw fail(409, `«${busy.flow.name}» se está ejecutando y usa esa skill: quítala cuando termine`, 'FLOW_RUNNING'); }
   const r = SK.remove(req.params.name, scope, flow, { confirm: req.query.confirm === '1' });
   skillsChanged(flow?.id);
   return r;
@@ -954,7 +976,8 @@ server.listen(PORT, HOST, () => {
   // spec 27: attention list from disk (after the recovery), then notifications; no toast storm, one summary
   // spec 28: the flow review (lint in the background, AI review on demand) feeds the 🔔 list with kind 'review'
   review.init({ bus: engine.bus, emit: (m) => engine.bus.emit('msg', m), refreshAttention: (flowId) => attention.refreshFlow(flowId) });
-  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem, watchItem: W.attentionItem, approvalItem: OUT.attentionItem });
+  attention.init({ bus: engine.bus, pausedRuns: engine.pausedRuns, emit: (m) => engine.bus.emit('msg', m), cachedPreflight, reviewItem: review.attentionItem, watchItem: W.attentionItem, approvalItem: OUT.attentionItem, skillUpdateItem });
+  SK.startUpdateScheduler({ flows: () => store.listFlows().map((f) => store.getFlow(f.id)).filter(Boolean), skip: (f) => !!quarantineProblem(f), emit: (m) => engine.bus.emit('msg', m) });
   OUT.init({ httpAuth: W.authHeader });
   { const n = OUT.recoverExecuting({ listFlows: store.listFlows, getRun: store.getRun, saveRun: store.saveRun }); if (n) console.log(`${n} ejecución(es) con una aprobación interrumpida: vuelven a esperar decisión.`); }
   W.init({

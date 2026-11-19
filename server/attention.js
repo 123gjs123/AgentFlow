@@ -92,6 +92,8 @@ function compute(flowId, cachedPreflight) {
   try { const rv = deps.reviewItem?.(flow); if (rv) out.push(rv); } catch (e) { console.error('attention review', e.message); }
   // spec 10: pending news of the watched sources
   try { const nw = deps.watchItem?.(flow); if (nw) out.push(nw); } catch (e) { console.error('attention watch', e.message); }
+  // spec 13: updates of the skills this flow uses
+  try { const su = deps.skillUpdateItem?.(flow); if (su) out.push(su); } catch (e) { console.error('attention skills', e.message); }
   // spec 14: declared actions waiting for a person
   try { const ap = deps.approvalItem?.(flow); if (ap) out.push(ap); } catch (e) { console.error('attention approval', e.message); }
   return out;
@@ -190,5 +192,6 @@ export function init(d) {
     else if (['run.started', 'run.paused', 'run.resumed', 'flow.updated', 'preflight.checked'].includes(m.type) && m.flowId) refresh(m.flowId);
     else if (m.type === 'flow.deleted' && m.flowId) removeFlow(m.flowId);
     else if (m.type === 'flows.changed' || m.type === 'credentials.changed') refreshAll();
+    else if (m.type === 'skills.updates' || m.type === 'catalog.changed') { if (m.key && m.key !== '_user') refresh(m.key); else if (m.flowId) refresh(m.flowId); else refreshAll(); }
   });
 }

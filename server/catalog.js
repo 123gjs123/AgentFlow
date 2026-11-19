@@ -116,7 +116,8 @@ export function listSkills(projectDir, flowId) {
       const name = meta.name || path.basename(path.dirname(f));
       const src = sourceOf(f);
       const key = `${src}:${name}`;
-      if (!seen.has(key)) seen.set(key, { name, description: (meta.description || '').slice(0, 300), path: f, source: src });
+      const managed = src === 'user' && path.dirname(path.dirname(f)) === path.join(HOME, 'skills') && fs.existsSync(path.join(path.dirname(f), '.afs-origin.json'));
+      if (!seen.has(key)) seen.set(key, { name, description: (meta.description || '').slice(0, 300), path: f, source: src, ...(managed ? { managed: true } : {}) });
     }
   }
   return [...own, ...seen.values()].sort((a, b) => a.name.localeCompare(b.name) || rank(a) - rank(b));
