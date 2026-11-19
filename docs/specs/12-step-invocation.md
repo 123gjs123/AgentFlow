@@ -153,4 +153,21 @@ The six first-pass findings were re-verified as closed. Fixed in this pass:
 
 The pass found one medium issue and nothing higher. In an options body, `mode: only|from` (any case) now counts as the scope next to `input` too. An unknown `mode` is `BAD_SCOPE`. The generated clients' own modes (`wait`, `async-poll`, `fire-and-forget`) are not a scope.
 
-Spec 12 v1 is closed after one architect review and four adversarial passes. Every finding has a regression test (`30-step-invoke`: 10 tests).
+Spec 12 v1 is closed after one architect review and four adversarial passes. Every finding has a regression test (`30-step-invoke`: 10 tests; 12 after the simulation and code review below).
+
+### Real simulation and code review (after closing)
+
+A real simulation ran on an isolated server (temp data dir, free port) with the **real Claude CLI**. It covered a full chain, then each snippet pasted as is: curl, curl polling, PowerShell, afs CLI, "from" with Claude, a raw webhook and INVOKE.md. It found two problems the mock-based tests did not:
+- **jq.** The curl snippets needed `jq`, which is missing on this PC's Git Bash and on many CI agents. Now `?format=text` (on both run routes and on `GET …/runs/:runId`) answers in plain text and puts the outcome in the HTTP code:
+  - `200` = success, and the body is the result;
+  - `202` = still running, and the body is the runId;
+  - `422` = it ended in another state.
+
+  `X-AFS-Run-Id` and `X-AFS-Status` carry the details. Errors, gates and dry runs stay JSON. The curl and Jenkins sh snippets only need curl.
+- **Unreachable base.** The curl snippets pointed at the LAN IP while the app only listened on 127.0.0.1. While no other machine can reach the app, the shell snippets use 127.0.0.1, and the warning still explains the options.
+
+The code review then found these, all fixed with tests (`30-step-invoke`: 12 tests):
+- Flows saved before spec 12 got INVOKE.md with `steps/undefined/run`, and `/api/ext/flows` listed slugs that could not be called. Their slugs are now stored once at boot.
+- Ids inside a code span in INVOKE.md were escaped (`s\_1`).
+- The "Flujo completo" curl in INVOKE.md used the remote base and needed jq.
+- On the step URL, a raw payload's own `step` field is now kept as data.

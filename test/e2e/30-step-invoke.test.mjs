@@ -285,3 +285,75 @@ test('revisión 12c: restaurar no le quita la dirección a un step vivo; un nomb
   assert.equal((await s.ext('POST', `/flows/${d.id}/steps/s_q2/run`, { input: 'x', mode: 'fromm' })).body.code, 'BAD_SCOPE');
   assert.equal((await s.ext('POST', `/flows/${d.id}/steps/s_q2/run`, { input: 'x', mode: 'wait', dryRun: true })).body.scope, 'only', 'los modos del cliente no son un alcance');
 });
+
+// ---- real simulation pass on spec 12: the curl snippets ran in Git Bash without jq and against an unreachable LAN IP ----
+test('revisión 12d: los snippets curl funcionan pegados en bash sin jq (?format=text) y usan 127.0.0.1 si otra máquina no llega', async (t) => {
+  const f = await chain('Curl sin jq');
+  await s.runExt(f.id, { input: 'x' });
+  const inv = await s.uiOk('GET', `/api/flows/${f.id}/steps/s_c/invoke`);
+  const curl = inv.snippets.find((x) => x.id === 'curl').content; const async = inv.snippets.find((x) => x.id === 'curl-async').content;
+  assert.equal(inv.reach.status, 'needs-host');
+  for (const c of [curl, async, inv.snippets.find((x) => x.id === 'jenkins-sh').content]) {
+    assert.ok(!/\bjq\b/.test(c), 'sin jq'); assert.match(c, new RegExp(`127\\.0\\.0\\.1:${s.port}`), 'la IP de red no responde todavía: usa esta PC');
+  }
+  // ?format=text: the outcome in the HTTP code, the result as plain text
+  const h = { Authorization: `Bearer ${s.token}`, 'Content-Type': 'application/json' };
+  const ok = await fetch(`${s.base}/api/ext/flows/${f.id}/steps/s_c/run?format=text`, { method: 'POST', headers: h, body: JSON.stringify({ input: 'x', wait: true, timeoutSec: 60 }) });
+  assert.equal(ok.status, 200); assert.equal(ok.headers.get('x-afs-status'), 'success'); assert.match(await ok.text(), /^informe ok/);
+  const ko = await fetch(`${s.base}/api/ext/flows/${f.id}/steps/s_c/run?format=text`, { method: 'POST', headers: h, body: JSON.stringify({ input: 'x', vars: { fail: '1' }, wait: true, timeoutSec: 60 }) });
+  assert.equal(ko.status, 422); assert.match(await ko.text(), /terminó en (error|failed)/);
+  const started = await fetch(`${s.base}/api/ext/flows/${f.id}/steps/s_c/run?format=text`, { method: 'POST', headers: h, body: JSON.stringify({ input: 'x' }) });
+  const runId = (await started.text()).trim();
+  assert.ok([200, 202].includes(started.status)); assert.equal(started.headers.get('x-afs-run-id'), started.status === 202 ? runId : started.headers.get('x-afs-run-id'));
+  const id = started.headers.get('x-afs-run-id');
+  const done = await until(async () => { const r = await fetch(`${s.base}/api/ext/flows/${f.id}/runs/${id}?format=text`, { headers: h }); return r.status === 200 ? r : null; });
+  assert.ok(done, 'el sondeo llega a 200'); assert.match(await done.text(), /informe ok/);
+  // errors stay JSON (a caller sees why), and so does a dry run
+  const bad = await fetch(`${s.base}/api/ext/flows/${f.id}/steps/nope/run?format=text`, { method: 'POST', headers: h, body: '{}' });
+  assert.equal(bad.status, 404); assert.equal((await bad.json()).code, 'STEP_NOT_FOUND');
+  const dry = await fetch(`${s.base}/api/ext/flows/${f.id}/steps/s_c/run?format=text`, { method: 'POST', headers: h, body: JSON.stringify({ input: 'x', dryRun: true }) });
+  assert.equal((await dry.json()).dryRun, true);
+  // pasted as is in bash (Git Bash on Windows, sh on a Linux agent)
+  const bash = await s.exec('bash', ['-c', 'command -v curl'], {});
+  if (bash.code !== 0) { t.diagnostic('sin bash/curl: se omite la ejecución real del snippet'); return; }
+  const run = (script) => s.exec('bash', ['-c', script], { env: { AFS_TOKEN: s.token } });
+  const r1 = await run(curl);
+  assert.equal(r1.code, 0, r1.stderr); assert.match(r1.stdout, /informe ok/);
+  const r2 = await run(curl.replace('"source":"curl"', '"source":"curl","vars":{"fail":"1"}'));
+  assert.notEqual(r2.code, 0, 'falla como un stage de CI');
+  const r3 = await run(async);
+  assert.equal(r3.code, 0, r3.stderr); assert.match(r3.stdout, /informe ok/);
+  const r4 = await run(async.replace('"source":"curl"', '"source":"curl","vars":{"fail":"1"}'));
+  assert.notEqual(r4.code, 0, 'el sondeo también falla si el step falla');
+  const r5 = await s.exec('bash', ['-c', curl], { env: { AFS_TOKEN: 'mal' } });
+  assert.notEqual(r5.code, 0, 'un token inválido no pasa por éxito');
+});
+
+// ---- code review of spec 12 ----
+test('revisión 12e: un flujo de antes del spec 12 recibe sus slugs al arrancar (INVOKE.md y /flows llamables); ids sin escapar; flujo completo sin jq; "step" crudo en la URL del step', async () => {
+  const f = await s.flow('Legado', [cmd('Build', 'Write-Output 1', { id: 's_1' }), cmd('Build', 'Write-Output 2', { id: 's_2' })], []);
+  await s.kill();
+  const file = path.join(s.dirs.data, 'flows', `${f.id}.json`);
+  const j = JSON.parse(fs.readFileSync(file, 'utf8')); for (const st of j.steps) delete st.slug; fs.writeFileSync(file, JSON.stringify(j));
+  fs.rmSync(path.join(s.dirs.data, 'invoke'), { recursive: true, force: true });
+  await s.start();
+  const mdFile = path.join(s.dirs.data, 'invoke', `${f.id}.md`);
+  const md = await until(() => fs.existsSync(mdFile) && fs.readFileSync(mdFile, 'utf8'));
+  assert.ok(md, 'INVOKE.md escrito al arrancar');
+  assert.ok(!/undefined/.test(md), 'sin steps/undefined/run');
+  assert.match(md, /id: `s_1`/, 'el id dentro de `código` no se escapa');
+  assert.ok(!/\bjq\b/.test(md)); assert.match(md, /format=text/);
+  const list = (await s.ext('GET', '/flows')).body.find((x) => x.id === f.id);
+  assert.deepEqual(list.steps.map((x) => x.slug), ['build', 'build-2']);
+  for (const sl of ['build', 'build-2']) {
+    const r = await s.ext('POST', `/flows/${f.id}/steps/${sl}/run`, { input: 'x', dryRun: true });
+    assert.equal(r.status, 200, `${sl}: ${JSON.stringify(r.body)}`);
+  }
+  assert.deepEqual((await s.getFlow(f.id)).steps.map((x) => x.slug), ['build', 'build-2'], 'quedaron guardados');
+  // a raw payload on the step URL keeps its own "step" field (the step comes from the path)
+  const g = await s.flow('Payload step', [cmd('Eco', 'Write-Output "IN=$env:AFS_INPUT"', { id: 's_e' })], []);
+  const r = await s.ext('POST', `/flows/${g.id}/steps/s_e/run?wait=true`, { step: 'deploy-prod', build: 9 });
+  assert.equal(r.body.status, 'success');
+  const run = await s.ui('GET', `/api/flows/${g.id}/runs/${r.body.runId}`);
+  assert.match(JSON.stringify(run.body.input ?? run.body), /deploy-prod/);
+});

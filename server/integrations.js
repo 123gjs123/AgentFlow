@@ -545,29 +545,32 @@ export function stepInvoke(flow, step, { localBase, remote, scope = 'only', from
   const path = `/api/ext/flows/${flow.id}/steps/${slug}/run`;
   const vars = Object.fromEntries(contract.vars.map((v) => [v.name, `<${v.name}>`]));
   const body = (source, extra = {}) => ({ input: '<input>', ...(contract.vars.length ? { vars } : {}), source, ...(scope === 'from' ? { scope: 'from' } : {}), ...extra });
-  const rb = remote.base; const lb = localBase;
+  const lb = localBase; const rb = String(remote.status || '').startsWith('ok') ? remote.base : lb;
   const statusOf = `/api/ext/flows/${flow.id}/runs/`;
+  // no jq: ?format=text answers with the result as text and the outcome in the HTTP code (200 success, 202 running)
   const curlSync = (base, source) => [
-    `RES=$(curl -sS -X POST ${bashLit(base + path)} \\`,
+    'OUT=$(mktemp)',
+    `CODE=$(curl -sS -o "$OUT" -w '%{http_code}' -X POST ${bashLit(base + path + '?format=text')} \\`,
     '  -H "Authorization: Bearer $AFS_TOKEN" -H \'Content-Type: application/json\' \\',
     `  -d ${bashLit(JSON.stringify(body(source, { wait: true, timeoutSec: 1800 })))})`,
-    'echo "$RES" | jq -r .result',
-    'test "$(echo "$RES" | jq -r .status)" = success',
+    'cat "$OUT"; rm -f "$OUT"',
+    'test "$CODE" = 200',
   ].join('\n');
   const curlAsync = [
-    `RUN=$(curl -sS -X POST ${bashLit(rb + path)} \\`,
+    'OUT=$(mktemp)',
+    `CODE=$(curl -sS -o "$OUT" -w '%{http_code}' -X POST ${bashLit(rb + path + '?format=text')} \\`,
     '  -H "Authorization: Bearer $AFS_TOKEN" -H \'Content-Type: application/json\' \\',
-    `  -d ${bashLit(JSON.stringify(body('curl')))} | jq -r .runId)`,
+    `  -d ${bashLit(JSON.stringify(body('curl')))})`,
+    'RUN=$(tr -d \'\\r\\n\' < "$OUT")',
+    'case "$CODE" in 2??) ;; *) cat "$OUT" >&2; rm -f "$OUT"; exit 1 ;; esac',
     'T0=$(date +%s)',
-    'while :; do',
-    `  RES=$(curl -sS ${bashLit(rb + statusOf)}"$RUN" -H "Authorization: Bearer $AFS_TOKEN")`,
-    '  ST=$(echo "$RES" | jq -r .status)',
-    '  case "$ST" in running|queued) ;; *) break ;; esac',
-    '  if [ $(( $(date +%s) - T0 )) -gt 1800 ]; then echo "sigue corriendo tras 30 min (runId $RUN)" >&2; exit 3; fi',
+    'while [ "$CODE" = 202 ]; do',
+    '  if [ $(( $(date +%s) - T0 )) -gt 1800 ]; then echo "sigue corriendo tras 30 min (runId $RUN)" >&2; rm -f "$OUT"; exit 3; fi',
     '  sleep 10',
+    `  CODE=$(curl -sS -o "$OUT" -w '%{http_code}' ${bashLit(rb + statusOf)}"$RUN?format=text" -H "Authorization: Bearer $AFS_TOKEN")`,
     'done',
-    'echo "$RES" | jq -r .result',
-    'test "$ST" = success',
+    'cat "$OUT"; rm -f "$OUT"',
+    'test "$CODE" = 200',
   ].join('\n');
   const ps = (base, source) => [
     '$h = @{ Authorization = "Bearer $env:AFS_TOKEN" }',
@@ -584,7 +587,7 @@ export function stepInvoke(flow, step, { localBase, remote, scope = 'only', from
   ].join('\n');
   const cliArgs = [psLit(flow.id), '--step', psLit(step.id), ...(scope === 'from' ? ['--from'] : []), '-i', psLit('<input>'), ...contract.vars.map((v) => `--var ${psLit(`${v.name}=<${v.name}>`)}`)];
   const snippets = [
-    { id: 'curl', label: 'curl (espera)', language: 'bash', where: 'remote', content: curlSync(rb, 'curl'), note: 'Necesita curl y jq. Espera hasta 30 min y falla si el step no termina en success.' },
+    { id: 'curl', label: 'curl (espera)', language: 'bash', where: 'remote', content: curlSync(rb, 'curl'), note: 'Solo necesita curl (sin jq). Espera hasta 30 min y falla si el step no termina en success.' },
     { id: 'curl-async', label: 'curl (sondeo)', language: 'bash', where: 'remote', content: curlAsync, note: 'Para steps largos: arranca y consulta cada 10 s.' },
     { id: 'powershell', label: 'PowerShell', language: 'powershell', where: 'local', content: ps(lb, 'powershell'), note: 'Lanza la ejecución y consulta cada 10 s; lanza un error si no termina en success.' },
     { id: 'jenkins-sh', label: 'Jenkins (sh)', language: 'groovy', where: 'remote', content: [
@@ -615,19 +618,24 @@ export function stepInvoke(flow, step, { localBase, remote, scope = 'only', from
 
 /** INVOKE.md of a flow (STEPINV-9): every step with endpoint, CLI and Jenkins examples; the token is a placeholder. */
 export function invokeDoc(flow, { localBase, remote, cliPath }) {
+  const code = (v) => String(v ?? '').replace(/[`\r\n]/g, '');
+  // CR4: same base as the step snippets (127.0.0.1 while another machine cannot reach this PC), no jq, fails on error
+  const rb = String(remote.status || '').startsWith('ok') ? remote.base : localBase;
   const out = [
     `# Invocar «${mdLine(flow.name)}» desde fuera`, '',
     `Generado por Agent Flow Studio al guardar el flujo (id \`${flow.id}\`). El token NO está aquí: se lee de \`AFS_TOKEN\` (en Jenkins, una credencial Secret text).`, '',
     `- Desde esta PC: \`${localBase}\``, `- Desde otra máquina: \`${remote.base}\`${remote.status === 'needs-host' || remote.status === 'needs-tunnel' ? ` — ⚠ ${remote.explanation}` : ''}`, '',
     '## Flujo completo', '', '```bash',
-    `curl -sS -X POST ${bashLit(`${remote.base}/api/ext/flows/${flow.id}/run`)} -H "Authorization: Bearer $AFS_TOKEN" -H 'Content-Type: application/json' -d '{"input":"<input>","wait":true,"timeoutSec":1800}'`,
+    'OUT=$(mktemp)',
+    `CODE=$(curl -sS -o "$OUT" -w '%{http_code}' -X POST ${bashLit(`${rb}/api/ext/flows/${flow.id}/run?format=text`)} -H "Authorization: Bearer $AFS_TOKEN" -H 'Content-Type: application/json' -d '{"input":"<input>","wait":true,"timeoutSec":1800}')`,
+    'cat "$OUT"; rm -f "$OUT"', 'test "$CODE" = 200',
     '```', '', '```powershell', `afs run ${psLit(flow.id)} -i ${psLit('<input>')}`, '```', '',
     '## Steps', '',
   ];
   for (const s of flow.steps) {
     const inv = stepInvoke(flow, s, { localBase, remote, cliPath });
     const c = inv.contract;
-    out.push(`### ${mdLine(s.name)}`, '', `- slug: \`${s.slug}\` · id: \`${mdLine(s.id)}\``, `- \`POST ${inv.endpoint.path}\` (\`"scope":"from"\` para ejecutar también lo que sigue)`);
+    out.push(`### ${mdLine(s.name)}`, '', `- slug: \`${code(s.slug)}\` · id: \`${code(s.id)}\``, `- \`POST ${inv.endpoint.path}\` (\`"scope":"from"\` para ejecutar también lo que sigue)`);
     if (c.vars.length) out.push(`- variables: ${c.vars.map((v) => `\`${v.name}\``).join(', ')}`);
     if (c.upstream.length) out.push(`- recibe la última salida de: ${c.upstream.map(mdLine).join(', ')}`);
     if (c.writesOutside.length) out.push(`- ⚡ escribe fuera: ${c.writesOutside.map(mdLine).join('; ')}`);

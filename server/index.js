@@ -88,11 +88,11 @@ ext.use((req, res, next) => {
 });
 const extFlow = (x) => { const f = store.findFlow(x); if (!f) throw fail(404, `Flujo no encontrado: ${x}`, 'FLOW_NOT_FOUND'); return f; };
 const extRun = (flow, id) => { const r = engine.getRunLive(flow.id, id); if (!r) throw fail(404, 'Ejecución no encontrada', 'RUN_NOT_FOUND'); return r; };
-const inputOf = (body, stepped = false) => {
+const inputOf = (body, stepped = false, stepInPath = false) => {
   if (typeof body === 'string') return body;
   if (body && typeof body.input === 'string') return body.input;
   if (body && body.input !== undefined) return JSON.stringify(body.input, null, 2);
-  const rest = { ...(body || {}) }; for (const k of ['step', 'wait', 'timeoutSec', 'source', 'vars', 'usePins', 'deadlineSec', 'dryRun', 'breakpoints']) delete rest[k];
+  const rest = { ...(body || {}) }; for (const k of [...(stepInPath ? [] : ['step']), 'wait', 'timeoutSec', 'source', 'vars', 'usePins', 'deadlineSec', 'dryRun', 'breakpoints']) delete rest[k];
   if (stepped) { for (const k of ['scope', 'mode']) if (scopeWord(rest[k])) delete rest[k]; if (fromFlag(rest.from)) delete rest.from; }
   return Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''; // raw webhook payloads (Bitbucket, Jenkins…)
 };
@@ -122,7 +122,19 @@ const scopeOf = (req, body) => {
   }
   return scopeWord(body.scope) || scopeWord(body.mode) || (fromFlag(body.from) || truthy(req.query.from) ? 'from' : 'only');
 };
-const extRunRoute = (stepInPath) => wrap(async (req, res) => {
+// ?format=text (snippets without jq): 200 = success (body: the result), 202 = still going (body: runId),
+// 422 = ended in another state (body: result + error). X-AFS-Run-Id / X-AFS-Status carry the details.
+const asText = (fn) => async (req, res) => {
+  if (String(req.query.format || '') !== 'text') return fn(req, res);
+  const r = await fn(req, res);
+  if (!r || typeof r !== 'object' || !r.runId || !r.status || r.dryRun) return r; // errors, dry runs, gates: JSON
+  const going = ['running', 'queued'].includes(r.status) || r.timedOut;
+  res.set('X-AFS-Run-Id', String(r.runId)); res.set('X-AFS-Status', String(r.status));
+  res.status(going ? 202 : r.status === 'success' ? 200 : 422).type('text/plain; charset=utf-8');
+  res.send(going ? `${r.runId}\n` : r.status === 'success' ? `${r.result ?? ''}\n` : [r.result, `El run ${r.runId} terminó en ${r.status}${r.error ? `: ${r.error}` : ''}`].filter(Boolean).join('\n\n') + '\n');
+  return undefined;
+};
+const extRunRoute = (stepInPath) => wrap(asText(async (req, res) => {
   const flow = extFlow(req.params.flow);
   const body = typeof req.body === 'object' && req.body ? req.body : {};
   const stepRef = stepInPath ? req.params.step : body.step || req.query.step;
@@ -142,7 +154,7 @@ const extRunRoute = (stepInPath) => wrap(async (req, res) => {
     if (run.waitTimedOut || run.status === 'running') { res.status(202); sum.timedOut = true; }
     return sum;
   };
-  const input = inputOf(req.body, !!stepRef);
+  const input = inputOf(req.body, !!stepRef, stepInPath);
   const key = String(req.get('idempotency-key') || '').trim();
   if (key.length > 200) throw fail(400, 'Idempotency-Key: máximo 200 caracteres', 'BAD_IDEMPOTENCY_KEY');
   const bodyHashOf = () => crypto.createHash('sha256').update(stableJson({ input, only, ...(from ? { from } : {}), vars: body.vars || null, usePins: truthy(body.usePins), breakpoints: truthy(body.breakpoints) })).digest('hex');
@@ -188,15 +200,15 @@ const extRunRoute = (stepInPath) => wrap(async (req, res) => {
   if (key) store.setIdem(`${flow.id}:${key}`, { runId, bodyHash, flowId: flow.id });
   res.locals.runId = runId;
   return respond(runId);
-});
+}));
 ext.post('/flows/:flow/run', extRunRoute(false));
 ext.post('/flows/:flow/steps/:step/run', extRunRoute(true));
 ext.get('/flows/:flow/runs/:runId/files/:file', wrap(async (req, res) => { const flow = extFlow(req.params.flow); const f = deliverableFile(flow.id, req.params.runId, req.params.file, req.query.step ? String(req.query.step) : null); await sendFile(res, f); return undefined; }));
 ext.post('/flows/:flow/runs/:runId/actions/decide', wrap((req) => { const flow = extFlow(req.params.flow); return decide(flow.id, req.params.runId, req.body); }));
-ext.get('/flows/:flow/runs/:runId', wrap((req) => {
+ext.get('/flows/:flow/runs/:runId', wrap(asText((req) => {
   const flow = extFlow(req.params.flow);
   return engine.runSummary(flow, extRun(flow, req.params.runId));
-}));
+})));
 ext.post('/flows/:flow/runs/:runId/cancel', wrap((req) => {
   const flow = extFlow(req.params.flow);
   const run = extRun(flow, req.params.runId);
@@ -899,6 +911,7 @@ store.getConfig(); // ensure token exists
 // a stray rejected promise (a check, a hook, a socket) must not take the whole app down: log it loudly instead
 process.on('unhandledRejection', (e) => { console.error('[unhandledRejection]', e?.stack || e); });
 
+for (const f of store.listFlows()) { const g = store.getFlow(f.id); if (g?.steps?.some((s) => !s.slug)) store.updateFlow(f.id, () => {}); }
 for (const f of store.listFlows()) { const full = store.getFlow(f.id); if (full) { engine.syncSchedule(full); W.syncPolling(full); scheduleInvokeDoc(full.id); } }
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `El puerto ${PORT} ya está en uso: ¿hay otro Agent Flow Studio corriendo?` : e.message); process.exit(1); });
 server.listen(PORT, HOST, () => {
