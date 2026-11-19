@@ -303,3 +303,19 @@ Spec 14 v1 is closed after 2 independent reviews and 5 adversarial passes. In to
 - 31 findings fixed;
 - every one with a regression test (`29-*`: 18 tests);
 - E2E 281/281.
+
+### Code review of the session (after closing)
+
+A code review of `aac451e..20a2483` (specs 10, 14, 15, 28, 30) found 10 issues. All are fixed, and each fix has a regression test (`29-*`: 21 tests; E2E 284/284).
+
+**Fixed:**
+- **"Si falla" actions ran twice.** When a deliverable failed the step, the failure actions were planned twice. They now run once.
+- **Approval lost new marks.** Approving a "halfway" action deleted the new `suspicious`/`started` marks that its own execution wrote. Old traces are now cleared *before* executing.
+- **Edit over a clipped view.** "Editar y aprobar" could open a view whose params were clipped at 300 characters. That view now carries `paramsClipped` and the button is disabled there.
+- **"Detener" did not stop actions.** Declared actions used a step signal whose listener had already been removed. They now use the run signal, so stopping the run cuts an action in flight.
+- **One error could abort the whole run.** An exception in deliverables or actions (a locked file, an invalid `if` regex) now fails only that step (`OUTPUTS_ERROR`), or only that action ("condición inválida").
+- **`git log -S` lacked hardening.** The deterministic search now uses `--no-textconv --no-ext-diff` and the shared safe config (`server/safe.js`: `diff.external=`, `core.fsmonitor=false`). Watches use the same config.
+- **"Para cada" elements overwrote each other's copies.** With a fixed name and a destination, an element overwrote another element's copy in the same run. Copies now record run and element; the overwrite is an error that asks for `{{item.index}}` in the name.
+- **Stale plans at step start.** A step start did not clear `lastRun.declaredActions`/`deliverables`, so plans from the previous run showed under the new one.
+- **YAML tab check.** It now looks for a tab in the indentation of *every* line.
+- **Duplicated helpers.** `untrusted()` and the git config were copied in several files. They are now shared in `server/safe.js`.

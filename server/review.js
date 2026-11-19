@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { SAFE_GIT, NO_TEXTCONV } from './safe.js';
 import { fileURLToPath } from 'node:url';
 import * as store from './store.js';
 import * as P from './prompt.js';
@@ -393,7 +394,7 @@ export function assertionTexts(flow, digests, max = 6) {
 }
 /** {ok, code, out}: code 1 is git's "no" (merge-base --is-ancestor); a timeout/abort/other error is NOT a "no". */
 const gitRun = (repo, args, signal, timeout = 30000) => new Promise((resolve) => {
-  execFile('git', ['-C', repo, '-c', 'core.pager=cat', '--no-pager', ...args], { encoding: 'utf8', timeout: Math.max(1000, timeout), maxBuffer: 4 * 1024 * 1024, windowsHide: true, signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } },
+  execFile('git', ['-C', repo, ...SAFE_GIT, ...args], { encoding: 'utf8', timeout: Math.max(1000, timeout), maxBuffer: 4 * 1024 * 1024, windowsHide: true, signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } },
     (err, out) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' && !err.killed ? err.code : null) : 0, out: String(out || '') }));
 });
 const noTags = (s) => String(s).replace(/<\/?untrusted-data>/gi, '[etiqueta]');
@@ -414,7 +415,7 @@ export async function searchAssertionTexts(flow, digests, repos, signal) {
   await Promise.all(repos.slice(0, 6).map(async (repo) => {
     for (const text of texts) {
       if (signal?.aborted || left() < 1000) { failed.push(`${path.basename(repo)}: sin tiempo`); return; }
-      const args = ['log', '--all', '--since=6.months', '--format=%h %ad %s', '--date=short', '-n', '5', '-S', text];
+      const args = ['log', ...NO_TEXTCONV, '--all', '--since=6.months', '--format=%h %ad %s', '--date=short', '-n', '5', '-S', text];
       const lg = await gitRun(repo, args, signal, Math.min(30000, left()));
       if (!lg.ok) { failed.push(`${path.basename(repo)}: «${clip(text, 40)}»`); continue; }
       const lines = lg.out.split('\n').map((l) => l.trim()).filter(Boolean);

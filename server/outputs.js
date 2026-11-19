@@ -22,6 +22,7 @@ import crypto from 'node:crypto';
 import * as store from './store.js';
 import * as P from './prompt.js';
 import { runClaude } from './claude.js';
+import { untrusted } from './safe.js';
 
 const ATL = 'mcp__claude_ai_Atlassian_Rovo';
 const T = (...n) => n.map((x) => `${ATL}__${x}`);
@@ -111,7 +112,7 @@ export function deliverableContent(d, output, json) {
   if (d.format === 'feature' && !(/^\s*(Feature|Característica|Funcionalidad):/m.test(text) && /^\s*(Scenario|Escenario|Scenario Outline|Esquema del escenario)/m.test(text))) return { error: 'Un .feature necesita "Feature:" y al menos un "Scenario"' };
   if (d.format === 'junit-xml' && !(/^\s*(<\?xml[^>]*>\s*)?<testsuites?\b/.test(text) && /<\/testsuites?>\s*$/.test(text))) return { error: 'El JUnit XML debe empezar con <testsuite(s)> y cerrarlo' };
   if (d.format === 'yaml' && /^\s*[{[]/.test(text)) { try { JSON.parse(text); } catch { return { error: 'YAML inválido' }; } }
-  if (d.format === 'yaml' && /\t/.test(text.split('\n').find((l) => /^\s+/.test(l)) || '')) return { error: 'YAML con tabuladores en la indentación' };
+  if (d.format === 'yaml' && text.split('\n').some((l) => /^ *\t/.test(l))) return { error: 'YAML con tabuladores en la indentación' };
   if (!String(text).trim()) return { error: 'Quedaría vacío' };
   return { text };
 }
@@ -145,8 +146,10 @@ export function writeDeliverables(flow, step, run, { key, output, json, render }
         if (dst.path.includes('{{') || !path.isAbsolute(dst.path) || !fs.existsSync(dst.path) || !fs.statSync(dst.path).isDirectory()) throw new Error('la carpeta destino debe existir (ruta absoluta, sin plantillas)');
         const target = path.join(dst.path, name);
         const copies0 = readCopies(flow.id);
-        if (fs.existsSync(target) && !d.overwrite && copies0[target.toLowerCase()] !== sha(fs.readFileSync(target))) throw new Error('ya existe un archivo con ese nombre que no dejó este flujo (o cambió desde entonces): no se sobrescribe salvo que el step lo permita');
-        fs.copyFileSync(file, target); copies.push({ path: target }); copies0[target.toLowerCase()] = sha(c.text); writeCopies(flow.id, copies0);
+        const prev = copies0[target.toLowerCase()]; const prevSha = typeof prev === 'string' ? prev : prev?.sha;
+        if (prev && typeof prev === 'object' && prev.runId === run.id && prev.key !== key) throw new Error('otro elemento de esta ejecución ya dejó un archivo con ese nombre: pon {{item.index}} (o {{item.x}}) en el nombre del entregable');
+        if (fs.existsSync(target) && !d.overwrite && prevSha !== sha(fs.readFileSync(target))) throw new Error('ya existe un archivo con ese nombre que no dejó este flujo (o cambió desde entonces): no se sobrescribe salvo que el step lo permita');
+        fs.copyFileSync(file, target); copies.push({ path: target }); copies0[target.toLowerCase()] = { sha: sha(c.text), runId: run.id, key }; writeCopies(flow.id, copies0);
       } catch (e) { copies.push({ path: dst.path, error: clip(e.message, 200) }); res.errors.push(`📄 ${name} → ${dst.path}: ${clip(e.message, 200)}`); }
     }
     res.files.push({ id: d.id, stepKey: key, format: d.format, name, path: file, size: Buffer.byteLength(c.text), sha: sha(c.text), copies });
@@ -196,7 +199,7 @@ export function planActions(flow, step, run, { status, output, json, render, eva
     if (when === 'success' && status !== 'success') continue;
     if (when === 'failure' && status === 'success') continue;
     const base = { actionId: a.id, type: a.type, label: ACTION_TYPES[a.type]?.label || a.type, optional: !!a.optional, at: Date.now(), stepKey, ...(item != null ? { item: clip(item, 80) } : {}) };
-    if (a.if) { const c = evalCond(a.if, output, json); if (!c.pass) { plans.push({ ...base, status: 'skipped', reason: `condición: ${c.message}` }); continue; } }
+    if (a.if) { let c; try { c = evalCond(a.if, output, json); } catch (e) { plans.push({ ...base, status: 'error', error: `condición inválida: ${clip(e.message, 200)}` }); continue; } if (!c.pass) { plans.push({ ...base, status: 'skipped', reason: `condición: ${c.message}` }); continue; } }
     if (a.type === 'http.post' && FROM_RUN.test(String(a.params?.url || ''))) { plans.push({ ...base, status: 'error', error: 'La URL de un webhook no puede salir de la ejecución (output, steps, item, input): usa un valor fijo o {{vars.x}}' }); continue; }
     if (a.type === 'http.post' && /\{\{\{\s*(output|steps\.|item|input|upstream)/.test(String(a.params?.body || ''))) { plans.push({ ...base, status: 'error', error: 'El cuerpo de un webhook no puede insertar datos de la ejecución sin escapar ({{{…}}}): usa {{…}}' }); continue; }
     if (a.idempotencyKey && FROM_RUN.test(a.idempotencyKey)) { plans.push({ ...base, status: 'error', error: 'La clave para no repetir no puede salir de la ejecución (output, steps, item, input): usa {{vars.x}} o un texto fijo' }); continue; }
@@ -222,7 +225,6 @@ export function planActions(flow, step, run, { status, output, json, render, eva
   return plans;
 }
 
-const untrusted = (s) => `<untrusted-data>\n${String(s).replace(/<\/?untrusted-data>/gi, '[etiqueta]')}\n</untrusted-data>`;
 let httpAuth = () => ({});
 export function init(d) { if (d.httpAuth) httpAuth = d.httpAuth; }
 
@@ -402,7 +404,7 @@ export async function decide(flowId, runId, stepKey, actionId, { approve, params
       return fresh;
     };
     setStatus((x) => ({ ...x, status: 'executing' }), (x) => x.status === 'awaiting_approval');
-    let res;
+    let res; let settled = false;
     if (!approve) res = { ...plan, status: 'rejected', decidedAt: Date.now() };
     else if (deps.policyBlocked(flow)) res = { ...plan, status: 'blocked', reason: 'la política «sin escrituras externas» no permite acciones', decidedAt: Date.now() };
     else {
@@ -423,9 +425,12 @@ export async function decide(flowId, runId, stepKey, actionId, { approve, params
       }
       const done = p.ident && readLedger(flowId).find((x) => x.ident === p.ident && x.status === 'done');
       if (done) res = { ...p, status: 'exists', key: done.key, url: done.url, reason: `ya se hizo en ${done.runId}`, decidedAt: Date.now() };
-      else { res = await executeAction(flow, p, { runId }); res.decidedAt = Date.now(); }
+      else {
+        if (plan.reason && /quedó a medias|no coincidió/.test(plan.reason)) { settleTraces(flowId, plan); settled = true; }
+        res = await executeAction(flow, p, { runId }); res.decidedAt = Date.now();
+      }
     }
-    if (plan.reason && /quedó a medias|no coincidió/.test(plan.reason)) settleTraces(flowId, plan);
+    if (!settled && plan.reason && /quedó a medias|no coincidió/.test(plan.reason)) settleTraces(flowId, plan);
     const fresh = setStatus(() => res, (x) => x.status === 'executing');
     if (res.status === 'done' || res.status === 'exists') for (const k of new Set([realKey, realKey.split('~')[0]])) if (fresh.steps?.[k]) (fresh.steps[k].actions ||= []).push({ tool: res.type, server: 'declarada', ok: true, key: res.key, url: res.url });
     deps.saveRun(fresh);
@@ -441,7 +446,7 @@ export async function decide(flowId, runId, stepKey, actionId, { approve, params
   } finally { locks.delete(lockKey); }
 }
 /** What the step's last run (inside the flow file) keeps of a plan: params clipped (the run record has them whole). */
-export const lastRunView = (p) => ({ ...p, ...(p.params ? { params: Object.fromEntries(Object.entries(p.params).map(([k, v]) => [k, typeof v === 'string' ? clip(v, 300) : v])) } : {}) });
+export const lastRunView = (p) => ({ ...p, ...(p.params ? { params: Object.fromEntries(Object.entries(p.params).map(([k, v]) => [k, typeof v === 'string' ? clip(v, 300) : v])), ...(Object.values(p.params).some((v) => typeof v === 'string' && v.length > 300) ? { paramsClipped: true } : {}) } : {}) });
 
 /** Attention item (spec 27): declared actions waiting for a person, in ANY run of the flow. */
 export function attentionItem(flow) {

@@ -361,7 +361,7 @@ async function executeForEach(flow, step, input, run, signal, upstream, opts) {
   const rs = run.steps[step.id] = { status: 'running', startedAt: now(), events: [], output: '', files: [], actions: [], inputs: upstream.map((u) => ({ step: u.name, stepId: u.id, source: u.source || 'run', fromRunId: u.fromRunId || null, at: u.at || null, viaRef: false })), assertions: [], warnings: [], denials: [], attempts: [] };
   const setLast = (patch) => { if (!run.rehearsal) setStepRun(flow.id, step.id, patch); };
   const note = (text, kind = 'hook_log') => { const e = { kind, text, t: now(), seq: ++run.eventSeq }; rs.events.push(e); emit({ type: 'run.event', flowId: flow.id, runId: run.id, stepId: step.id, event: e }); };
-  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null });
+  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null, declaredActions: undefined, deliverables: undefined });
   emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   const end = (status, extra = {}) => {
     Object.assign(rs, { status, ...extra }); rs.endedAt = now(); rs.durationMs = rs.endedAt - rs.startedAt;
@@ -457,7 +457,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     }
     emit({ type: 'run.event', flowId: flow.id, runId: run.id, stepId: step.id, event: e });
   };
-  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null });
+  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null, declaredActions: undefined, deliverables: undefined });
   opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   store.saveRun(run);
 
@@ -771,6 +771,15 @@ ${cgit.block}`;
 
   /** Spec 14: 📄 deliverables and ⚡ declared actions of this step (after its own work, and after its "after" break). */
   async function applyOutputs() {
+    try { await applyOutputs0(); } catch (e) {
+      // a broken output (locked file, bad template…) fails THIS step, never the whole run
+      log({ kind: 'error', text: `📄⚡ ${e.message}` });
+      if (rs.status === 'success') { rs.status = 'error'; rs.code = 'OUTPUTS_ERROR'; rs.error = `Entregables/acciones: ${e.message}`; }
+    }
+  }
+  async function applyOutputs0() {
+    // the RUN signal: the step's own listener is gone by now, and "Detener" must stop an action in flight
+    const osig = signal || sig;
     const key = opts.nested || step.id;
     const render = (tpl, o = {}) => P.render(tpl, { flow, vars: flow.vars, input: ctx.input, data, ...rctx, output: rs.output, outputJson: rs.json, ...(o.jsonEscape ? { quote: (v) => JSON.stringify(String(v)).slice(1, -1) } : {}) });
     const wasOk = rs.status === 'success';
@@ -787,6 +796,7 @@ ${cgit.block}`;
     if ((step.actions || []).length) {
       const base = { output: rs.output, json: rs.json, render, evalCond: (w, o, j) => evalAssertion(w, o, j), stepKey: key, item: opts.item ? itemLabel(opts.item.value) : undefined, policyBlocked: POL.has(flow, 'noExternalWrites'), forceConfirm: !!opts.forceConfirm, isLive: (rid) => activeRuns.has(rid) || OUT.isDeciding(rid) };
       const done = [];
+      const okBefore = rs.status === 'success';
       const runPlans = async (plans) => {
         for (const p of plans) {
           if (p.status !== 'pending') {
@@ -797,7 +807,8 @@ ${cgit.block}`;
             continue;
           }
           log({ kind: 'hook_log', text: `⚡ ${p.label}…` });
-          const res = await OUT.executeAction(flow, p, { signal: sig, runId: run.id });
+          if (osig.aborted) { done.push({ ...p, status: 'error', error: 'ejecución detenida' }); continue; }
+          const res = await OUT.executeAction(flow, p, { signal: osig, runId: run.id });
           done.push(res);
           log({ kind: res.status === 'done' ? 'hook_log' : 'error', text: res.status === 'done' ? `⚡ ${p.label}: ✓ ${res.key || 'hecho'}${res.url ? ` ${res.url}` : ''}` : `⚡ ${p.label}: ✗ ${res.error}` });
           if (res.status === 'done') rs.actions.push({ tool: p.type, server: 'declarada', ok: true, key: res.key, url: res.url });
@@ -806,12 +817,13 @@ ${cgit.block}`;
       };
       await runPlans(OUT.planActions(flow, step, run, { ...base, status: rs.status }));
       // the step turned into a failure because of a deliverable or an action: the "si falla" actions run now
-      if (wasOk && rs.status !== 'success') await runPlans(OUT.planActions(flow, step, run, { ...base, status: rs.status, only: ['failure'] }));
+      // (a deliverable that already failed the step got them in the first call)
+      if (okBefore && rs.status !== 'success') await runPlans(OUT.planActions(flow, step, run, { ...base, status: rs.status, only: ['failure'] }));
       rs.declaredActions = done;
       OUT.addPending(flow.id, run.id, done);
     }
     // onFailure already ran for the step's own errors; a failure caused here gets it too
-    if (wasOk && rs.status !== 'success' && hooks.onFailure && !sig.aborted) { ctx.error = rs.error; log({ kind: 'hook', text: 'onFailure' }); try { await hooks.onFailure(ctx); } catch (e) { log({ kind: 'error', text: `Hook/step error: ${e.message}` }); } }
+    if (wasOk && rs.status !== 'success' && hooks.onFailure && !osig.aborted) { ctx.error = rs.error; log({ kind: 'hook', text: 'onFailure' }); try { await hooks.onFailure(ctx); } catch (e) { log({ kind: 'error', text: `Hook/step error: ${e.message}` }); } }
   }
 
   function finish() {

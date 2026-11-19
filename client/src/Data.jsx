@@ -299,7 +299,7 @@ function Produced({ flow, runId, view }) {
                   ) : (
                     <div className="row">
                       <button className="primary small" data-testid="action-approve" disabled={!!busy} onClick={() => decide(p, true)}>{busy === p.actionId ? 'Enviando…' : 'Aprobar'}</button>
-                      <button className="ghost small" onClick={() => setEditing(i)}>Editar y aprobar</button>
+                      <button className="ghost small" data-testid="action-edit" disabled={!!p.paramsClipped} title={p.paramsClipped ? 'Abre la ejecución (no la vista resumida) para editar el texto completo' : undefined} onClick={() => setEditing(i)}>Editar y aprobar</button>
                       <button className="ghost small" data-testid="action-reject" disabled={!!busy} onClick={() => decide(p, false)}>Rechazar</button>
                     </div>
                   )

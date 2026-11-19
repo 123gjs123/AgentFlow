@@ -481,3 +481,72 @@ test('revisión 14d: additional_fields no mueve el issue; el sub-task va al proy
   assert.match(by('lkc').error, /no debía usar comment/);
   assert.match(by('ttl').error, /title=\(ninguno\)/);
 });
+
+// ---- code review of the session (specs 10/14/15/28/30) ----
+test('code review: un entregable inválido corre UNA vez las acciones "si falla"; una condición inválida falla solo esa acción; YAML con tab en cualquier línea', async () => {
+  let posts = 0;
+  const srv = http.createServer((req, res) => { posts++; req.resume(); res.writeHead(200); res.end(); });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${srv.address().port}/f`;
+    const yml = JSON.stringify({ y: 'a:\n  b: 1\nc:\n\td: 2' });
+    const st = role('Paso', `[[mock:json ${yml}]]`, { id: 's_cr', output: { format: 'json' },
+      deliverables: [{ id: 'd_y', format: 'yaml', path: 'x.yaml', from: 'json.y' }],
+      actions: [
+        { id: 'a_f', type: 'http.post', when: 'failure', approval: 'auto', params: { url, body: 'falló' } },
+        { id: 'a_rx', type: 'http.post', when: 'failure', approval: 'auto', optional: true, if: { type: 'regex', pattern: '(' }, params: { url, body: 'x' } },
+      ] });
+    const next = cmd('Después', 'Write-Output fin', { id: 's_cr2' });
+    const f = await s.flow('Falla una vez', [st, next], [], { policies: [] });
+    const r = await run(f.id);
+    assert.equal(r.steps.s_cr.status, 'error');
+    assert.match(r.steps.s_cr.error, /tabuladores/);
+    const by = (id) => r.steps.s_cr.declaredActions.filter((p) => p.actionId === id);
+    assert.equal(by('a_f').length, 1, 'planificada una sola vez');
+    assert.equal(posts, 1, 'el webhook "si falla" se envió una sola vez');
+    assert.match(by('a_rx')[0].error, /condición inválida/);
+    assert.equal(r.steps.s_cr2.status, 'success', 'el resto de la ejecución sigue');
+  } finally { srv.close(); }
+});
+
+test('code review: en "para cada" un nombre fijo con carpeta destino no pisa la copia de otro elemento; la vista del flujo marca los datos recortados', async () => {
+  const dest = path.join(s.dirs.work, `dest-cr-${Date.now()}`); fs.mkdirSync(dest, { recursive: true });
+  const src = role('Lista', '[[mock:json {"t":["A","B"]}]]', { id: 's_l3', output: { format: 'json' } });
+  const each = role('Cada', 'r {{item}} [[mock:echo]]', { id: 's_e3', forEach: { path: 't' }, deliverables: [
+    { id: 'd_fix', format: 'txt', path: 'fijo.txt', destination: [{ path: dest }] },
+    { id: 'd_idx', format: 'txt', path: 'r-{{item.index}}.txt', destination: [{ path: dest }] },
+  ] });
+  const f = await s.flow('Copias por elemento', [src, each], [['s_l3', 's_e3']]);
+  const r = await run(f.id);
+  assert.equal(r.steps['s_e3~1'].status, 'success', r.steps['s_e3~1'].error);
+  assert.match(r.steps['s_e3~2'].error || '', /otro elemento de esta ejecución/);
+  assert.match(fs.readFileSync(path.join(dest, 'fijo.txt'), 'utf8'), /r A/, 'la copia del elemento 1 sigue');
+  assert.ok(fs.existsSync(path.join(dest, 'r-1.txt')) && fs.existsSync(path.join(dest, 'r-2.txt')));
+  // a second run may replace its own earlier copies (same flow, other run)
+  const r2 = await run(f.id);
+  assert.equal(r2.steps['s_e3~1'].status, 'success', r2.steps['s_e3~1'].error);
+  // long params: the flow-file view is clipped and says so (no "edit and approve" over it)
+  const long = 'x'.repeat(400);
+  const st = role('Largo', '[[mock:say ok]]', { id: 's_lg', actions: [{ id: 'a_lg', type: 'jira.comment', approval: 'confirm', params: { issue: 'SBK-1', body: long } }] });
+  const f2 = await s.flow('Recorte', [st], []);
+  const r3 = await run(f2.id);
+  assert.equal(r3.steps.s_lg.declaredActions[0].params.body, long, 'el registro de la ejecución lo tiene entero');
+  const g = await s.getFlow(f2.id);
+  assert.equal(g.steps[0].lastRun.declaredActions[0].paramsClipped, true);
+});
+
+test('code review: "Detener" corta una acción en curso', async () => {
+  const srv = http.createServer(() => {}); // never answers
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const st = role('Hook', '[[mock:say y]]', { id: 's_st', actions: [{ id: 'a_st', type: 'http.post', approval: 'auto', params: { url: `http://127.0.0.1:${srv.address().port}/h`, body: 'x' } }] });
+    const f = await s.flow('Detener acción', [st], [], { policies: [] });
+    const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '', breakpoints: false });
+    await until(async () => fs.existsSync(path.join(s.dirs.data, 'actions', `${f.id}.json`)) && /started/.test(fs.readFileSync(path.join(s.dirs.data, 'actions', `${f.id}.json`), 'utf8')), 8000);
+    const t0 = Date.now();
+    await s.uiOk('POST', `/api/flows/${f.id}/stop`, {});
+    const r = await s.waitRun(f.id, runId);
+    assert.ok(Date.now() - t0 < 15000, 'no esperó los 3 minutos');
+    assert.match(r.steps.s_st.declaredActions[0].error || '', /ejecución detenida/);
+  } finally { srv.closeAllConnections?.(); srv.close(); }
+});
