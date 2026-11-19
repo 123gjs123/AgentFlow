@@ -20,7 +20,8 @@ Uso:
 Opciones de run:
   -i, --input "<texto>"     Input del flujo   (o -f archivo, o por stdin:  echo x | afs run F)
   -f, --file <ruta>         Lee el input de un archivo
-  -s, --step <nombre>       Ejecuta solo ese step
+  -s, --step <nombre>       Ejecuta solo ese step (nombre, slug o id)
+  --from                    Con --step: ese step y todo lo que sigue (los anteriores dan su última salida)
   --var clave=valor         Variable SOLO para esta ejecución (repetible; no se guarda en el flujo)
   --pins                    Usa las salidas fijadas (📌). Por defecto se ignoran y todo se ejecuta
   --deadline <seg>          Tiempo máximo de la ejecución en el servidor (por defecto el del flujo, 3600)
@@ -47,6 +48,7 @@ for (let i = 0; i < argv.length; i++) {
   if (a === '-i' || a === '--input') opts.input = argv[++i];
   else if (a === '-f' || a === '--file') { try { opts.input = fs.readFileSync(argv[++i], 'utf8'); } catch (e) { console.error(`No se pudo leer ${argv[i]}: ${e.message}`); process.exit(2); } }
   else if (a === '-s' || a === '--step') opts.step = argv[++i];
+  else if (a === '--from') opts.from = true;
   else if (a === '--var') { const [k, ...v] = argv[++i].split('='); if (!k || !v.length) { console.error(`--var debe ser clave=valor: ${argv[i]}`); process.exit(2); } opts.vars[k] = v.join('='); }
   else if (a === '--pins') opts.pins = true;
   else if (a === '--deadline') opts.deadline = Number(argv[++i]);
@@ -107,10 +109,12 @@ async function main() {
     const flow = pos[0];
     if (!flow) { err('Falta <flujo>. Ver: afs help'); return 2; }
     const input = opts.input ?? (await readStdin());
-    const body = { input, step: opts.step, vars: Object.keys(opts.vars).length ? opts.vars : undefined, source: 'cli', usePins: !!opts.pins, deadlineSec: opts.deadline || undefined, breakpoints: !!opts.breaks };
+    if (opts.from && !opts.step) { err('--from necesita --step'); return 2; }
+    const body = { input, step: opts.step, ...(opts.from ? { scope: 'from' } : {}), vars: Object.keys(opts.vars).length ? opts.vars : undefined, source: 'cli', usePins: !!opts.pins, deadlineSec: opts.deadline || undefined, breakpoints: !!opts.breaks };
     if (opts.dryRun) {
       const r = await call('POST', `${flowPath(flow)}/run`, { ...body, dryRun: true }, opts.key ? { 'Idempotency-Key': opts.key } : {});
-      if (opts.json) console.log(JSON.stringify(r, null, 2)); else { console.log(`OK (dry run): se ejecutarían ${r.steps.length} step(s): ${r.steps.join(' → ')}`); for (const w of r.warnings) err(`⚠ ${w}`); }
+      if (opts.json) console.log(JSON.stringify(r, null, 2)); else { console.log(`${r.ok === false ? 'NO (dry run)' : 'OK (dry run)'}: se ejecutarían ${r.steps.length} step(s): ${r.steps.join(' → ')}`); for (const w of r.warnings) err(`⚠ ${w}`); if (r.fromProblem) err(`✗ ${r.fromProblem.error}`); for (const m of r.preflight?.missing || []) err(`✗ falta: ${m.name || m.label || m.id || JSON.stringify(m)}`); }
+      if (r.ok === false) return 1;
       return 0;
     }
     if (opts.noWait) { const r = await call('POST', `${flowPath(flow)}/run`, { ...body, wait: false }, opts.key ? { 'Idempotency-Key': opts.key } : {}); console.log(opts.json ? JSON.stringify(r) : r.runId); return 0; }

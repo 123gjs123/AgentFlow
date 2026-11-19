@@ -7,6 +7,7 @@ import { ACCESS, accessOf } from './presets.js';
 import { ExternalInvoke } from './Help.jsx';
 import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
 import ContextBox from './Context.jsx';
+import StepInvoke from './StepInvoke.jsx';
 import ContextSources, { FsPicker } from './Sources.jsx';
 import RequirementsEditor from './Requirements.jsx';
 import ReviewPanel from './ReviewPanel.jsx';
@@ -116,7 +117,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
         <button className="ghost danger small" onClick={() => confirm(`¿Eliminar "${step.name}"?`) && onDelete()}>Eliminar</button>
       </div>
       <div className="tabs">
-        {[['config', 'Config'], ['chat', 'Chat'], ['activity', `Actividad${status === 'running' ? ' ●' : ''}`], ['data', `Datos${step.pinned ? ' 📌' : ''}`], ['memory', `Memoria (${step.memory?.length || 0})`], ['hooks', 'Hooks']].map(([k, l]) => (
+        {[['config', 'Config'], ['chat', 'Chat'], ['activity', `Actividad${status === 'running' ? ' ●' : ''}`], ['data', `Datos${step.pinned ? ' 📌' : ''}`], ['memory', `Memoria (${step.memory?.length || 0})`], ['hooks', 'Hooks'], ['invoke', '🔌 Invocar']].map(([k, l]) => (
           <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>
@@ -252,6 +253,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
       )}
 
       {tab === 'data' && <DataTab flow={flow} step={step} live={live} />}
+      {tab === 'invoke' && <StepInvoke flow={flow} step={step} />}
 
       {tab === 'memory' && <Memory flowId={flow.id} scope={step.id} items={step.memory} />}
 
@@ -402,7 +404,7 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
                 <li key={r.id} onClick={() => api.get(`/api/flows/${flow.id}/runs/${r.id}`).then(setRunDetail)}>
                   <span className={`status s-${r.status}`}>{r.status}</span>
                   <span>{new Date(r.startedAt).toLocaleString()}</span>
-                  <span className="chip">{r.trigger === 'rehearsal' ? '🧪 ensayo' : r.trigger}{r.only ? ' · 1 step' : ''}</span>
+                  <span className="chip">{r.trigger === 'rehearsal' ? '🧪 ensayo' : r.trigger}{r.only ? ' · 1 step' : r.from ? ` · desde ${flow.steps.find((s) => s.id === r.from)?.name || r.from}` : ''}</span>
                   <span className="muted small grow">{r.input}</span>
                   {r.totals && <span className="muted small">{Math.round((r.totals.durationMs || 0) / 1000)} s{r.totals.costUsd ? ` · ≈US$${r.totals.costUsd.toFixed(3)}` : ''}</span>}
                   {r.status === 'running' && <button className="danger small" onClick={(e) => { e.stopPropagation(); api.post(`/api/flows/${flow.id}/runs/${r.id}/cancel`).then(() => api.get(`/api/flows/${flow.id}/runs`).then(setRuns)).catch(() => {}); }}>■ Cancelar</button>}

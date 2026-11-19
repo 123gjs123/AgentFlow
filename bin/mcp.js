@@ -17,7 +17,8 @@ const TOOLS = [
       properties: {
         flow: { type: 'string', description: 'Nombre o id del flujo' },
         input: { type: 'string', description: 'Input del flujo (requerimiento, ticket, texto, JSON…)' },
-        step: { type: 'string', description: 'Opcional: ejecutar solo este step (nombre o id)' },
+        step: { type: 'string', description: 'Opcional: ejecutar solo este step (nombre, slug o id)' },
+        from: { type: 'boolean', description: 'Con step: ejecutar ese step y todo lo que sigue; los anteriores pasan su última salida (default false)' },
         vars: { type: 'object', description: 'Opcional: variables SOLO para esta ejecución (no se guardan en el flujo)', additionalProperties: { type: 'string' } },
         wait: { type: 'boolean', description: 'Esperar el resultado (default true). Si false devuelve el runId.' },
         timeoutSec: { type: 'number', description: 'Máximo a esperar (default 600)' },
@@ -75,7 +76,7 @@ async function callTool(name, a = {}) {
       return flows.map((f) => `• ${f.name} (${f.id})${f.description ? ` — ${f.description}` : ''}\n  steps: ${f.steps.map((s) => s.name).join(' → ') || '—'}${(f.vars || []).length ? `\n  variables: ${f.vars.join(', ')}` : ''}`).join('\n') || 'No hay flujos.';
     }
     case 'run_flow': {
-      const body = { input: a.input || '', step: a.step, vars: a.vars, source: 'mcp', usePins: !!a.usePins, deadlineSec: a.deadlineSec, breakpoints: !!a.breakpoints };
+      const body = { input: a.input || '', step: a.step, ...(a.from && a.step ? { scope: 'from' } : {}), vars: a.vars, source: 'mcp', usePins: !!a.usePins, deadlineSec: a.deadlineSec, breakpoints: !!a.breakpoints };
       const headers = a.idempotencyKey ? { 'Idempotency-Key': String(a.idempotencyKey) } : {};
       if (a.wait === false) { const r = await call('POST', `${flowPath(a.flow)}/run`, { ...body, wait: false }, headers); return { content: [{ type: 'text', text: `Ejecución iniciada: ${r.runId}. Consulta con get_run o cancela con cancel_run.` }], structuredContent: r }; }
       return runResult(await runAndWait(a.flow, body, { timeoutSec: a.timeoutSec || 600, idempotencyKey: a.idempotencyKey }));

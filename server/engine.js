@@ -869,6 +869,17 @@ export function unpinStep(flowId, stepId) {
 }
 
 /** Every step reachable from id by arrows (not id itself). */
+/** Spec 10/12: "desde este step" = that step and everything after it. */
+export const fromSetOf = (flow, from) => new Set([from, ...descendantsOf(flow, from)]);
+/** Why a run "desde <from>" cannot start: a step before it has no good last output to pass on. null = it can. */
+export function fromProblem(flow, from, { usePins = true } = {}) {
+  const set = fromSetOf(flow, from);
+  const missing = [...new Set(flow.edges.filter((e) => set.has(e.target) && !set.has(e.source)).map((e) => e.source))]
+    .map((id) => flow.steps.find((s) => s.id === id)).filter((s) => s && !(usePins && s.pinned) && s.lastRun?.status !== 'success' && !(s.lastRun?.status === 'skipped' && ['not_routed', 'empty', 'review', 'hook'].includes(s.lastRun?.skipReason)));
+  // (not_routed / empty "para cada" are not failures: their arrows stay inactive in this run)
+  if (!missing.length) return null;
+  return { status: 409, code: 'FROM_UPSTREAM_MISSING', error: `No se puede ejecutar desde «${flow.steps.find((s) => s.id === from).name}»: ${missing.map((s) => `«${s.name}»`).join(', ')} no tiene una última salida buena para pasarle (${missing.map((s) => s.lastRun?.status || 'nunca se ejecutó').join(', ')}). Ejecuta el flujo completo o ese step primero.`, missing: missing.map((s) => s.name) };
+}
 export function descendantsOf(flow, id) {
   const seen = new Set(); const stack = [id];
   while (stack.length) { const cur = stack.pop(); for (const e of flow.edges) if (e.source === cur && !seen.has(e.target)) { seen.add(e.target); stack.push(e.target); } }
@@ -885,8 +896,9 @@ export function ancestorsOf(flow, id) {
 }
 
 /** Checks done before an external run starts (REL-2, VER-3). Returns {status, code, error} or null. */
-export function externalRunProblem(flow, { only = null, vars = null } = {}) {
-  const steps = only ? flow.steps.filter((s) => s.id === only) : flow.steps;
+export function externalRunProblem(flow, { only = null, from = null, vars = null } = {}) {
+  const fset = !only && from ? fromSetOf(flow, from) : null;
+  const steps = only ? flow.steps.filter((s) => s.id === only) : fset ? flow.steps.filter((s) => fset.has(s.id)) : flow.steps;
   const reqVars = new Set(Object.keys(vars || {}));
   const qp = quarantineProblem(flow); if (qp) return qp;
   const cp = cwdProblem(flow); if (cp) return cp;
@@ -959,13 +971,8 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
   // Spec 28 policy "noParallelRuns": shared environments are wiped by parallel runs of the same flow
   if (POL.has(flow, 'noParallelRuns') && isRunning(flowId)) throw Object.assign(new Error('Este flujo ya se está ejecutando y su política no permite dos ejecuciones a la vez (ambientes compartidos). Espera a que termine o detenla.'), { status: 409, code: 'FLOW_BUSY' });
   // spec 10: "desde este step" = that step and everything after it; the steps before keep their last output (not re-run)
-  const fromSet = !only && from ? new Set([from, ...descendantsOf(flow, from)]) : null;
-  if (fromSet) {
-    const missing = [...new Set(flow.edges.filter((e) => fromSet.has(e.target) && !fromSet.has(e.source)).map((e) => e.source))]
-      .map((id) => flow.steps.find((s) => s.id === id)).filter((s) => s && !s.pinned && s.lastRun?.status !== 'success' && !(s.lastRun?.status === 'skipped' && ['not_routed', 'empty', 'review', 'hook'].includes(s.lastRun?.skipReason)));
-    // (not_routed / empty "para cada" are not failures: their arrows stay inactive in this run)
-    if (missing.length) throw Object.assign(new Error(`No se puede ejecutar desde «${flow.steps.find((s) => s.id === from).name}»: ${missing.map((s) => `«${s.name}»`).join(', ')} no tiene una última salida buena para pasarle (${missing.map((s) => s.lastRun?.status || 'nunca se ejecutó').join(', ')}). Ejecuta el flujo completo o ese step primero.`), { status: 409, code: 'FROM_UPSTREAM_MISSING' });
-  }
+  const fromSet = !only && from ? fromSetOf(flow, from) : null;
+  if (fromSet) { const p = fromProblem(flow, from, { usePins }); if (p) throw Object.assign(new Error(p.error), { status: p.status, code: p.code }); }
   const levels = only ? [[only]] : topoLevels(flow).map((l) => (fromSet ? l.filter((id) => fromSet.has(id)) : l)).filter((l) => l.length);
   // Spec 28: an empty variable takes the policy default ("ambiente por defecto")
   const runVars = POL.withDefaults(flow, { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) });
@@ -2068,11 +2075,12 @@ export function runSummary(flow, run) {
     deliverables: nz((s.deliverables || []).map((d) => ({ id: d.id, stepKey: d.stepKey, name: d.name, format: d.format, size: d.size, url: `/api/ext/flows/${flow.id}/runs/${run.id}/files/${encodeURIComponent(d.id)}?step=${encodeURIComponent(d.stepKey || id)}` }))),
     declaredActions: nz((s.declaredActions || []).map(({ params, hash, ident, ...p }) => p)),
   }));
-  const sinks = run.only ? [run.only] : flow.steps.filter((s) => !flow.edges.some((e) => e.source === s.id)).map((s) => s.id);
+  const fset = !run.only && run.from && flow.steps.some((s) => s.id === run.from) ? fromSetOf(flow, run.from) : null;
+  const sinks = run.only ? [run.only] : flow.steps.filter((s) => !flow.edges.some((e) => e.source === s.id) && (!fset || fset.has(s.id))).map((s) => s.id);
   const result = sinks.map((id) => run.steps?.[id]).filter((s) => s?.output).map((s) => s.output).join('\n\n---\n\n');
   const sinkJson = sinks.map((id) => run.steps?.[id]?.json).filter((j) => j !== undefined);
   return {
-    flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, startedAt: run.startedAt, endedAt: run.endedAt, deadlineAt: run.deadlineAt,
+    flow: flow.name, flowId: flow.id, runId: run.id, status: run.status, trigger: run.trigger, scope: run.only ? 'only' : run.from ? 'from' : 'flow', ...(run.only || run.from ? { scopeStep: name(run.only || run.from) } : {}), startedAt: run.startedAt, endedAt: run.endedAt, deadlineAt: run.deadlineAt,
     pendingApprovals: Object.entries(run.steps || {}).filter(([k]) => !/~\d+$/.test(k)).reduce((a, [, s]) => a + (s.declaredActions || []).filter((p) => p.status === 'awaiting_approval').length, 0) || undefined,
     error: run.error, result, json: sinkJson.length === 1 ? sinkJson[0] : sinkJson.length ? sinkJson : undefined,
     vars: run.vars, usedPins: run.usedPins || [], finally: run.finally || undefined, pauses: nz(run.pauses), breakpoints: run.breakpoints || undefined, totals: run.totals || runTotals(run), flowSnapshotHash: run.flowSnapshotHash, steps,

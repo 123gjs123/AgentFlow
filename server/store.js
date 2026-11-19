@@ -40,13 +40,62 @@ export function listFlows() {
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 export const getFlow = (id) => readJson(path.join(dir('flows'), `${safe(id)}.json`), null);
-/** Resolve a flow by id or (case-insensitive) name — used by external callers. */
+/** Resolve a flow by id, (case-insensitive) name or the slug of its name — used by external callers. */
 export function findFlow(idOrName) {
   const byId = getFlow(idOrName);
   if (byId) return byId;
   const n = String(idOrName).trim().toLowerCase();
-  const hit = listFlows().find((f) => String(f.name ?? '').trim().toLowerCase() === n);
-  return hit ? getFlow(hit.id) : null;
+  const all = listFlows();
+  const hit = all.find((f) => String(f.name ?? '').trim().toLowerCase() === n);
+  if (hit) return getFlow(hit.id);
+  const bySlug = all.filter((f) => slugify(f.name) === n);
+  return bySlug.length === 1 ? getFlow(bySlug[0].id) : null; // two flows with the same slug: use the id or the name
+}
+
+// ---------- step slugs (spec 12 STEPINV-1) ----------
+/** "Correr sanity (PPD)" → "correr-sanity-ppd". URL- and shell-safe, at most 60 chars. */
+export const slugify = (s) => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/, '');
+export const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$/;
+/** A slug for every step that has none (derived from its name, unique in the flow). Once given it never changes by itself. */
+export function ensureSlugs(flow) {
+  // an invalid or repeated slug (a hand-edited or imported file) is replaced; the first holder keeps it
+  // a slug never equals the id of ANOTHER step (findStep resolves ids first: that step would run instead)
+  const ids = new Set((flow.steps || []).map((s) => String(s.id).toLowerCase()));
+  const used = new Set();
+  for (const s of flow.steps || []) { if (typeof s.slug === 'string' && SLUG_RE.test(s.slug) && !used.has(s.slug) && (!ids.has(s.slug) || String(s.id).toLowerCase() === s.slug)) used.add(s.slug); else Reflect.deleteProperty(s, 'slug'); }
+  for (const s of flow.steps || []) {
+    if (s.slug) continue;
+    const base = slugify(s.name) || 'step';
+    let x = base; for (let i = 2; used.has(x) || (ids.has(x) && String(s.id).toLowerCase() !== x); i++) x = `${base.slice(0, 55)}-${i}`;
+    used.add(x); s.slug = x;
+  }
+  return flow;
+}
+/**
+ * A step by id, slug or (case-insensitive) name. Returns {step} or {error, status, code}: a name shared by two steps
+ * is ambiguous (use the slug or the id).
+ */
+export function findStep(flow, ref, { slugWins = false } = {}) {
+  const r = String(ref ?? '').trim();
+  if (!r) return { status: 400, code: 'STEP_REQUIRED', error: 'Falta el step' };
+  const steps = flow.steps || [];
+  const byId = steps.find((s) => s.id === r);
+  if (byId) return { step: byId };
+  // a stored slug is the step's stable address: it wins (renaming/adding OTHER steps never breaks a pasted call)
+  const hit = steps.find((s) => s.slug && s.slug === r);
+  if (hit) {
+    const other = slugWins ? null : steps.find((s) => s !== hit && String(s.name ?? '').trim().toLowerCase() === r.toLowerCase());
+    if (other) return { status: 409, code: 'STEP_AMBIGUOUS', error: `«${r}» es el slug de «${hit.name}» y el nombre de «${other.name}»: usa el id (${hit.id} o ${other.id}) o la URL …/steps/${r}/run (el slug)` };
+    return { step: hit };
+  }
+  const exact = steps.filter((s) => String(s.name ?? '').trim() === r);
+  if (exact.length === 1) return { step: exact[0] };
+  const byName = steps.filter((s) => String(s.name ?? '').trim().toLowerCase() === r.toLowerCase());
+  if (byName.length === 1) return { step: byName[0] };
+  if (byName.length > 1) return { status: 409, code: 'STEP_AMBIGUOUS', error: `Hay ${byName.length} steps llamados «${r}»: usa su slug (${byName.map((s) => s.slug || s.id).join(', ')}) o su id` };
+  const bySlug = steps.filter((s) => !s.slug && slugify(s.name) === r.toLowerCase());
+  if (bySlug.length === 1) return { step: bySlug[0] };
+  return { status: 404, code: 'STEP_NOT_FOUND', error: `Step no encontrado: ${r}` };
 }
 
 // ---------- config (external API token) ----------
@@ -72,6 +121,7 @@ export function rotateToken() {
 }
 export function saveFlow(flow) {
   flow.updatedAt = Date.now();
+  ensureSlugs(flow);
   writeJson(path.join(dir('flows'), `${safe(flow.id)}.json`), flow);
   return flow;
 }
@@ -93,6 +143,7 @@ export function deleteFlow(id) {
   fs.rmSync(path.join(DATA, 'actions', `${safe(id)}.json`), { force: true });
   fs.rmSync(path.join(DATA, 'approvals', `${safe(id)}.json`), { force: true });
   fs.rmSync(path.join(DATA, 'copies', `${safe(id)}.json`), { force: true });
+  fs.rmSync(path.join(DATA, 'invoke', `${safe(id)}.md`), { force: true });
 }
 
 // ---------- flow reviews (spec 28) ----------

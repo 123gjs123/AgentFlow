@@ -88,11 +88,12 @@ ext.use((req, res, next) => {
 });
 const extFlow = (x) => { const f = store.findFlow(x); if (!f) throw fail(404, `Flujo no encontrado: ${x}`, 'FLOW_NOT_FOUND'); return f; };
 const extRun = (flow, id) => { const r = engine.getRunLive(flow.id, id); if (!r) throw fail(404, 'Ejecución no encontrada', 'RUN_NOT_FOUND'); return r; };
-const inputOf = (body) => {
+const inputOf = (body, stepped = false) => {
   if (typeof body === 'string') return body;
   if (body && typeof body.input === 'string') return body.input;
   if (body && body.input !== undefined) return JSON.stringify(body.input, null, 2);
   const rest = { ...(body || {}) }; for (const k of ['step', 'wait', 'timeoutSec', 'source', 'vars', 'usePins', 'deadlineSec', 'dryRun', 'breakpoints']) delete rest[k];
+  if (stepped) { for (const k of ['scope', 'mode']) if (scopeWord(rest[k])) delete rest[k]; if (fromFlag(rest.from)) delete rest.from; }
   return Object.keys(rest).length ? JSON.stringify(rest, null, 2) : ''; // raw webhook payloads (Bitbucket, Jenkins…)
 };
 const stableJson = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((key) => [key, x[key]])) : x));
@@ -101,15 +102,36 @@ const truthy = (v) => v === true || v === 1 || /^(1|true|yes|si|sí)$/i.test(Str
 ext.get('/ping', wrap(() => ({ ok: true, app: 'agent-flow-studio' })));
 ext.get('/flows', wrap(() => store.listFlows().map((f) => {
   const full = store.getFlow(f.id);
-  return { id: f.id, name: f.name, description: full.description, vars: Object.keys(full.vars || {}), steps: full.steps.map((s) => ({ id: s.id, name: s.name, kind: s.kind })) };
+  return { id: f.id, name: f.name, description: full.description, vars: Object.keys(full.vars || {}), steps: store.ensureSlugs(structuredClone(full)).steps.map((s) => ({ id: s.id, slug: s.slug, name: s.name, kind: s.kind })) };
 })));
 // Run a flow or one step. vars are per run (never saved into the flow). External runs ignore pins unless usePins.
-ext.post('/flows/:flow/run', wrap(async (req, res) => {
+// Spec 12: a step is addressed by id, slug or name; scope "only" (default) runs just it, "from" it and everything after.
+// Body keys count as the scope option only with OUR values (scope/mode "only"|"from", from: true); any other value is
+// data of a raw payload (scope:"repository", from:"alice@…") and stays in the input. The query string is always an option.
+const scopeWord = (v) => (typeof v === 'string' && ['only', 'from'].includes(v.trim().toLowerCase()) ? v.trim().toLowerCase() : null);
+const fromFlag = (v) => v === true || v === 1 || v === 'true';
+const scopeOf = (req, body) => {
+  if (req.query.scope !== undefined) { const v = scopeWord(String(req.query.scope)); if (!v) throw fail(400, '"scope" debe ser "only" o "from"', 'BAD_SCOPE'); return v; }
+  if (body.input !== undefined) {
+    // a body with "input" is an options body: a typo must not silently run one step instead of the chain
+    if (body.scope !== undefined && !scopeWord(body.scope)) throw fail(400, '"scope" debe ser "only" o "from"', 'BAD_SCOPE');
+    if (body.from !== undefined && typeof body.from !== 'boolean' && !/^(0|1|true|false)$/i.test(String(body.from))) throw fail(400, '"from" debe ser true o false', 'BAD_SCOPE');
+    if (body.mode !== undefined && !scopeWord(body.mode) && !['wait', 'async-poll', 'fire-and-forget'].includes(String(body.mode))) throw fail(400, '"mode" debe ser "only" o "from"', 'BAD_SCOPE');
+    if (scopeWord(body.scope) || scopeWord(body.mode)) return scopeWord(body.scope) || scopeWord(body.mode);
+    return truthy(body.from) || truthy(req.query.from) ? 'from' : 'only';
+  }
+  return scopeWord(body.scope) || scopeWord(body.mode) || (fromFlag(body.from) || truthy(req.query.from) ? 'from' : 'only');
+};
+const extRunRoute = (stepInPath) => wrap(async (req, res) => {
   const flow = extFlow(req.params.flow);
   const body = typeof req.body === 'object' && req.body ? req.body : {};
-  const stepRef = body.step || req.query.step;
-  let only = null;
-  if (stepRef) { const s = flow.steps.find((x) => x.id === stepRef || x.name.toLowerCase() === String(stepRef).toLowerCase()); if (!s) throw fail(404, `Step no encontrado: ${stepRef}`, 'STEP_NOT_FOUND'); only = s.id; }
+  const stepRef = stepInPath ? req.params.step : body.step || req.query.step;
+  // scope / from / mode are options only when a step is named (a raw webhook payload may carry those keys)
+  const scope = stepRef ? scopeOf(req, body) : scopeWord(String(req.query.scope ?? '')) === 'from' || truthy(req.query.from) ? 'from' : 'only';
+  let only = null; let from = null;
+  if (stepRef) { const r = store.findStep(flow, stepRef, { slugWins: stepInPath }); if (!r.step) throw fail(r.status, r.error, r.code); if (scope === 'from') from = r.step.id; else only = r.step.id; }
+  else if (scope === 'from') throw fail(400, '"scope":"from" necesita un step', 'STEP_REQUIRED');
+  const runSet = only || (from ? engine.fromSetOf(flow, from) : null); // what the checks look at
   if (body.vars !== undefined && (typeof body.vars !== 'object' || Array.isArray(body.vars) || body.vars === null)) throw fail(400, '"vars" debe ser un objeto', 'BAD_VARS');
   const wait = truthy(body.wait ?? req.query.wait);
   const waitSec = Math.min(Number(body.timeoutSec || req.query.timeoutSec || 900) || 900, 4 * 3600);
@@ -120,14 +142,14 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
     if (run.waitTimedOut || run.status === 'running') { res.status(202); sum.timedOut = true; }
     return sum;
   };
-  const input = inputOf(req.body);
+  const input = inputOf(req.body, !!stepRef);
   const key = String(req.get('idempotency-key') || '').trim();
   if (key.length > 200) throw fail(400, 'Idempotency-Key: máximo 200 caracteres', 'BAD_IDEMPOTENCY_KEY');
-  const bodyHashOf = () => crypto.createHash('sha256').update(stableJson({ input, only, vars: body.vars || null, usePins: truthy(body.usePins), breakpoints: truthy(body.breakpoints) })).digest('hex');
+  const bodyHashOf = () => crypto.createHash('sha256').update(stableJson({ input, only, ...(from ? { from } : {}), vars: body.vars || null, usePins: truthy(body.usePins), breakpoints: truthy(body.breakpoints) })).digest('hex');
   // Replay what is still going (running, paused at a break) or went well: a retry after a failure must run again.
   const REPLAYABLE = ['running', 'paused', 'queued', 'success'];
   if (truthy(body.dryRun ?? req.query.dryRun)) {
-    const problem0 = engine.externalRunProblem(flow, { only, vars: body.vars });
+    const problem0 = engine.externalRunProblem(flow, { only, from, vars: body.vars });
     if (problem0) throw fail(problem0.status, problem0.error, problem0.code);
     let wouldReplay = null;
     if (key) {
@@ -138,12 +160,14 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
     // Every pre-start check, nothing started, idempotency key not recorded (spec 17 INT-10).
     res.locals.dryRun = true;
     const usePins = truthy(body.usePins);
-    const steps = only ? flow.steps.filter((s) => s.id === only) : flow.steps;
+    const fset = from ? engine.fromSetOf(flow, from) : null;
+    const steps = only ? flow.steps.filter((s) => s.id === only) : fset ? flow.steps.filter((s) => fset.has(s.id)) : flow.steps;
     const warnings = [];
+    const fromP = from ? engine.fromProblem(flow, from, { usePins }) : null;
     if (!input) warnings.push('input vacío');
     for (const k of Object.keys(body.vars || {})) if (!(k in (flow.vars || {}))) warnings.push(`la variable "${k}" no existe en el flujo`);
-    const pf = needsPreflight(flow, only) ? await preflight(flow, { only }) : { ok: true, blocking: [], results: [] };
-    return { dryRun: true, ok: pf.ok, preflight: { ok: pf.ok, missing: pf.blocking, results: pf.results }, flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, wouldReplay, warnings };
+    const pf = needsPreflight(flow, runSet) ? await preflight(flow, { only: runSet }) : { ok: true, blocking: [], results: [] };
+    return { dryRun: true, ok: pf.ok && !fromP, preflight: { ok: pf.ok, missing: pf.blocking, results: pf.results }, ...(fromP ? { fromProblem: { code: fromP.code, error: fromP.error, missing: fromP.missing } } : {}), scope: stepRef ? scope : 'flow', flow: flow.name, flowId: flow.id, steps: steps.map((s) => s.name), breakpoints: truthy(body.breakpoints) ? steps.filter((s) => s.breakpoint).map((s) => `${s.name} (${s.breakpoint})`) : [], vars: Object.keys({ ...(flow.vars || {}), ...(body.vars || {}) }), input: input.slice(0, 2000), usedPins: usePins ? steps.filter((s) => s.pinned).map((s) => s.name) : [], idempotencyKey: key || null, wouldReplay, warnings };
   }
   let bodyHash = null;
   if (key) {
@@ -156,15 +180,17 @@ ext.post('/flows/:flow/run', wrap(async (req, res) => {
       if (prevRun && REPLAYABLE.includes(prevRun.status)) return respond(prev.runId, { idempotentReplay: true });
     }
   }
-  const problem = engine.externalRunProblem(flow, { only, vars: body.vars });
+  const problem = engine.externalRunProblem(flow, { only, from, vars: body.vars });
   if (problem) throw fail(problem.status, problem.error, problem.code);
-  { const blocked = await gate(flow, res); if (blocked) return blocked; }
+  { const blocked = await gate(flow, res, runSet); if (blocked) return blocked; }
   const trigger = String(body.source || req.query.source || 'api').slice(0, 20);
-  const runId = engine.startRun(flow.id, { input, only, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null, breakpoints: truthy(body.breakpoints) });
+  const runId = engine.startRun(flow.id, { input, only, from, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null, breakpoints: truthy(body.breakpoints) });
   if (key) store.setIdem(`${flow.id}:${key}`, { runId, bodyHash, flowId: flow.id });
   res.locals.runId = runId;
   return respond(runId);
-}));
+});
+ext.post('/flows/:flow/run', extRunRoute(false));
+ext.post('/flows/:flow/steps/:step/run', extRunRoute(true));
 ext.get('/flows/:flow/runs/:runId/files/:file', wrap(async (req, res) => { const flow = extFlow(req.params.flow); const f = deliverableFile(flow.id, req.params.runId, req.params.file, req.query.step ? String(req.query.step) : null); await sendFile(res, f); return undefined; }));
 ext.post('/flows/:flow/runs/:runId/actions/decide', wrap((req) => { const flow = extFlow(req.params.flow); return decide(flow.id, req.params.runId, req.body); }));
 ext.get('/flows/:flow/runs/:runId', wrap((req) => {
@@ -279,6 +305,12 @@ app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   const prev = new Map(cur.steps.map((s) => [s.id, s]));
   const d = v.flow;
   const steps = (d.steps || []).map((s) => { const p = prev.get(s.id); return p ? { ...s, memory: p.memory, lastRun: p.lastRun, pinned: p.pinned, chatSessionId: p.chatSessionId, chatContextHash: p.chatContextHash } : { ...s, memory: [], lastRun: null }; });
+  settleSlugs(steps, prev, { rejectIds: false });
+  {
+    const live = new Map(steps.filter((s) => prev.get(s.id)?.slug).map((s) => [s.slug, s]));
+    const clash = steps.find((s) => !prev.has(s.id) && live.has(String(s.id).toLowerCase()) && live.get(String(s.id).toLowerCase()) !== s);
+    if (clash) throw fail(409, `No se puede restaurar: el step «${clash.name}» volvería con el id «${clash.id}», que hoy es la dirección (slug) de «${live.get(String(clash.id).toLowerCase()).name}». Cambia ese slug y vuelve a restaurar.`, 'STEP_ID_TAKEN');
+  }
   for (const s of cur.steps) if (!steps.some((x) => x.id === s.id)) store.clearChat(cur.id, s.id);
   const next = { ...cur, name: d.name, description: d.description, cwd: d.cwd, vars: d.vars || {}, schedule: d.schedule, runTimeoutSec: d.runTimeoutSec, versionEveryMin: d.versionEveryMin, watchPolling: d.watchPolling, contextSources: d.contextSources, finally: d.finally, requirements: d.requirements, steps, edges: d.edges || [], rev: (cur.rev || 0) + 1 };
   engine.topoLevels(next);
@@ -327,7 +359,7 @@ async function gate(flow, res, only = null) {
   const qp = quarantineProblem(flow);
   if (qp) { res.status(qp.status); return { error: qp.error, code: qp.code, reasons: flow.quarantine.reasons }; }
   // An invalid JSON schema would only fail after Claude ran (and spent tokens): reject it before starting, like the external API.
-  for (const s of (flow.steps || []).filter((x) => !only || x.id === only)) {
+  for (const s of (flow.steps || []).filter((x) => !only || (only instanceof Set ? only.has(x.id) : x.id === only))) {
     if (s.kind === 'command' || s.output?.format !== 'json' || !String(s.output.schema || '').trim()) continue;
     const { error } = parseSchema(s.output.schema);
     if (error) { res.status(422); return { error: `Step "${s.name}": el schema JSON de la salida no es válido (${error}). Corrígelo en el step → Salida.`, code: 'INVALID_SCHEMA', step: s.id }; }
@@ -419,6 +451,9 @@ app.put('/api/flows/:id', wrap((req, res) => {
     for (const s of steps) if (s !== keep && 'coordinator' in s) Reflect.deleteProperty(s, 'coordinator');
   }
   cleanStepExtras(steps);
+  // spec 12: the slug is managed by the server (PUT …/steps/:id/slug changes it). A saved flow never moves it:
+  // existing steps keep theirs (stable across renames, other tabs, undo); new ones (duplicates, "Mis steps") get a free one.
+  settleSlugs(steps, byId);
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
@@ -471,6 +506,34 @@ app.get('/api/flows/:id/watch', wrap((req) => { need(req.params.id); return W.vi
 app.post('/api/flows/:id/watch/check', wrap(async (req) => { need(req.params.id); return W.checkFlow(req.params.id, { stepId: req.body?.stepId || null, watchId: req.body?.watchId || null, trigger: 'manual' }); }));
 app.post('/api/flows/:id/watch/ack', wrap((req) => { need(req.params.id); return W.ack(req.params.id, req.body?.stepId || null); }));
 app.post('/api/flows/:id/steps/:stepId/run', wrap(async (req, res) => (await gate(need(req.params.id), res, req.params.stepId)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), only: req.params.stepId, trigger: 'manual', breakpoints: req.body?.breakpoints !== false }) })));
+/**
+ * Spec 12: slugs are the server's. Steps that exist keep theirs (a save from another tab, undo or an old client never
+ * moves them). A step that is not live (new, duplicated, undo of a delete, restored) keeps the slug it brings only when
+ * it is valid and free; otherwise store.ensureSlugs gives it one. A new step id equal to a slug in use is refused.
+ */
+function settleSlugs(steps, byId, { rejectIds = true } = {}) {
+  const used = new Set();
+  for (const s of steps) { const p = byId.get(s.id)?.slug; if (p) { s.slug = p; used.add(p); } }
+  for (const s of steps) {
+    if (byId.get(s.id)?.slug) continue;
+    if (rejectIds && !byId.has(s.id) && used.has(String(s.id).toLowerCase())) throw fail(400, `El id «${s.id}» es la dirección (slug) de otro step`, 'STEP_ID_TAKEN');
+    const ids = new Set(steps.filter((x) => x !== s).map((x) => String(x.id).toLowerCase()));
+    if (typeof s.slug === 'string' && store.SLUG_RE.test(s.slug) && !used.has(s.slug) && !ids.has(s.slug)) used.add(s.slug);
+    else Reflect.deleteProperty(s, 'slug');
+  }
+}
+app.put('/api/flows/:id/steps/:stepId/slug', wrap((req) => {
+  const flow = need(req.params.id);
+  const step = flow.steps.find((s) => s.id === req.params.stepId); if (!step) throw fail(404, 'Step no encontrado', 'STEP_NOT_FOUND');
+  if (typeof req.body?.slug !== 'string') throw fail(400, 'El slug debe ser texto', 'BAD_SLUG');
+  const v = store.slugify(req.body.slug);
+  if (!store.SLUG_RE.test(v)) throw fail(400, `Slug inválido «${req.body.slug}»: letras, números y guiones`, 'BAD_SLUG');
+  const other = flow.steps.find((s) => s.id !== step.id && (s.slug === v || String(s.id).toLowerCase() === v));
+  if (other) throw fail(409, `El slug «${v}» ya lo usa el step «${other.name}»`, 'STEP_SLUG_TAKEN');
+  const saved = store.updateFlow(flow.id, (f) => { const s = f.steps.find((x) => x.id === step.id); if (s) s.slug = v; engine.bumpRev(f); });
+  engine.flowChanged(saved, String(req.get('x-afs-tab') || '').slice(0, 40) || null);
+  return { slug: v, rev: saved.rev };
+}));
 app.post('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.pinStep(req.params.id, req.params.stepId, req.body || {})));
 app.delete('/api/flows/:id/steps/:stepId/pin', wrap((req) => engine.unpinStep(req.params.id, req.params.stepId)));
 app.post('/api/flows/:id/stop', wrap((req) => ({ stopped: engine.stopRuns(req.params.id) })));
@@ -716,7 +779,7 @@ const integCtx = (flowRef, callerId, opts = {}) => {
   if (!flow) throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND');
   const caller = integ.CALLERS.find((c) => c.id === callerId);
   if (!caller) throw fail(400, 'Origen desconocido', 'UNKNOWN_CALLER');
-  if (opts.step && !flow.steps.some((x) => x.id === opts.step || x.name === opts.step)) throw fail(404, `Step no encontrado: ${opts.step}`, 'STEP_NOT_FOUND');
+  if (opts.step) { const r = store.findStep(flow, opts.step); if (!r.step) throw fail(r.status, r.error, r.code); }
   const cfg = store.getConfig();
   const reach = integ.reachability(caller, { location: opts.location, host: HOST, port: PORT, publicUrl: cfg.publicUrl });
   const lintCtx = { flow, flows: store.listFlows(), callerId, token: cfg.token, flowVars: flow.vars || {} };
@@ -726,10 +789,11 @@ app.post('/api/integrations/generate', wrap(async (req) => {
   const b = req.body || {};
   const o = b.options || {};
   const { flow, caller, reach, lintCtx } = integCtx(b.flow, b.caller, o);
-  const step = o.step ? flow.steps.find((x) => x.id === o.step || x.name === o.step)?.name : '';
+  const stepObj = o.step ? store.findStep(flow, o.step).step : null;
+  const step = stepObj?.name || '';
   const mode = ['wait', 'async-poll', 'fire-and-forget'].includes(o.mode) ? o.mode : caller.id.startsWith('jira') || caller.id === 'webhook' ? 'fire-and-forget' : 'wait';
   const params = {
-    base: reach.base, flowId: flow.id, flowName: flow.name, step, stepId: o.step ? flow.steps.find((x) => x.id === o.step || x.name === o.step)?.id : '', mode, input: o.input, vars: o.vars && typeof o.vars === 'object' ? o.vars : undefined,
+    base: reach.base, flowId: flow.id, flowName: flow.name, step, stepId: stepObj?.id || '', scope: stepObj && o.scope === 'from' ? 'from' : 'only', mode, input: o.input, vars: o.vars && typeof o.vars === 'object' ? o.vars : undefined,
     idempotencyKey: o.idempotencyKey, timeoutSec: Math.min(Number(o.timeoutSec) || 1800, 4 * 3600), deadlineSec: Number(o.deadlineSec) || 0,
     source: caller.id, reach, info: { node: process.execPath, mcp: path.join(ROOT, 'bin', 'mcp.js'), cli: path.join(ROOT, 'bin', 'afs.js') },
   };
@@ -747,6 +811,41 @@ app.post('/api/integrations/lint', wrap((req) => {
   const { lintCtx, reach } = integCtx(req.body?.flow, req.body?.caller);
   return integ.lintIntegration(Array.isArray(req.body?.files) ? req.body.files : [], { ...lintCtx, mappedVars: req.body?.vars, base: reach.base });
 }));
+const invokeBases = () => {
+  const cfg = store.getConfig();
+  const remote = integ.reachability(integ.CALLERS.find((c) => c.id === 'jenkins-declarative'), { host: HOST, port: PORT, publicUrl: cfg.publicUrl });
+  return { localBase: `http://127.0.0.1:${PORT}`, remote, cliPath: path.join(ROOT, 'bin', 'afs.js') };
+};
+const withSlugs = (flow) => { if (!flow.steps.some((s) => !s.slug)) return flow; const f = store.updateFlow(flow.id, () => {}); engine.flowChanged(f); return f; }; // saveFlow assigns them
+app.get('/api/flows/:id/steps/:stepId/invoke', wrap((req) => {
+  const flow = withSlugs(need(req.params.id));
+  const r = store.findStep(flow, req.params.stepId); if (!r.step) throw fail(r.status, r.error, r.code);
+  const scope = req.query.scope === 'from' ? 'from' : 'only';
+  return integ.stepInvoke(flow, r.step, { ...invokeBases(), scope, fromSet: scope === 'from' ? engine.fromSetOf(flow, r.step.id) : null });
+}));
+app.get('/api/flows/:id/invoke.md', wrap((req, res) => {
+  const flow = withSlugs(need(req.params.id));
+  res.type('text/markdown; charset=utf-8').send(integ.invokeDoc(flow, invokeBases()));
+  return undefined;
+}));
+// STEPINV-9: data/invoke/<flow>.md follows every change of the flow (written only when its text changes)
+const invokeTimers = new Map(); const invokeLast = new Map();
+const writeInvokeDoc = (flowId) => {
+  const flow = store.getFlow(flowId);
+  const file = path.join(store.DATA, 'invoke', `${flowId.replace(/[^\w-]/g, '_')}.md`);
+  if (!flow) { invokeLast.delete(flowId); return; }
+  try {
+    const md = integ.invokeDoc(flow, invokeBases());
+    if (invokeLast.get(flowId) === md && fs.existsSync(file)) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, md); invokeLast.set(flowId, md);
+  } catch (e) { console.error('[invoke.md]', e.message); }
+};
+const scheduleInvokeDoc = (flowId) => { clearTimeout(invokeTimers.get(flowId)); invokeTimers.set(flowId, setTimeout(() => { invokeTimers.delete(flowId); writeInvokeDoc(flowId); }, 300)); };
+const invokeRev = new Map();
+engine.bus.on('msg', (m) => {
+  if (m?.type === 'flow.updated' && m.flowId) { const k = `${m.flow?.rev}|${m.flow?.name}`; if (invokeRev.get(m.flowId) !== k) { invokeRev.set(m.flowId, k); scheduleInvokeDoc(m.flowId); } }
+  else if (m?.type === 'flows.changed') for (const f of store.listFlows()) scheduleInvokeDoc(f.id);
+});
 app.get('/api/integrations/inbound', wrap((req) => integ.inboundSince(Number(req.query.since) || 0)));
 app.put('/api/info/public-url', wrap((req) => {
   const url = String(req.body?.url || '').trim();
@@ -755,7 +854,9 @@ app.put('/api/info/public-url', wrap((req) => {
     try { const u = new URL(url); if (u.protocol !== 'https:' || u.username || u.password) throw new Error(); clean = (u.origin + u.pathname).replace(/\/+$/, ''); }
     catch { throw fail(400, 'URL inválida: debe ser https://host[/ruta] sin usuario ni contraseña', 'BAD_URL'); }
   }
-  return { publicUrl: store.setConfig({ publicUrl: clean }).publicUrl || null };
+  const out = { publicUrl: store.setConfig({ publicUrl: clean }).publicUrl || null };
+  for (const f of store.listFlows()) scheduleInvokeDoc(f.id); // the remote base of every INVOKE.md changed
+  return out;
 }));
 app.get('/api/info', wrap(() => ({
   token: store.getConfig().token, port: PORT, host: HOST, root: ROOT, publicUrl: store.getConfig().publicUrl || null,
@@ -798,7 +899,7 @@ store.getConfig(); // ensure token exists
 // a stray rejected promise (a check, a hook, a socket) must not take the whole app down: log it loudly instead
 process.on('unhandledRejection', (e) => { console.error('[unhandledRejection]', e?.stack || e); });
 
-for (const f of store.listFlows()) { const full = store.getFlow(f.id); if (full) { engine.syncSchedule(full); W.syncPolling(full); } }
+for (const f of store.listFlows()) { const full = store.getFlow(f.id); if (full) { engine.syncSchedule(full); W.syncPolling(full); scheduleInvokeDoc(full.id); } }
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `El puerto ${PORT} ya está en uso: ¿hay otro Agent Flow Studio corriendo?` : e.message); process.exit(1); });
 server.listen(PORT, HOST, () => {
   // Only after owning the port: a second instance that fails to start must not touch the first one's runs.

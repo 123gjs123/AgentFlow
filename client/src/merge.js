@@ -6,7 +6,7 @@
 // Run state that only the server writes (lastRun, memory, pins, chat sessions) always comes from remote.
 
 const eq = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-const SERVER_STEP = new Set(['memory', 'lastRun', 'pinned', 'chatSessionId', 'chatContextHash']);
+const SERVER_STEP = new Set(['memory', 'lastRun', 'pinned', 'chatSessionId', 'chatContextHash', 'slug']);
 const SERVER_FLOW = new Set(['memory', 'globalSessionId', 'globalContextHash', 'updatedAt', 'createdAt', 'rev', 'id']);
 const FLOW_FIELDS = ['name', 'description', 'cwd', 'vars', 'schedule', 'runTimeoutSec', 'versionEveryMin', 'contextSources', 'finally', 'requirements'];
 

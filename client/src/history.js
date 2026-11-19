@@ -3,7 +3,7 @@
 // current flow (3-way, via mergeFlows): edits that arrived later from another tab or a hook are kept.
 import { mergeFlows } from './merge.js';
 
-const SERVER_STEP = ['memory', 'lastRun', 'pinned', 'chatSessionId', 'chatContextHash'];
+const SERVER_STEP = ['memory', 'lastRun', 'pinned', 'chatSessionId', 'chatContextHash', 'slug'];
 const SERVER_FLOW = ['memory', 'globalSessionId', 'globalContextHash', 'updatedAt', 'createdAt', 'rev', 'id'];
 export const HISTORY_LIMIT = 100;
 export const HISTORY_COALESCE_MS = 1000;

@@ -1,6 +1,7 @@
 // Integration helper (spec 17 INT): caller catalog, deterministic templates, reachability, lint, AI adaptation, inbound log.
 import os from 'node:os';
 import { runClaude } from './claude.js';
+import { findStep } from './store.js';
 
 // ---------------- callers ----------------
 export const CALLERS = [
@@ -112,7 +113,8 @@ p.add_argument("--flow", required=True, help="id del flujo")
 p.add_argument("--input", default="")
 p.add_argument("--input-file")
 p.add_argument("--var", action="append", default=[], help="clave=valor (repetible)")
-p.add_argument("--step", help="id del step (solo ese step)")
+p.add_argument("--step", help="id o slug del step")
+p.add_argument("--scope", choices=["only", "from"], default="only", help="only: solo ese step · from: ese step y todo lo que sigue")
 p.add_argument("--mode", choices=["wait", "async-poll", "fire-and-forget"], default="wait")
 p.add_argument("--timeout", type=int, default=900, help="segundos que espera este script")
 p.add_argument("--deadline", type=int, help="tiempo máximo de la ejecución en el servidor")
@@ -141,6 +143,7 @@ def call(method, path, body=None, headers=None):
 text = open(a.input_file, encoding="utf-8").read() if a.input_file else expand(a.input)
 body = {"input": text, "vars": {k: expand(v) for k, v in (x.split("=", 1) for x in a.var)}, "source": a.source}
 if a.step: body["step"] = a.step
+if a.step and a.scope == "from": body["scope"] = "from"
 if a.deadline: body["deadlineSec"] = a.deadline
 if a.mode == "wait": body.update(wait=True, timeoutSec=a.timeout)
 key = expand(a.key) if a.key else ""
@@ -182,6 +185,7 @@ param(
   [string]$InputFile,
   [string]$VarsJson = '{}',
   [string]$Step,
+  [ValidateSet('only', 'from')][string]$Scope = 'only',
   [ValidateSet('wait', 'async-poll', 'fire-and-forget')][string]$Mode = 'wait',
   [int]$TimeoutSec = 900,
   [int]$DeadlineSec = 0,
@@ -222,6 +226,7 @@ try { $vj = $VarsJson | ConvertFrom-Json } catch { Fail "-VarsJson no es JSON v�
 if ($vj) { foreach ($pr in $vj.PSObject.Properties) { $vars[$pr.Name] = Expand ([string]$pr.Value) } }
 $body = @{ input = [string]$text; vars = $vars; source = $Source }
 if ($Step) { $body.step = $Step }
+if ($Step -and $Scope -eq 'from') { $body.scope = 'from' }
 if ($DeadlineSec -gt 0) { $body.deadlineSec = $DeadlineSec }
 if ($Mode -eq 'wait') { $body.wait = $true; $body.timeoutSec = $TimeoutSec }
 $r = Invoke-Afs 'POST' "/api/ext/flows/$Flow/run" $body
@@ -271,14 +276,14 @@ const yamlStr = (s) => JSON.stringify(String(s)); // JSON strings are valid YAML
 /** Shared argument list (values are literal: placeholders are expanded by the client, never by a shell). */
 function clientArgs(o, { input, vars, key, out }) {
   return [
-    ['base', o.base], ['flow', o.flowId], ...(o.stepId ? [['step', o.stepId]] : []), ['mode', o.mode], ['timeout', String(o.timeoutSec)],
+    ['base', o.base], ['flow', o.flowId], ...(o.stepId ? [['step', o.stepId]] : []), ...(o.stepId && o.scope === 'from' ? [['scope', 'from']] : []), ['mode', o.mode], ['timeout', String(o.timeoutSec)],
     ...(o.deadlineSec ? [['deadline', String(o.deadlineSec)]] : []), ['source', o.source], ...(input ? [['input', input]] : []),
     ...Object.entries(vars || {}).map(([k, v]) => ['var', `${k}=${v}`]), ...(key ? [['key', key]] : []), ...(out ? [['out', out]] : []),
   ];
 }
 const pyCmd = (o, a, py = 'python3') => [`${py} afs_call.py`, ...clientArgs(o, a).map(([k, v]) => `--${k} ${bashLit(v)}`)].join(' \\\n  ');
 function psCmd(o, a) {
-  const m = { base: 'Base', flow: 'Flow', step: 'Step', mode: 'Mode', timeout: 'TimeoutSec', deadline: 'DeadlineSec', source: 'Source', input: 'InputText', key: 'Key', out: 'Out' };
+  const m = { base: 'Base', flow: 'Flow', step: 'Step', scope: 'Scope', mode: 'Mode', timeout: 'TimeoutSec', deadline: 'DeadlineSec', source: 'Source', input: 'InputText', key: 'Key', out: 'Out' };
   const args = clientArgs(o, a).filter(([k]) => k !== 'var').map(([k, v]) => `-${m[k]} ${psLit(v)}`);
   if (Object.keys(a.vars || {}).length) args.push(`-VarsJson ${psLit(JSON.stringify(a.vars))}`);
   return `& ./afs-call.ps1 ${args.join(' ')}`;
@@ -304,6 +309,7 @@ export function buildTemplate(callerId, o) {
       const jstr = (s) => String(s ?? '').split(/(\{\{[^{}]*\}\})/).map((part, i) => (i % 2 ? part : JSON.stringify(part).slice(1, -1))).join('');
       const fields = [`  "input": "${jstr(input)}"`, `  "vars": {${Object.entries(vars).map(([k, v]) => `${JSON.stringify(k)}: "${jstr(v)}"`).join(', ')}}`, `  "source": "${callerId}"`];
       if (o.stepId) fields.push(`  "step": "${o.stepId}"`);
+      if (o.stepId && o.scope === 'from') fields.push('  "scope": "from"');
       if (o.mode === 'wait') fields.push('  "wait": true', '  "timeoutSec": 25');
       files.push({ name: 'cuerpo-web-request.json', language: 'json', content: `{\n${fields.join(',\n')}\n}\n` });
       files.push({ name: 'configuracion-regla.txt', language: 'text', content: [
@@ -389,12 +395,12 @@ export function buildTemplate(callerId, o) {
     }
     case 'claude-mcp': {
       files.push({ name: 'registrar-mcp.txt', language: 'text', content: `claude mcp add agent-flows -s user -- "${o.info.node}" "${o.info.mcp}"\n` });
-      files.push({ name: 'ejemplo-prompt.txt', language: 'text', content: `Ejecuta el flujo "${o.flowName}"${o.step ? ` (solo el step "${o.step}")` : ''} con input "${input || '...'}"${Object.keys(vars).length ? ` y variables ${JSON.stringify(vars)}` : ''}. Si falla, dime en qué step y por qué.\n` });
+      files.push({ name: 'ejemplo-prompt.txt', language: 'text', content: `Ejecuta el flujo "${o.flowName}"${o.step ? (o.scope === 'from' ? ` desde el step "${o.step}" (ese y los que siguen; from: true)` : ` (solo el step "${o.step}")`) : ''} con input "${input || '...'}"${Object.keys(vars).length ? ` y variables ${JSON.stringify(vars)}` : ''}. Si falla, dime en qué step y por qué.\n` });
       setup.push('Ejecuta el comando de registrar-mcp.txt una vez en una terminal (no hace falta token: el MCP lo lee de esta instalación).', 'Desde Claude Code (u otro agente con este MCP) pide lo de ejemplo-prompt.txt: usará run_flow / get_run / cancel_run.');
       break;
     }
     default: { // webhook
-      const body = { input: input || '<texto o JSON del evento>', vars, source: 'webhook', ...(o.stepId ? { step: o.stepId } : {}) };
+      const body = { input: input || '<texto o JSON del evento>', vars, source: 'webhook', ...(o.stepId ? { step: o.stepId, ...(o.scope === 'from' ? { scope: 'from' } : {}) } : {}) };
       files.push({ name: 'webhook.txt', language: 'text', content: [
         `Flujo: ${o.flowName}`, `URL: ${url}`, 'Método: POST', 'Headers:', '  Content-Type: application/json', '  Authorization: Bearer <token>   (si la herramienta permite headers)',
         key ? `  Idempotency-Key: ${key}` : '  Idempotency-Key: <id único del evento, si la herramienta lo permite>', '', 'Cuerpo:', JSON.stringify(body, null, 2), '',
@@ -409,7 +415,7 @@ export function buildTemplate(callerId, o) {
 }
 
 // ---------------- lint ----------------
-const EXT_PATHS = [/^\/api\/ext\/ping$/, /^\/api\/ext\/flows$/, /^\/api\/ext\/flows\/([^/?#\s"'`]+)\/(run|ask)$/, /^\/api\/ext\/flows\/([^/?#\s"'`]+)\/runs\/[^/?#\s"'`]+(\/cancel|\/events)?$/];
+const EXT_PATHS = [/^\/api\/ext\/ping$/, /^\/api\/ext\/flows$/, /^\/api\/ext\/flows\/([^/?#\s"'`]+)\/(run|ask)$/, /^\/api\/ext\/flows\/([^/?#\s"'`]+)\/steps\/[^/?#\s"'`]+\/run$/, /^\/api\/ext\/flows\/([^/?#\s"'`]+)\/runs\/[^/?#\s"'`]+(\/cancel|\/events)?$/];
 const DANGEROUS = [
   [/\|\s*(ba|z)?sh\b/, 'descarga y ejecuta código (| sh)'], [/\b(iex|Invoke-Expression)\b/i, 'ejecuta texto como código (Invoke-Expression)'],
   [/base64\s+(-d|--decode)|FromBase64String/i, 'decodifica contenido oculto (base64)'], [/\bset\s+-x\b/, '"set -x" imprime el token en el log'],
@@ -443,7 +449,7 @@ export function lintIntegration(files, { flow, flows, callerId, token, flowVars 
       if (ref && !/[$%{]/.test(ref) && !flowExists(ref)) errors.push({ code: 'UNKNOWN_FLOW', message: `${f.name}: el flujo "${ref}" no existe.` });
     }
     for (const m of c.matchAll(/(?:--flow|-Flow)\s+'((?:[^']|'')*)'/g)) { const ref = m[1].replace(/''/g, "'").replace(/'\\''/g, "'"); if (!flowExists(ref)) errors.push({ code: 'UNKNOWN_FLOW', message: `${f.name}: el flujo "${ref}" no existe.` }); }
-    for (const m of c.matchAll(/(?:--step|-Step)\s+'((?:[^']|'')*)'/g)) { const ref = m[1]; if (flow && !flow.steps.some((s) => s.id === ref || s.name === ref)) errors.push({ code: 'UNKNOWN_STEP', message: `${f.name}: el step "${ref}" no existe en "${flow.name}".` }); }
+    for (const m of c.matchAll(/(?:--step|-Step)\s+'((?:[^']|'')*)'/g)) { const ref = m[1].replace(/''/g, "'"); if (flow && !findStep(flow, ref).step) errors.push({ code: 'UNKNOWN_STEP', message: `${f.name}: el step "${ref}" no existe en "${flow.name}".` }); }
     if (caller.location === 'cloud' && /(127\.0\.0\.1|localhost)/.test(c) && !/runs-on: self-hosted|self\.hosted|tags: \[afs-local\]/.test(c)) warnings.push({ code: 'LOOPBACK_FROM_CLOUD', message: `${f.name}: un servicio en la nube no llega a 127.0.0.1 de tu PC.` });
   }
   const calls = files.filter((f) => !isClient(f) && /\/api\/ext\/flows\/|afs_call\.py|afs-call\.ps1/.test(f.content));
@@ -500,3 +506,132 @@ No incluyas los archivos afs_call.py ni afs-call.ps1 (se agregan solos). Escribe
 const inbound = [];
 export function logInbound(entry) { inbound.push(entry); if (inbound.length > 50) inbound.shift(); }
 export const inboundSince = (since = 0) => inbound.filter((e) => e.at > since);
+
+// ---------------- spec 12: per-step invocation ----------------
+// a Groovy single-quoted literal: no ${} interpolation (a double-quoted one would run code from a step name)
+const groovySingle = (s) => `'${String(s).replace(/[\\']/g, (c) => `\\${c}`).replace(/[\r\n]+/g, ' ')}'`;
+// a name inside Markdown: one line, no fences/headings/links of its own
+const mdLine = (s) => String(s ?? '').replace(/[\r\n]+/g, ' ').replace(/[`*_#<>[\]|\\]/g, (c) => `\\${c}`);
+const VAR_RE = /\{\{\{?\s*vars\.([A-Za-z0-9_-]+)/g;
+const INPUT_RE = /\{\{\{?\s*input\b/;
+/** What a step reads and gives (STEPINV-7), from its definition only (never from run data). */
+function definitionText(s) {
+  const { lastRun, memory, pinned, chatSessionId, chatContextHash, ...def } = s;
+  return JSON.stringify(def);
+}
+export function stepContract(flow, step, { scope = 'only', fromSet = null } = {}) {
+  const runs = scope === 'from' && fromSet ? flow.steps.filter((s) => fromSet.has(s.id)) : [step];
+  const vars = [...new Set(runs.flatMap((s) => [...definitionText(s).matchAll(VAR_RE)].map((m) => m[1])))];
+  const name = (id) => flow.steps.find((s) => s.id === id)?.name || id;
+  const parents = [...new Set(flow.edges.filter((e) => (scope === 'from' && fromSet ? fromSet.has(e.target) && !fromSet.has(e.source) : e.target === step.id)).map((e) => e.source))].map(name);
+  return {
+    steps: runs.map((s) => s.name),
+    usesInput: runs.some((s) => INPUT_RE.test(definitionText(s))),
+    vars: vars.map((k) => ({ name: k, inFlow: Object.prototype.hasOwnProperty.call(flow.vars || {}, k) })),
+    upstream: parents,
+    output: [...new Set((scope === 'from' && fromSet ? runs.filter((s) => !flow.edges.some((e) => e.source === s.id && fromSet.has(e.target))) : [step]).map((s) => s.output?.format || 'texto'))].join(' / '),
+    deliverables: runs.flatMap((s) => (s.deliverables || []).map((d) => `${s.name}: ${d.path}`)),
+    writesOutside: runs.flatMap((s) => (s.actions || []).map((a) => `${s.name}: ${a.type} (${a.approval || 'confirm'})`)),
+  };
+}
+
+/**
+ * Copy-ready snippets for ONE step (STEPINV-4/5/6/8). Never contain the token: they read AFS_TOKEN from the
+ * environment / a CI credential. `local` = this PC, `remote` = what another machine uses (reachability).
+ */
+export function stepInvoke(flow, step, { localBase, remote, scope = 'only', fromSet = null, cliPath, mcpServer = 'agent-flow-studio' }) {
+  const contract = stepContract(flow, step, { scope, fromSet });
+  const slug = step.slug;
+  const path = `/api/ext/flows/${flow.id}/steps/${slug}/run`;
+  const vars = Object.fromEntries(contract.vars.map((v) => [v.name, `<${v.name}>`]));
+  const body = (source, extra = {}) => ({ input: '<input>', ...(contract.vars.length ? { vars } : {}), source, ...(scope === 'from' ? { scope: 'from' } : {}), ...extra });
+  const rb = remote.base; const lb = localBase;
+  const statusOf = `/api/ext/flows/${flow.id}/runs/`;
+  const curlSync = (base, source) => [
+    `RES=$(curl -sS -X POST ${bashLit(base + path)} \\`,
+    '  -H "Authorization: Bearer $AFS_TOKEN" -H \'Content-Type: application/json\' \\',
+    `  -d ${bashLit(JSON.stringify(body(source, { wait: true, timeoutSec: 1800 })))})`,
+    'echo "$RES" | jq -r .result',
+    'test "$(echo "$RES" | jq -r .status)" = success',
+  ].join('\n');
+  const curlAsync = [
+    `RUN=$(curl -sS -X POST ${bashLit(rb + path)} \\`,
+    '  -H "Authorization: Bearer $AFS_TOKEN" -H \'Content-Type: application/json\' \\',
+    `  -d ${bashLit(JSON.stringify(body('curl')))} | jq -r .runId)`,
+    'T0=$(date +%s)',
+    'while :; do',
+    `  RES=$(curl -sS ${bashLit(rb + statusOf)}"$RUN" -H "Authorization: Bearer $AFS_TOKEN")`,
+    '  ST=$(echo "$RES" | jq -r .status)',
+    '  case "$ST" in running|queued) ;; *) break ;; esac',
+    '  if [ $(( $(date +%s) - T0 )) -gt 1800 ]; then echo "sigue corriendo tras 30 min (runId $RUN)" >&2; exit 3; fi',
+    '  sleep 10',
+    'done',
+    'echo "$RES" | jq -r .result',
+    'test "$ST" = success',
+  ].join('\n');
+  const ps = (base, source) => [
+    '$h = @{ Authorization = "Bearer $env:AFS_TOKEN" }',
+    `$body = ${psLit(JSON.stringify(body(source)))}`,
+    `$r = Invoke-RestMethod -Method Post -Uri ${psLit(base + path)} -Headers $h -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))`,
+    '$t0 = Get-Date',
+    "while ($r.status -in 'running', 'queued') {",
+    "  if (((Get-Date) - $t0).TotalMinutes -gt 30) { throw \"Sigue corriendo tras 30 min (runId $($r.runId))\" }",
+    '  Start-Sleep -Seconds 10',
+    `  $r = Invoke-RestMethod -Uri (${psLit(base + statusOf)} + $r.runId) -Headers $h`,
+    '}',
+    '$r.result',
+    "if ($r.status -ne 'success') { throw \"El step terminó en $($r.status)\" }",
+  ].join('\n');
+  const cliArgs = [psLit(flow.id), '--step', psLit(step.id), ...(scope === 'from' ? ['--from'] : []), '-i', psLit('<input>'), ...contract.vars.map((v) => `--var ${psLit(`${v.name}=<${v.name}>`)}`)];
+  const snippets = [
+    { id: 'curl', label: 'curl (espera)', language: 'bash', where: 'remote', content: curlSync(rb, 'curl'), note: 'Necesita curl y jq. Espera hasta 30 min y falla si el step no termina en success.' },
+    { id: 'curl-async', label: 'curl (sondeo)', language: 'bash', where: 'remote', content: curlAsync, note: 'Para steps largos: arranca y consulta cada 10 s.' },
+    { id: 'powershell', label: 'PowerShell', language: 'powershell', where: 'local', content: ps(lb, 'powershell'), note: 'Lanza la ejecución y consulta cada 10 s; lanza un error si no termina en success.' },
+    { id: 'jenkins-sh', label: 'Jenkins (sh)', language: 'groovy', where: 'remote', content: [
+      `stage(${groovySingle(`AFS: ${step.name}`)}) {`,
+      '  steps {',
+      "    withCredentials([string(credentialsId: 'afs-token', variable: 'AFS_TOKEN')]) {",
+      "      sh '''",
+      '        set -e',
+      ...groovyTriple(curlSync(rb, 'jenkins')).split('\n').map((l) => `        ${l}`),
+      "      '''",
+      '    }', '  }', '}',
+    ].join('\n'), note: 'Agente Linux. La credencial "afs-token" es un Secret text con el token.' },
+    { id: 'jenkins-ps', label: 'Jenkins (Windows)', language: 'groovy', where: 'remote', content: [
+      `stage(${groovySingle(`AFS: ${step.name}`)}) {`,
+      '  steps {',
+      "    withCredentials([string(credentialsId: 'afs-token', variable: 'AFS_TOKEN')]) {",
+      "      powershell '''",
+      ...groovyTriple(ps(rb, 'jenkins')).split('\n').map((l) => `        ${l}`),
+      "      '''",
+      '    }', '  }', '}',
+    ].join('\n'), note: 'Agente Windows (paso powershell, en lugar de bat: sin problemas de comillas).' },
+    { id: 'afs', label: 'afs (CLI)', language: 'powershell', where: 'local', content: `afs run ${cliArgs.join(' ')}\nif ($LASTEXITCODE -ne 0) { throw "Falló" }`, note: `En esta PC. Sin "npm link": node ${psLit(cliPath)} run …` },
+    { id: 'mcp', label: 'Claude Code (MCP)', language: 'text', where: 'local', content: `Usa la herramienta run_flow de ${mcpServer} con flow ${JSON.stringify(flow.id)} («${mdLine(flow.name)}»), step ${JSON.stringify(step.id)} («${mdLine(step.name)}»)${scope === 'from' ? ', from: true' : ''} e input "<input>"${contract.vars.length ? ` y vars ${JSON.stringify(vars)}` : ''}. Si falla dime en qué step y por qué.`, note: 'Con el MCP de la app registrado (Integraciones → Otro agente / Claude Code).' },
+    { id: 'webhook', label: 'Webhook (URL)', language: 'text', where: 'remote', content: `POST ${rb}${path}?source=webhook\nAuthorization: Bearer <AFS_TOKEN>\nContent-Type: application/json\n\n${JSON.stringify(body('webhook'), null, 2)}\n\nSi la herramienta no permite headers (último recurso, el token queda en logs):\n${rb}${path}?source=webhook&token=<AFS_TOKEN>`, note: 'No espera: la respuesta trae runId y statusUrl.' },
+  ];
+  return { flowId: flow.id, stepId: step.id, slug, scope, endpoint: { method: 'POST', path, local: lb + path, remote: rb + path }, contract, reach: { status: remote.status, base: rb, explanation: remote.explanation, options: (remote.options || []).map(({ config, ...o }) => o) }, snippets };
+}
+
+/** INVOKE.md of a flow (STEPINV-9): every step with endpoint, CLI and Jenkins examples; the token is a placeholder. */
+export function invokeDoc(flow, { localBase, remote, cliPath }) {
+  const out = [
+    `# Invocar «${mdLine(flow.name)}» desde fuera`, '',
+    `Generado por Agent Flow Studio al guardar el flujo (id \`${flow.id}\`). El token NO está aquí: se lee de \`AFS_TOKEN\` (en Jenkins, una credencial Secret text).`, '',
+    `- Desde esta PC: \`${localBase}\``, `- Desde otra máquina: \`${remote.base}\`${remote.status === 'needs-host' || remote.status === 'needs-tunnel' ? ` — ⚠ ${remote.explanation}` : ''}`, '',
+    '## Flujo completo', '', '```bash',
+    `curl -sS -X POST ${bashLit(`${remote.base}/api/ext/flows/${flow.id}/run`)} -H "Authorization: Bearer $AFS_TOKEN" -H 'Content-Type: application/json' -d '{"input":"<input>","wait":true,"timeoutSec":1800}'`,
+    '```', '', '```powershell', `afs run ${psLit(flow.id)} -i ${psLit('<input>')}`, '```', '',
+    '## Steps', '',
+  ];
+  for (const s of flow.steps) {
+    const inv = stepInvoke(flow, s, { localBase, remote, cliPath });
+    const c = inv.contract;
+    out.push(`### ${mdLine(s.name)}`, '', `- slug: \`${s.slug}\` · id: \`${mdLine(s.id)}\``, `- \`POST ${inv.endpoint.path}\` (\`"scope":"from"\` para ejecutar también lo que sigue)`);
+    if (c.vars.length) out.push(`- variables: ${c.vars.map((v) => `\`${v.name}\``).join(', ')}`);
+    if (c.upstream.length) out.push(`- recibe la última salida de: ${c.upstream.map(mdLine).join(', ')}`);
+    if (c.writesOutside.length) out.push(`- ⚡ escribe fuera: ${c.writesOutside.map(mdLine).join('; ')}`);
+    out.push('', '```powershell', inv.snippets.find((x) => x.id === 'afs').content.split('\n')[0], '```', '', '```groovy', inv.snippets.find((x) => x.id === 'jenkins-sh').content, '```', '');
+  }
+  return out.join('\n');
+}

@@ -8,11 +8,11 @@ const REACH = { 'ok-local': ['ok', 'Llega directo (misma PC)'], 'ok-lan': ['ok',
 
 const CopyBtn = ({ text, onCopy }) => { const [ok, setOk] = useState(false); return <button className="small" onClick={() => { navigator.clipboard.writeText(text); setOk(true); onCopy?.(); setTimeout(() => setOk(false), 1200); }}>{ok ? '✓ copiado' : 'Copiar'}</button>; };
 
-export default function IntegrationWizard({ flow }) {
+export default function IntegrationWizard({ flow, initialStep = '', initialScope = 'only' }) {
   const [callers, setCallers] = useState([]);
   const [caller, setCaller] = useState(null);
   const [desc, setDesc] = useState('');
-  const [opt, setOpt] = useState({ step: '', location: '', mode: '', input: '', vars: {}, idempotencyKey: '', timeoutSec: 1800 });
+  const [opt, setOpt] = useState({ step: (initialStep && flow.steps.find((s) => s.slug === initialStep || s.id === initialStep)?.id) || initialStep || '', scope: initialScope || 'only', location: '', mode: '', input: '', vars: {}, idempotencyKey: '', timeoutSec: 1800 });
   const [out, setOut] = useState(null);
   const [busy, setBusy] = useState('');
   const [err, setErr] = useState('');
@@ -40,7 +40,7 @@ export default function IntegrationWizard({ flow }) {
     setErr(''); setBusy(ai ? 'ai' : 'tpl'); setTest(null);
     try {
       const vars = Object.fromEntries(Object.entries(opt.vars).filter(([, v]) => String(v).trim()));
-      const options = { ...opt, vars, step: opt.step || undefined, location: opt.location || undefined, mode: opt.mode || undefined, input: opt.input || undefined, idempotencyKey: opt.idempotencyKey || undefined };
+      const options = { ...opt, vars, step: opt.step || undefined, scope: opt.step && opt.scope === 'from' ? 'from' : undefined, location: opt.location || undefined, mode: opt.mode || undefined, input: opt.input || undefined, idempotencyKey: opt.idempotencyKey || undefined };
       const r = await api.post('/api/integrations/generate', { flow: flow.id, caller, description: desc, options, ai });
       setOut(r); setFileTab(0);
     } catch (e) { setErr(e.message); }
@@ -53,7 +53,7 @@ export default function IntegrationWizard({ flow }) {
     try {
       const m = out.mapping || {};
       const sampleOf = (s) => String(s ?? '').replace(/\{\{[^}]+\}\}/g, 'EJEMPLO-1').replace(/\{[A-Z_][A-Z0-9_]*\}/g, 'ejemplo');
-      const body = { input: sampleOf(m.input), vars: Object.fromEntries(Object.entries(m.vars || {}).map(([k, v]) => [k, sampleOf(v)])), source: caller || 'test', ...(opt.step ? { step: opt.step } : {}), ...(real ? {} : { dryRun: true }) };
+      const body = { input: sampleOf(m.input), vars: Object.fromEntries(Object.entries(m.vars || {}).map(([k, v]) => [k, sampleOf(v)])), source: caller || 'test', ...(opt.step ? { step: opt.step, ...(opt.scope === 'from' ? { scope: 'from' } : {}) } : {}), ...(real ? {} : { dryRun: true }) };
       const keyHdr = m.idempotencyKey ? { 'Idempotency-Key': `${sampleOf(m.idempotencyKey)}-${Date.now()}` } : {};
       const r = await fetch(`/api/ext/flows/${encodeURIComponent(flow.id)}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${info.token}`, ...keyHdr }, body: JSON.stringify(body) });
       setTest({ status: r.status, body: await r.json().catch(() => ({})), real, sent: body });
@@ -94,8 +94,13 @@ export default function IntegrationWizard({ flow }) {
             <label className="field small"><span className="field-label">Qué ejecutar</span>
               <select value={opt.step} onChange={(e) => setOpt({ ...opt, step: e.target.value })}>
                 <option value="">todo el flujo</option>
-                {flow.steps.map((s) => <option key={s.id} value={s.name}>solo "{s.name}"</option>)}
+                {flow.steps.map((s) => <option key={s.id} value={s.id}>step "{s.name}"</option>)}
               </select></label>
+            {opt.step && <label className="field small"><span className="field-label">Alcance</span>
+              <select value={opt.scope} onChange={(e) => setOpt({ ...opt, scope: e.target.value })}>
+                <option value="only">solo ese step</option>
+                <option value="from">ese step y los que siguen</option>
+              </select></label>}
             <label className="field small"><span className="field-label">¿Espera el resultado?</span>
               <select value={opt.mode} onChange={(e) => setOpt({ ...opt, mode: e.target.value })}>
                 <option value="">automático</option>

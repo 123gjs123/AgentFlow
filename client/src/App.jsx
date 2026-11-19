@@ -387,7 +387,7 @@ export default function App() {
   function duplicateStep(id) {
     const src = flow.steps.find((s) => s.id === id);
     if (!src) return;
-    const { lastRun, memory, pinned, chatSessionId, chatContextHash, ...rest } = structuredClone(src);
+    const { lastRun, memory, pinned, chatSessionId, chatContextHash, slug, ...rest } = structuredClone(src);
     const copy = { ...rest, id: rid('s_'), name: `${src.name} (copia)`, memory: [], lastRun: null, position: { x: src.position.x + 40, y: src.position.y + 130 } };
     mutate((f) => { f.steps.push(copy); return f; });
     setSelectedId(copy.id);

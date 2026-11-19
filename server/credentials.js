@@ -118,10 +118,10 @@ export const CRED_RE = /\{\{\{?\s*cred\.([a-z][a-z0-9_-]*)\.([a-z]+)\s*\}?\}\}/g
 export function credentialRefs(flow, only = null) {
   const texts = [];
   for (const s of flow.steps || []) {
-    if (only && s.id !== only) continue;
+    if (only && (only instanceof Set ? !only.has(s.id) : s.id !== only)) continue;
     if (s.kind === 'command') texts.push(s.command);
   }
-  if (!only) texts.push(flow.finally?.disabled ? '' : flow.finally?.command);
+  if (!only || only instanceof Set) texts.push(flow.finally?.disabled ? '' : flow.finally?.command); // a "from" run also runs "Al terminar"
   const refs = new Map();
   for (const t of texts) for (const m of String(t || '').matchAll(CRED_RE)) refs.set(`${m[1].toLowerCase()}.${m[2]}`, { name: m[1].toLowerCase(), field: m[2] });
   return [...refs.values()];
