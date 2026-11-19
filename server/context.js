@@ -19,7 +19,7 @@ function readDefinition(step, flow) {
   const kind = step.kind === 'skill' ? 'skill' : step.kind === 'agent' ? 'agent' : null;
   if (!kind) return null;
   const ref = kind === 'skill' ? step.skillRef : step.agentRef;
-  const hit = ref ? (kind === 'skill' ? findSkill(ref, flow.cwd) : findAgent(ref, flow.cwd)) : null;
+  const hit = ref ? (kind === 'skill' ? findSkill(ref, flow.cwd, flow.id) : findAgent(ref, flow.cwd)) : null;
   if (!hit) return { kind, ref, found: false };
   let txt = '';
   try { txt = fs.readFileSync(hit.path, 'utf8'); } catch {}
@@ -221,7 +221,7 @@ El chat no cambia nada por su cuenta: cada cambio (step, flujo, archivos de la s
 /** Full skill/agent file, only for entries of the catalog (no arbitrary paths). */
 export function definitionFile(kind, name, flowId) {
   const flow = flowId ? store.getFlow(flowId) : null;
-  const hit = kind === 'skill' ? findSkill(name, flow?.cwd) : kind === 'agent' ? findAgent(name, flow?.cwd) : null;
+  const hit = kind === 'skill' ? findSkill(name, flow?.cwd, flow?.id) : kind === 'agent' ? findAgent(name, flow?.cwd) : null;
   if (!hit) throw Object.assign(new Error('No está en el catálogo'), { status: 404 });
   const txt = fs.readFileSync(hit.path, 'utf8');
   return { kind, name: hit.name, path: hit.path, source: hit.source, content: txt.slice(0, 50000), truncated: txt.length > 50000 };

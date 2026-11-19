@@ -20,7 +20,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 10 | [Source status checks ("pull for news")](10-source-status-checks.md) | Implemented as 🔔 Novedades (2026-11-18; e2e: `test/e2e/28-*`) |
 | 11 | [Flow isolation](11-flow-isolation.md) | Proposed |
 | 12 | [Per-step external invocation](12-step-invocation.md) | Implemented v1 (2026-11-19; e2e: `test/e2e/30-*`); per-flow token in spec 11 |
-| 13 | [Skill sources: URL, folder, zip](13-skill-sources.md) | Proposed |
+| 13 | [Skill sources: URL, folder, zip](13-skill-sources.md) | Implemented (2026-11-19; e2e: `test/e2e/31-*`) |
 | 14 | [Step outputs: handoff, actions, deliverables](14-step-outputs-and-actions.md) | Implemented v1 (2026-11-18; e2e `test/e2e/29-*`; architect + 5 adversarial passes; see "Implementation v1" for what is left) |
 | 15 | [Data passing between steps](15-data-passing.md) | Implemented ("for each" 2026-11-18, e2e `test/e2e/27-*`; amended by 16: pins and stale refs) |
 | 16 | [Run reliability, observability and step verification](16-run-reliability-and-verification.md) | Implemented (round 1, 2026-11-10; exceptions listed in the spec) |

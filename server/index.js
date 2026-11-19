@@ -13,6 +13,7 @@ import { WebSocketServer } from 'ws';
 import * as store from './store.js';
 import * as engine from './engine.js';
 import { listAgents, listSkills } from './catalog.js';
+import * as SK from './skills.js';
 import { lastInit, lastRateLimit, probeInit, claudeBin } from './claude.js';
 import { previewStep, definitionFile } from './context.js';
 import * as integ from './integrations.js';
@@ -38,7 +39,7 @@ const HOST = process.env.HOST || '127.0.0.1';
 const app = express();
 // Imports may carry chats and run history: bigger limit for that route only.
 const json5mb = express.json({ limit: '5mb' }); const json50mb = express.json({ limit: '50mb' });
-app.use((req, res, next) => (req.path === '/api/flows/import' ? json50mb : json5mb)(req, res, next));
+app.use((req, res, next) => (req.path === '/api/flows/import' || req.path === '/api/skills/inspect' ? json50mb : json5mb)(req, res, next)); // a 20 MB zip in base64 ≈ 27 MB
 app.use(express.text({ type: ['text/*'], limit: '5mb' }));
 // Body parse errors (malformed JSON, too large): JSON error without stack traces or local paths.
 app.use((err, req, res, next) => {
@@ -61,7 +62,7 @@ const wrap = (fn) => async (req, res) => {
     res.locals.code = e.code || null;
     const status = e.status || (e instanceof SyntaxError || e instanceof TypeError || e instanceof RangeError || e instanceof ReferenceError ? 500 : 400);
     if (status >= 500) console.error(e);
-    res.status(status).json({ error: e.message, code: e.code || CODES[status] || 'ERROR', ...(Array.isArray(e.widens) ? { widens: e.widens } : {}) });
+    res.status(status).json({ error: e.message, code: e.code || CODES[status] || 'ERROR', ...(Array.isArray(e.widens) ? { widens: e.widens } : {}), ...(Array.isArray(e.conflicts) ? { conflicts: e.conflicts } : {}) });
   }
 };
 const CODES = { 400: 'BAD_REQUEST', 401: 'UNAUTHORIZED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 409: 'CONFLICT', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'UNPROCESSABLE', 500: 'INTERNAL' };
@@ -507,7 +508,7 @@ app.post('/api/flows/:id/reset', wrap((req) => {
   engine.syncSchedule(f); W.syncPolling(f);
   return f;
 }));
-app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); W.clearPolling(req.params.id); store.deleteFlow(req.params.id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: req.params.id }); engine.bus.emit('msg', { type: 'flows.changed' }); }));
+app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); W.clearPolling(req.params.id); store.deleteFlow(req.params.id); SK.removeFlowSkills(req.params.id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: req.params.id }); engine.bus.emit('msg', { type: 'flows.changed' }); }));
 
 // ----- runs -----
 // UI runs honour breaks unless {breakpoints:false}.
@@ -646,6 +647,7 @@ app.post('/api/flows/:id/chat/:key/discard', wrap((req) => engine.discardProposa
 app.get('/api/flows/:id/export', wrap((req, res) => {
   const flow = need(req.params.id);
   const b = exportFlow(flow, { chats: req.query.chats === '1', runs: req.query.runs === '1', memory: req.query.memory !== '0', pins: req.query.pins === '1', secrets: req.query.secrets === '1' });
+  if (req.query.skills !== '0') { const sk = SK.embedForExport(flow.id); if (sk.length) b.skills = sk; }
   res.setHeader('Content-Disposition', `attachment; filename="${slug(flow.name)}.afsflow.json"`);
   return b;
 }));
@@ -662,7 +664,10 @@ app.post('/api/flows/import', wrap((req) => {
   if (runs) for (const r of runs.slice(0, 50)) if (r && typeof r.id === 'string') store.saveRun({ ...r, flowId: saved.id, imported: true, status: ['running', 'paused'].includes(r.status) ? 'interrupted' : r.status, pauses: [] });
   store.saveVersion(saved, { label: 'Importado' });
   engine.bus.emit('msg', { type: 'flows.changed' });
-  return { flow: saved, quarantine: saved.quarantine || null, warnings };
+  // spec 13: the bundle's skills are only staged; installing them goes through the same review as a zip
+  let skillReview = null;
+  try { skillReview = SK.stageImport(body.bundle?.skills, saved.id); } catch (e) { warnings.push(`Skills del paquete descartadas: ${e.message}`); }
+  return { flow: saved, quarantine: saved.quarantine || null, warnings, ...(skillReview ? { skillReview: { ...skillReview, flowId: saved.id } } : {}) };
 }));
 /** "Revisé este flujo, habilitar": lifts the import quarantine. */
 app.post('/api/flows/:id/trust', wrap((req) => {
@@ -775,10 +780,38 @@ app.delete('/api/library/:id', wrap((req) => store.deleteFromLibrary(req.params.
 
 // ----- catalog / info -----
 app.get('/api/catalog', wrap((req) => ({
-  skills: listSkills(req.query.cwd), agents: listAgents(req.query.cwd),
+  skills: listSkills(req.query.cwd, req.query.flow && store.getFlow(String(req.query.flow)) ? String(req.query.flow) : undefined), agents: listAgents(req.query.cwd),
   tools: lastInit.tools, mcpServers: lastInit.mcpServers, rateLimit: lastRateLimit.info, claudeBin: claudeBin(),
 })));
 app.post('/api/catalog/probe', wrap(async (req) => probeInit(req.body?.cwd)));
+
+// ----- skill sources (spec 13): inspect → review → install for this flow or for the user's Claude Code -----
+const skillFlow = (id, required) => { if (!id) { if (required) throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND'); return null; } const f = store.getFlow(String(id)); if (!f) throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND'); return f; };
+const skillsChanged = (flowId) => engine.bus.emit('msg', { type: 'catalog.changed', flowId: flowId || null });
+app.post('/api/skills/inspect', wrap((req) => {
+  const b = req.body || {};
+  const one = ['url', 'path', 'zipBase64'].filter((k) => b[k] !== undefined);
+  if (one.length !== 1) throw fail(400, 'Indica una sola fuente: url, path o zipBase64', 'BAD_SOURCE');
+  return SK.inspect({ url: b.url, path: b.path, zipBase64: b.zipBase64, fileName: b.fileName });
+}));
+app.post('/api/skills/install', wrap((req) => {
+  const b = req.body || {};
+  const scope = b.scope || 'flow';
+  const flow = skillFlow(b.flowId, scope === 'flow');
+  const r = SK.install({ token: b.token, names: b.names, scope, flow, mode: b.mode || 'copy', confirmUser: b.confirmUser === true, resolve: b.resolve && typeof b.resolve === 'object' ? b.resolve : {} });
+  skillsChanged(flow?.id);
+  return r;
+}));
+app.get('/api/flows/:id/skills', wrap((req) => SK.flowSkills(need(req.params.id).id)));
+app.get('/api/skills/:name/origin', wrap((req) => SK.originOf(req.params.name, String(req.query.scope || 'flow'), skillFlow(req.query.flowId, req.query.scope !== 'user'))));
+app.post('/api/skills/:name/update', wrap((req) => SK.checkUpdate(req.params.name, String(req.query.scope || req.body?.scope || 'flow'), skillFlow(req.query.flowId || req.body?.flowId, (req.query.scope || req.body?.scope || 'flow') !== 'user'))));
+app.delete('/api/skills/:name', wrap((req) => {
+  const scope = String(req.query.scope || 'flow');
+  const flow = skillFlow(req.query.flowId, scope === 'flow');
+  const r = SK.remove(req.params.name, scope, flow, { confirm: req.query.confirm === '1' });
+  skillsChanged(flow?.id);
+  return r;
+}));
 app.get('/api/catalog/file', wrap((req) => definitionFile(String(req.query.kind || ''), String(req.query.name || ''), req.query.flow ? String(req.query.flow) : null)));
 
 // ----- context box (spec 17 CTX) -----

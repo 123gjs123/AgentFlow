@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (296 tests)
+## Qué cubre (312 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -69,6 +69,8 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `25-flow-review-investigate` | Spec 28, ronda 2: git de solo lectura (lee los repos del flujo, rechaza escrituras, programas y otras carpetas); evidencia completa de las ejecuciones en archivos; el investigador y sus hechos verificados por la app (los inventados se descartan); partir, quitar y reconectar steps (todo o nada, sin ciclos); "aplicar las seguras" con versión previa; el chat de revisión también investiga; reparación de un JSON roto |
 | `26-coordinator` | Spec 30: el coordinador elige por dónde entra cada pedido (un step a mitad de camino corre aunque lo anterior no); una flecha que depende de su decisión (`when.from`); uno por flujo; en el chat general atiende él, consulta al step que sabe y responde con lo que dijo |
 | `29-outputs` | Spec 14: entregables (.feature/JSON/CSV, chequeo de formato, copia, descarga UI/API, handoff), acción automática con solo sus herramientas MCP y sin duplicar, acción que no llama a la herramienta = fallida, política sin escrituras, confirmar/aprobar con datos editados/rechazar, ensayo = dryRun, HTTP POST con credencial a su origen, cuarentena al importar, UI |
+| `30-step-invoke` | Spec 12: cada step se llama desde fuera (slug estable, `…/steps/:step/run` solo o "desde", `?format=text` sin jq, `afs --from`, MCP `from`, snippets pegados en bash y PowerShell que funcionan, INVOKE.md al día, migración de slugs al arrancar) |
+| `31-skill-sources` | Spec 13: skills desde URL git/tree/zip/SKILL.md (offline: insteadOf + HTTPS con cert de prueba), carpeta copiada o vinculada, zip; revisión antes de instalar; solo este flujo (`--add-dir`) o Mi Claude Code con confirmación; zip-slip/enlaces/límites/SSRF/TLS/hooks; conflictos; exportar/importar; actualizar con diff y archivos; UI |
 | `28-watch` | Spec 10 🔔 Novedades: rama git (primera foto, commits nuevos, se acumulan hasta "Visto", aviso 🔔), archivos y comando elemento por elemento, error sin perder la foto, Jira con Haiku de solo lectura (la app hace el diff), "ejecutar desde este step" y API externa `/status`, URL (ETag / contenido / HTTP de error), polling saneado, UI con 🔔 en el nodo |
 | `27-for-each` | Spec 15 DATA-10: "para cada": un step corre una vez por elemento de una lista JSON de arriba (`{{item.key}}`, `$env:AFS_ITEM`), de a N, junta los resultados en una lista; si uno falla los demás corren; lista vacía omite lo que sigue; origen que no es lista da error claro; UI 🔁 |
 

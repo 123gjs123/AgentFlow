@@ -8,6 +8,7 @@ import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
 import { PreflightModal } from './Requirements.jsx';
 import { ExportModal, importFile, QuarantineBanner } from './ExportImport.jsx';
+import { AddSkillModal } from './SkillPicker.jsx';
 import { SettingsModal } from './Settings.jsx';
 import { AttentionButton, AttentionDrawer, AttentionToasts, flowPrefix } from './Attention.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
@@ -66,6 +67,7 @@ export default function App() {
   const [focusRun, setFocusRun] = useState(null); // {runId, n}: open this run in Flujo › Ejecuciones
   useEffect(() => { api.get('/api/attention').then((r) => setAttention(r.items || [])).catch(() => {}); }, []);
   const importInput = useRef(null);
+  const [skillReview, setSkillReview] = useState(null);
   /** Import a .afsflow.json (spec 09): opens the new flow; quarantined ones show the review banner. */
   async function onImport(files) {
     for (const file of files) {
@@ -73,6 +75,7 @@ export default function App() {
         const r = await importFile(file);
         await loadFlows();
         await openFlow(r.flow.id);
+        if (r.skillReview?.token || r.skillReview?.notEmbedded?.length) setSkillReview(r.skillReview); // spec 13: the bundle's skills, installed only after review
         notify(`Importado “${r.flow.name}”${r.quarantine ? ' — en revisión: revisa lo que ejecuta antes de habilitarlo' : ''}${r.warnings.length ? ` · ${r.warnings.join(' · ')}` : ''}`);
       } catch (e) { notify(`No se pudo importar ${file.name}: ${e.message}`); }
     }
@@ -101,7 +104,7 @@ export default function App() {
 
   const notify = (t) => { setToast(t); setTimeout(() => setToast(''), 4000); };
   const loadFlows = () => api.get('/api/flows').then(setFlows);
-  const loadCatalog = (cwd) => api.get(`/api/catalog${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`).then((c) => { setCatalog(c); if (c.rateLimit) setRate(c.rateLimit); });
+  const loadCatalog = (cwd, flowId = flowRef.current?.id) => { const q = new URLSearchParams(); if (cwd) q.set('cwd', cwd); if (flowId) q.set('flow', flowId); return api.get(`/api/catalog${q.toString() ? `?${q}` : ''}`).then((c) => { setCatalog(c); if (c.rateLimit) setRate(c.rateLimit); }); };
 
   useEffect(() => {
     // This tab's flow: URL (?flow=) → this tab's session → the last one used in any tab → the first.
@@ -113,7 +116,7 @@ export default function App() {
       if (URL_OPEN === 'flowreview') setFlowTab('review');
     }).catch(() => {});
   }, []);
-  useEffect(() => { loadCatalog(flow?.cwd); }, [flow?.id, flow?.cwd]);
+  useEffect(() => { loadCatalog(flow?.cwd, flow?.id); }, [flow?.id, flow?.cwd]);
   // Requirements (spec 23): header chip when something required is missing on this machine.
   useEffect(() => {
     if (!flow?.requirements?.length) { setPreflight(null); return; }
@@ -261,6 +264,7 @@ export default function App() {
     if (m.type === 'watch.updated' && cur && m.flowId === cur.id) api.get(`/api/flows/${cur.id}/watch`).then(setWatchView).catch(() => {});
     if (m.type === 'run.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
     if (m.type === 'chat.event' && m.event.kind === 'rate_limit') setRate(m.event.info);
+    if (m.type === 'catalog.changed' && (!m.flowId || m.flowId === cur?.id)) loadCatalog(cur?.cwd, cur?.id).catch(() => {}); // spec 13: a skill added/removed
     if (m.type === 'flows.changed') { loadFlows().catch(() => {}); return; } // created / renamed / deleted in another tab
     if (m.type === 'attention.changed') {
       setAttention(m.items || []);
@@ -578,6 +582,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
       {paused && reviewOpen && flow && <ReviewModal key={paused.runId} refresh={paused.nonce || 0} flowId={flow.id} runId={paused.runId} onClose={() => setReviewOpen(false)} />}
       {!online && <div className="offline-bar">⚠️ El servidor de Agent Flow Studio no responde. Arráncalo con <code>npm start</code> en la carpeta del proyecto (o con cualquier comando <code>afs</code>); esta página se reconecta sola.</div>}
       {toast && <div className="toast">{toast}</div>}
+      {skillReview && flow?.id === skillReview.flowId && <AddSkillModal flow={flow} initial={skillReview.token ? skillReview : { ...skillReview, skills: [] }} onClose={() => setSkillReview(null)} onDone={(inst) => { setSkillReview(null); notify(`Skills instaladas: ${inst.map((x) => x.name).join(', ')}`); }} />}
       {modal === 'picker' && <StepPicker catalog={catalog} onPick={addStep} onClose={() => setModal(null)} />}
       {modal === 'ai' && <AiFlowModal cwd={flow?.cwd} onClose={() => setModal(null)} onCreated={async (f) => { setModal(null); await loadFlows(); openFlow(f.id); notify(`Flujo “${f.name}” creado: revisa cada step y ejecútalo`); }} />}
       {modal?.help && <HelpModal section={modal.help} setSection={(k) => setModal({ help: k })} onClose={() => setModal(null)} flow={flow} flows={flows} onTour={() => { setModal(null); setTourStep(0); }} />}

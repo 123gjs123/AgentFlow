@@ -1,6 +1,6 @@
 # 13 — Skill sources: load skills from a URL, a folder or a zip
 
-**Status:** Proposed
+**Status:** Implemented (v1, 2026-11-19) — closed after architect review, 4 adversarial passes + closing check
 
 ## Summary
 
@@ -74,3 +74,140 @@ Since each flow runs with its own working directory, `<flow folder>/workspace/` 
 
 ## Open questions
 - Private Git repos: use the user's git credentials (clone through their git) or a per-source token? Proposed: rely on the user's git credential manager, store no secrets.
+
+## Implementation (v1)
+
+**Decisions**
+
+**Where "This flow" skills live (no spec 11 yet).** Skills installed for a flow go in `<DATA>/flow-skills/<flowId>/.claude/skills/<name>/`. Every Claude call for that flow passes `--add-dir <DATA>/flow-skills/<flowId>`; Claude Code loads `.claude/skills` from an add-dir. I checked this with the real CLI, and it also works through a junction. The calls covered are:
+- steps, the context preview and chats, through `resolveContext`;
+- hooks (`hook.ai`);
+- the review investigators.
+
+A flow without skills gets nothing. When spec 11 lands, `flowSkillRoot()` is the only place to change.
+
+**Link mode.** A directory junction (Windows, no admin) or a symlink points at the user's folder. Its records go in `links.json`, and nothing is ever written in the user's folder. The run also gets the real folder as an add-dir, so Read on the skill's files works. Link mode only works with a local folder and scope "This flow". Removing a link or deleting the flow unlinks it and never touches the target.
+
+**Precedence.** `findSkill` prefers, in order: this flow, linked, project, user, claude.ai, plugins. On install for a flow, a name that already exists as a user or project skill is a conflict, because Claude Code would show that one instead. Replacing is allowed only inside the same target folder.
+
+**Sources.**
+- **Git.** Git repos and tree URLs (GitHub, Bitbucket Cloud and Server, GitLab, and `repo.git#branch:path`) are cloned with the user's git: `--depth 1`, plus sparse checkout for a sub-path. The clone runs:
+  - with an empty `core.hooksPath` and `--template=`;
+  - with `core.symlinks=false`, no LFS filters and no submodules;
+  - with only the https protocol;
+  - after `--`.
+
+  Private repos use the user's credential manager; no secret is stored.
+- **Zip and SKILL.md.** `.zip` URLs and single `SKILL.md` URLs are downloaded with `fetch`, which uses the system CAs from `certs.js`; TLS checks are never disabled. Redirects are followed by hand, at most 5, each re-checked as https plus the host check.
+- **SSRF.** This machine and link-local addresses are blocked (`169.254/16` covers cloud metadata). Private networks are allowed, because corporate Bitbucket and GitLab live there.
+
+**Zip.** `server/unzip.js` is a strict reader with no dependency. It accepts stored and deflate only and verifies the CRC. It rejects:
+- zip64 and encrypted entries;
+- symlinks;
+- `..`, absolute paths, drive letters and backslashes;
+- `:` (alternate data streams), Windows reserved names, trailing dots or spaces;
+- duplicates when compared without case.
+
+Limits are 20 MB, 500 files and 50 MB unpacked. Every entry is validated before anything is written, and the destination real path is checked again.
+
+**Review before install.** `inspect` keeps the downloaded or extracted folder in a temp dir for 15 minutes and returns a token. The review shows name, description, allowed-tools, files with ⚠ scripts, size and problems. A local folder is read in place, and its hash is checked again at install (`SOURCE_CHANGED`). Each installed skill gets `.afs-origin.json` with `{type, source, ref, subPath, sha256, installedAt}`.
+
+**Endpoints**
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/skills/inspect` | `{url}`, `{path}` or `{zipBase64, fileName}` |
+| `POST /api/skills/install` | `{token, names, scope: flow\|user, flowId, mode: copy\|link, confirmUser, resolve}` → 409 `SKILL_EXISTS` with `conflicts` |
+| `GET /api/flows/:id/skills` | the flow's skills |
+| `GET /api/skills/:name/origin` | where an installed skill came from |
+| `POST /api/skills/:name/update` | `{previous, current, changed, token}` |
+| `DELETE /api/skills/:name` | scope `user` needs `confirm=1` and only works on skills the app installed |
+
+`GET /api/catalog?flow=` adds the flow's skills.
+
+**Deferred**
+- SKSRC-11: the 🔔 Novedades check through spec 10. The "Buscar actualización" button with a diff is in.
+- SKSRC-12: referencing a skill by its origin URL. A skill over 5 MB is listed as not embedded, so the person adds it by hand.
+- Duplicating a flow does not copy its skills.
+
+**Client.** `SkillPicker` is a searchable combobox grouped by origin, with the selected skill's description. It warns when a skill is missing from this machine, and offers "Quitar del flujo" and "Buscar actualización". The "＋ Agregar skill" modal has URL, folder (copy or link, with Examinar…) and zip (drag & drop or path) tabs, then the review, the scope selection with confirmation for "Mi Claude Code", and the rename, replace or don't-install choice on a conflict. On import, the bundle's skills open the same review.
+
+**Tests.** `test/e2e/31-skill-sources.test.mjs` runs offline. GitHub URLs go to a local repo through git `insteadOf`. HTTPS goes to a local server with a fixture certificate trusted through `NODE_EXTRA_CA_CERTS`, and a second, untrusted certificate proves that verification stays on. Zips are built by hand.
+
+**Real simulation.** I ran an isolated server with the real Claude CLI. A skill from a zip, installed for flow A, was used by A's step, which returned the skill's secret word. Flow B did not see it, and nothing was written to `~/.claude`.
+
+### First adversarial pass
+
+The pass found 3 high, 3 medium and 4 low findings. All are fixed, with tests in `31-skill-sources`.
+
+**High**
+- **H1 — an install for "Mi Claude Code" deleted folders the app had not installed.** It deleted one with another `name`, and one without a SKILL.md. Now a folder that already exists is always a conflict, and only one with `.afs-origin.json` (or a link of this flow) can be replaced.
+- **H2 — SSRF through mapped IPv6.** `[::ffff:127.0.0.1]` and `[::ffff:169.254.169.254]` got through. The check now uses `net.BlockList`, which also covers IPv4-mapped addresses, IPv4-compatible addresses and NAT64.
+- **H3 — git followed redirects to loopback.** Git now runs with `http.followRedirects=false`, and the connection is pinned to the checked addresses (`http.curloptResolve`).
+
+**Medium**
+- **M1 — this PC was reachable through its own LAN IP.** Every address of `os.networkInterfaces()` is now blocked. A download now connects to the exact address that was checked (`https.get` with its own `lookup`), so DNS rebinding no longer works.
+- **M2 — export followed links inside a skill.** Hash and export now read only the skill's own folder and skip nested links. A source folder with links inside is `FOLDER_SYMLINK`.
+- **M3 — a new user skill could hide a flow skill without any conflict.** Installing for "Mi Claude Code" now counts a skill with the same name in any flow as a conflict.
+
+**Low**
+- **L1 — a repeated `name:` in the front matter.** A repeated key is now a problem in the review, and a rename re-reads the front matter to check it.
+- **L2 — review tokens could be reused anywhere.** A token is now used once. An import's review only installs into the imported flow (`TOKEN_SCOPE`). At most 20 reviews are pending at a time.
+- **L3 — fs errors leaked temp paths.** A clash between a file and a folder, or with an 8.3 short name (`LONGFI~1.TXT`), is now a clean `ZIP_UNSAFE`. Segments that look like 8.3 short names are rejected.
+- **L4 — after a rename that clashes again, the UI could not choose.** Conflicts now carry the source name, and the client keys its decisions by it.
+
+**Accepted:** the clone is limited by time (120 s) and by sparse checkout, not by its total size. Node's `fetch` and `https` ignore `HTTPS_PROXY`. That is fine for a transparent proxy like this machine's, which needs the system CA; an explicit proxy is not supported yet.
+
+### Second adversarial pass
+
+All the first-pass fixes held, including the IP list against every form tried (mapped, compatible, NAT64, octal, short forms, zone ids, a trailing dot). The pass found 2 medium and 6 low issues. All are fixed, with tests.
+
+**Medium**
+- **M1 — "Replace" could create a duplicate of a user skill the app does not manage.** The duplicate went into another folder with the same `name`. Now only the destination folder itself, when the app manages it, stops being a conflict.
+- **M2 — front matter written as `"name":` or `name :` slipped past the repeated-key check.** Our parser does not read those keys, but a real YAML parser does. Keys written that way are now a problem, and so are Windows reserved names (`nul`, `con`…).
+
+**Low**
+- **L1 — leftovers (`.afs-old-*`, `.afs-tmp-*`) showed up as skills.** Staging and backups now go in `<skills parent>/.afs-staging`, outside the skills folder, so neither the catalog nor Claude Code ever sees them. The catalog skips `.afs-*`.
+- **L2 — a file in use made the error show internal paths.** It is now 409 `SKILL_BUSY` with a clear message, and the backup cleanup is best effort.
+- **L3 — `repo#branch:path` gave git the raw URL.** With an IDN host the pin did not match. Git now gets the normalised URL.
+- **L4 — temp folders were left after stopping.** `afs-skill-*` folders older than 1 h are swept at startup, and pending ones are removed on exit.
+- **L5 — imports pushed out a person's open review.** Imports now have their own cap, and an import without a SKILL.md gives no token.
+- **L6 — a slow server could hold a request for minutes, with a raw error.** One 90 s deadline now covers every hop, and errors while reading the body are `DOWNLOAD_FAILED`.
+
+### Third adversarial pass
+
+There were no high findings, and the fixes from the earlier passes held. Three medium findings are fixed, with tests:
+- **"Buscar actualización" could bring in new scripts without a review.** A new `evil.ps1` came in while SKILL.md stayed the same. The update now lists the files that are added, changed or removed, with ⚠ on scripts, plus the candidate's allowed-tools and problems. "Reemplazar" is disabled when the candidate has problems.
+- **A skill with another SKILL.md inside it could take the place of one of your skills in the catalog.** That is now a review problem: "Contiene otra skill adentro".
+- **The front-matter check rejected valid skills** (`description: >-` with `Triggers: "x"` on the next line). Only lines at indent 0 are keys now. Quotes are removed only when they wrap the whole value. Plain values continued on indented lines are folded the way YAML does, so the review shows what Claude Code reads.
+
+These low findings are fixed too:
+- Ctrl+C / Ctrl+Break now run the cleanup of pending reviews.
+
+These are accepted:
+- A user skill cannot be replaced while some flow has a skill with the same name. That is usability only: rename it.
+
+### Fourth adversarial pass
+
+There were no high findings. The pass compared our parser with Claude Code's own (its front-matter regex plus a YAML parser, run with the same code). It found two medium findings and one low one. All are fixed, with tests:
+- **A skill nested more than 6 levels deep got past the "otra skill adentro" check.** It then hid one of your skills in the catalog. Nested skills are now detected at any depth, using the skill's full file list.
+- **The review hid what Claude Code applies beyond name and description.** Two things went unseen: `allowed-tools` written as a YAML list, and a `hooks:` key (commands that run while the skill is active). Lists are now read as "Bash, Write". `hooks` and any extra key are shown as ⚠ warnings, and the raw front matter is shown; it opens on its own when there are warnings.
+- **Low — the update diff compared sets of lines, so moving a line was invisible.** For example, moving a `!`command`` out of a code fence did not show. It is now an LCS line diff that keeps the order.
+
+### Fifth adversarial check (closed)
+
+The three pass-4 fixes held. Nested skills are found at any depth, and the LCS diff is correct on moved lines.
+
+The check found one medium issue: some key forms got past the review even though YAML parsers read them, so a `hooks:` key or an `allowed-tools` reached Claude Code without a warning. The forms were `? hooks` (an explicit key), escaped quoted keys (`"\x68ooks"`), merge keys (`<<: *a`), and anchors or tags.
+
+Fix (deny by default): every top-level line of the front matter has to be a plain `key: value`, a comment or blank. Anything else is a problem, and so is a value that starts with an anchor, alias or tag. The test covers those forms and a valid front matter that uses `>-` and comments.
+
+Spec 13 v1 is closed. It went through one architect review, four adversarial passes and a closing check. Every finding has a regression test: `31-skill-sources` has 16 tests, including the UI. The real simulation used the real Claude CLI.
+
+**Accepted / deferred:**
+- the 🔔 Novedades update check (spec 10);
+- referencing skills by origin URL in a bundle;
+- duplicating a flow copies its skills;
+- an explicit corporate proxy (`HTTPS_PROXY`);
+- replacing a user skill while a flow has one with the same name;
+- `afs-skill-*` folders left by a hard kill, which are swept after 1 h.

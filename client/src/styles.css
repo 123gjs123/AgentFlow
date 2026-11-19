@@ -421,3 +421,16 @@ pre.diff .add { color: #7ee787; } pre.diff .del { color: #ffa198; }
 .out-item { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
 .out-item .out-field { display: flex; flex-direction: column; gap: 2px; }
 .out-item input, .out-item textarea { width: 100%; }
+
+/* spec 13: skill picker */
+.skill-picker { position: relative; display: flex; flex-direction: column; gap: 4px; }
+.skill-list { position: absolute; top: 34px; left: 0; right: 0; z-index: 30; max-height: 320px; overflow: auto; background: var(--panel, #fff); border: 1px solid var(--border, #ccc); border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+.skill-group { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: .7; padding: 6px 10px 2px; }
+.skill-opt { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; border: 0; background: none; padding: 5px 10px; border-radius: 0; }
+.skill-opt:hover, .skill-opt.active { background: var(--hover, rgba(127,127,127,.15)); }
+.skill-review-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.skill-review-list > li { border: 1px solid var(--border, #ccc); border-radius: 6px; padding: 8px; }
+.badge.warn { background: #f6c34a33; color: #b7791f; border-radius: 4px; padding: 0 6px; font-size: 11px; }
+.dropzone { display: block; border: 2px dashed var(--border, #bbb); border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; }
+.dropzone.over { background: var(--hover, rgba(127,127,127,.15)); }
+pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }

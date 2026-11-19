@@ -8,6 +8,7 @@ import { ExternalInvoke } from './Help.jsx';
 import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
 import ContextBox from './Context.jsx';
 import StepInvoke from './StepInvoke.jsx';
+import SkillPicker from './SkillPicker.jsx';
 import ContextSources, { FsPicker } from './Sources.jsx';
 import RequirementsEditor from './Requirements.jsx';
 import ReviewPanel from './ReviewPanel.jsx';
@@ -165,12 +166,8 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
             </Field>
           )}
           {step.kind === 'skill' && (
-            <Field label="Skill" hint="tus skills de Claude Code / claude.ai / plugins">
-              <select value={step.skillRef} onChange={set('skillRef')}>
-                <option value="">— elegir —</option>
-                {catalog.skills.map((s) => <option key={s.path} value={s.name}>{s.name} · {s.source}</option>)}
-              </select>
-              <div className="muted small">{catalog.skills.find((s) => s.name === step.skillRef)?.description}</div>
+            <Field div label="Skill" hint="de este flujo, tus skills, claude.ai o plugins; ＋ Agregar trae una desde URL, carpeta o zip">
+              <SkillPicker flow={flow} catalog={catalog} value={step.skillRef} onChange={(v) => onChange({ skillRef: v })} />
             </Field>
           )}
           {step.kind === 'command' ? (

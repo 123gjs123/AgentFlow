@@ -12,6 +12,7 @@ import { quarantineProblem } from './bundle.js';
 import * as OUT from './outputs.js';
 import { resolveCredential } from './credentials.js';
 import { findAgent, findSkill } from './catalog.js';
+import { flowSkillDirs } from './skills.js';
 import * as P from './prompt.js';
 import { validate, parseSchema } from './schema.js';
 import * as POL from './policies.js';
@@ -159,7 +160,7 @@ function hookCtx({ flow, step, run, input, signal, log, upstream = [], data }) {
     },
     ai: async (prompt, o = {}) => {
       log({ kind: 'tool_use', name: 'hook.ai', input: { prompt: String(prompt).slice(0, 500), tools: o.tools } });
-      const r = await runClaude({ prompt, model: o.model, allowedTools: o.tools, permissionMode: o.permissionMode, cwd: flowCwd(flow), signal, onEvent: (ev) => ev.kind !== 'delta' && ev.kind !== 'thinking_delta' && log({ ...ev, sub: true }) });
+      const r = await runClaude({ prompt, model: o.model, allowedTools: o.tools, permissionMode: o.permissionMode, addDirs: flowSkillDirs(flow), cwd: flowCwd(flow), signal, onEvent: (ev) => ev.kind !== 'delta' && ev.kind !== 'thinking_delta' && log({ ...ev, sub: true }) });
       return r.text;
     },
     // Runs on the run's snapshot (per-run vars, this run's data); recorded under its own key, never over a step's record.
@@ -1392,7 +1393,7 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   // Spec 25: a chat converses and proposes; it never changes anything itself. Only read tools, whatever the step's
   // access is (edit/dev steps keep Edit/Write/Bash for RUNS, not for chats); write tools are explicitly disallowed.
   let allowedTools = readOnlyTools([isReview ? 'Read Grep Glob' : isFlow ? 'Read Grep Glob WebFetch WebSearch Skill' : step.allowedTools, ...(isReview ? [] : access.tools)].filter(Boolean).join(' '));
-  if (isReview) for (const s of flow.steps) { const ref = s.kind === 'skill' ? findSkill(s.skillRef, flow.cwd) : s.kind === 'agent' ? findAgent(s.agentRef, flow.cwd) : null; if (ref) access.addDirs.push(path.dirname(ref.path)); }
+  if (isReview) for (const s of flow.steps) { const ref = s.kind === 'skill' ? findSkill(s.skillRef, flow.cwd, flow.id) : s.kind === 'agent' ? findAgent(s.agentRef, flow.cwd) : null; if (ref) access.addDirs.push(path.dirname(ref.path)); }
   if (inv) { allowedTools = inv.allowed; access.addDirs.push(inv.dir, ...inv.repos, ...(inv.readDirs || [])); }
   if (cgit) { allowedTools = `${allowedTools} ${cgit.allowed}`.trim(); access.addDirs.push(...cgit.repos); }
   const chatEnv = inv ? inv.env : cgit ? cgit.env : null;
@@ -1400,7 +1401,7 @@ async function chatTurn({ flowId, key, message, origin = 'direct', improve = fal
   const permissionMode = undefined;
   const disallowedTools = CHAT_DISALLOWED;
   // The skill/agent files are readable (to discuss and propose <file-update> changes); `improve` is kept for API compatibility.
-  const ref = step?.kind === 'skill' ? findSkill(step.skillRef, flow.cwd) : step?.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;
+  const ref = step?.kind === 'skill' ? findSkill(step.skillRef, flow.cwd, flow.id) : step?.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;
   if (ref) { addDirs.push(path.dirname(ref.path)); if (!/\bRead\b/.test(allowedTools)) allowedTools = `${allowedTools} Read Grep Glob`.trim(); }
 
   const keys = [key, ...(mirrorKey ? [mirrorKey] : [])];
@@ -1584,7 +1585,7 @@ function applyVars(f, v) {
 }
 /** Where a step's chat may write files (only with the user's confirmation): its skill folder or its agent file. */
 function fileTarget(flow, step, p) {
-  const ref = step?.kind === 'skill' ? findSkill(step.skillRef, flow.cwd) : step?.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;
+  const ref = step?.kind === 'skill' ? findSkill(step.skillRef, flow.cwd, flow.id) : step?.kind === 'agent' ? findAgent(step.agentRef, flow.cwd) : null;
   if (!ref) return { error: 'Solo los steps de tipo Skill o Agente pueden cambiar archivos (los de su skill o su agente).' };
   const root = step.kind === 'skill' ? path.dirname(ref.path) : null;
   const target = path.resolve(root || path.dirname(ref.path), p);

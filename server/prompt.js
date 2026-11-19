@@ -160,7 +160,7 @@ function describeKind(step, flow) {
       return `Tipo: Agente de Claude Code "${step.agentRef}"${a ? ` (archivo: ${a.path})` : ' (no encontrado en el catálogo)'}`;
     }
     case 'skill': {
-      const s = findSkill(step.skillRef, flow.cwd);
+      const s = findSkill(step.skillRef, flow.cwd, flow.id);
       return `Tipo: Skill "${step.skillRef}"${s ? ` (archivo: ${s.path})` : ' (no encontrada en el catálogo)'}`;
     }
     case 'command':

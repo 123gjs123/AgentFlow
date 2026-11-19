@@ -2,12 +2,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DATA } from './store.js';
 
 const HOME = path.join(os.homedir(), '.claude');
 
-function frontmatter(file) {
+export function frontmatter(file, text) {
   try {
-    const txt = fs.readFileSync(file, 'utf8');
+    const txt = text ?? fs.readFileSync(file, 'utf8');
     const m = txt.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     const meta = {};
     if (m) {
@@ -21,8 +22,16 @@ function frontmatter(file) {
           const block = [];
           while (i + 1 < lines.length && (/^\s+\S/.test(lines[i + 1]) || lines[i + 1].trim() === '')) block.push(lines[++i].trim());
           v = v.startsWith('|') ? block.join('\n').trim() : block.join(' ').replace(/\s+/g, ' ').trim();
+        } else if (v === '' && i + 1 < lines.length && /^\s+-\s/.test(lines[i + 1])) {
+          const items = [];
+          while (i + 1 < lines.length && /^\s+-\s/.test(lines[i + 1])) items.push(lines[++i].replace(/^\s+-\s+/, '').trim());
+          v = items.join(', ');
+        } else if (v !== '') {
+          // a plain/quoted scalar folded over indented lines: YAML reads them as the same value (what Claude Code sees)
+          while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1]) && !/^\s+[A-Za-z_-]+:\s/.test(lines[i + 1])) v += ` ${lines[++i].trim()}`;
         }
-        meta[kv[1]] = v.replace(/^["']|["']$/g, '');
+        const q = v.match(/^(["'])([\s\S]*)\1$/);
+        meta[kv[1]] = q ? q[2] : v;
       }
     }
     return meta;
@@ -35,7 +44,7 @@ function walk(root, match, depth = 6, out = []) {
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return out; }
   for (const e of entries) {
     const p = path.join(root, e.name);
-    if (e.isDirectory()) { if (e.name !== 'node_modules' && !e.name.startsWith('.git')) walk(p, match, depth - 1, out); }
+    if (e.isDirectory()) { if (e.name !== 'node_modules' && !e.name.startsWith('.git') && !e.name.startsWith('.afs-')) walk(p, match, depth - 1, out); }
     else if (match(p, e.name)) out.push(p);
   }
   return out;
@@ -74,7 +83,28 @@ function loadedPlugins(projectDir) {
 }
 const pluginOf = (f) => { const m = f.split(path.sep); const i = m.indexOf('cache'); return i >= 0 ? m[i + 2] || m[i + 1] : null; };
 
-export function listSkills(projectDir) {
+// spec 13: skills of ONE flow (<DATA>/flow-skills/<flow>/.claude/skills; copies and linked folders = junctions)
+const flowSkillsDir = (flowId) => path.join(DATA, 'flow-skills', String(flowId).replace(/[^a-zA-Z0-9_-]/g, '_'), '.claude', 'skills');
+function listFlowSkills(flowId) {
+  if (!flowId) return [];
+  const dir = flowSkillsDir(flowId); let entries = [];
+  try { entries = fs.readdirSync(dir); } catch { return []; }
+  const out = [];
+  for (const e of entries) {
+    if (e.startsWith('.afs-')) continue;
+    const f = path.join(dir, e, 'SKILL.md');
+    let linked = false; try { linked = fs.lstatSync(path.join(dir, e)).isSymbolicLink(); } catch {}
+    if (!fs.existsSync(f)) continue;
+    const meta = frontmatter(f);
+    out.push({ name: meta.name || e, description: (meta.description || '').slice(0, 300), path: f, source: linked ? 'linked' : 'flow' });
+  }
+  return out;
+}
+const RANK = { flow: 0, linked: 1, project: 2, user: 3, 'claude.ai': 4 };
+const rank = (s) => RANK[s.source] ?? 5;
+
+export function listSkills(projectDir, flowId) {
+  const own = listFlowSkills(flowId);
   const roots = [path.join(HOME, 'skills'), path.join(HOME, 'plugins', 'cache')];
   if (projectDir) roots.push(path.join(projectDir, '.claude', 'skills'));
   const loaded = loadedPlugins(projectDir);
@@ -89,7 +119,7 @@ export function listSkills(projectDir) {
       if (!seen.has(key)) seen.set(key, { name, description: (meta.description || '').slice(0, 300), path: f, source: src });
     }
   }
-  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return [...own, ...seen.values()].sort((a, b) => a.name.localeCompare(b.name) || rank(a) - rank(b));
 }
 
 export function listAgents(projectDir) {
@@ -105,5 +135,6 @@ export function listAgents(projectDir) {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function findSkill(name, projectDir) { return listSkills(projectDir).find((s) => s.name === name); }
+/** The skill a step uses: this flow's first, then linked, project, user, claude.ai, plugins (spec 13). */
+export function findSkill(name, projectDir, flowId) { return listSkills(projectDir, flowId).filter((s) => s.name === name).sort((a, b) => rank(a) - rank(b))[0]; }
 export function findAgent(name, projectDir) { return listAgents(projectDir).find((a) => a.name === name); }

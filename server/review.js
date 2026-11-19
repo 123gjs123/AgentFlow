@@ -16,6 +16,7 @@ import * as store from './store.js';
 import * as P from './prompt.js';
 import * as POL from './policies.js';
 import { findSkill, findAgent } from './catalog.js';
+import { flowSkillDirs } from './skills.js';
 import { lastInit, runClaude } from './claude.js';
 import { credentialChecks } from './credentials.js';
 import * as engine from './engine.js';
@@ -142,7 +143,7 @@ export async function lintFlow(flow, { probes = true, fresh = false } = {}) {
     const isAi = s.kind !== 'command';
     const toks = tokens(s.allowedTools);
     // R-REF: a skill or agent that does not exist on this machine
-    if (s.kind === 'skill' && s.skillRef && !findSkill(s.skillRef, flow.cwd)) add({ rule: 'R-REF', severity: 'block', category: 'ref', stepId: s.id, subject: s.skillRef, title: `La skill «${s.skillRef}» no existe en esta máquina`, detail: 'El step va a correr sin la skill (o fallar). Elige una skill existente o créala.', evidence: [{ type: 'def', stepId: s.id, quote: `skillRef: ${s.skillRef}` }] });
+    if (s.kind === 'skill' && s.skillRef && !findSkill(s.skillRef, flow.cwd, flow.id)) add({ rule: 'R-REF', severity: 'block', category: 'ref', stepId: s.id, subject: s.skillRef, title: `La skill «${s.skillRef}» no existe en esta máquina`, detail: 'El step va a correr sin la skill (o fallar). Elige una skill existente o créala.', evidence: [{ type: 'def', stepId: s.id, quote: `skillRef: ${s.skillRef}` }] });
     if (s.kind === 'agent' && s.agentRef && !findAgent(s.agentRef, flow.cwd)) add({ rule: 'R-REF', severity: 'block', category: 'ref', stepId: s.id, subject: s.agentRef, title: `El agente «${s.agentRef}» no existe en esta máquina`, detail: 'Elige un agente existente o créalo.', evidence: [{ type: 'def', stepId: s.id, quote: `agentRef: ${s.agentRef}` }] });
     // R-MCP: connectors the CLI does not load
     const servers = [...new Set(toks.filter((t) => t.startsWith('mcp__')).map((t) => t.slice(5).split('__')[0]))];
@@ -574,7 +575,7 @@ export async function startReview(flowId) {
   slot.reviewId = rv.id; slot.rv = rv;
   deps.emit({ type: 'review.started', flowId, reviewId: rv.id });
   (async () => {
-    const addDirs = [...new Set(flow.steps.map((s) => (s.kind === 'skill' ? findSkill(s.skillRef, flow.cwd) : s.kind === 'agent' ? findAgent(s.agentRef, flow.cwd) : null)).filter(Boolean).map((r) => path.dirname(r.path)))];
+    const addDirs = [...new Set([...flowSkillDirs(flow), ...flow.steps.map((s) => (s.kind === 'skill' ? findSkill(s.skillRef, flow.cwd, flow.id) : s.kind === 'agent' ? findAgent(s.agentRef, flow.cwd) : null)).filter(Boolean).map((r) => path.dirname(r.path))])];
     /**
      * Phase 0 — the investigator: finds CAUSES in the full evidence and the repos (it must use its tools). Every fact it
      * reports is re-checked here: the quote must be in the file it names (inside the evidence or a repo), or in the

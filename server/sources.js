@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as P from './prompt.js';
+import { flowSkillDirs } from './skills.js';
 
 export const SOURCE_TYPES = ['file', 'folder', 'url', 'jira', 'confluence'];
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'target', '.venv', 'venv', '__pycache__', '.idea', '.vs', 'obj']);
@@ -107,6 +108,7 @@ export function resolveSource(src, { flow, input = '', runId } = {}) {
  */
 export function resolveContext(flow, step, { input = '', runId } = {}) {
   const res = { sections: [], tools: [], addDirs: [], warnings: [], sources: [], lines: [] };
+  res.addDirs.push(...flowSkillDirs(flow)); // spec 13: this flow's skills (Claude Code loads <dir>/.claude/skills)
   const sources = sourcesOf(flow, step);
   if (!sources.length) return res;
   for (const s of sources) {
