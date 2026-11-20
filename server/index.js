@@ -380,7 +380,7 @@ function cleanRequirements(list) {
  * Watch ids are unique across the flow (a duplicated step must not share another watch's snapshot).
  */
 /** Spec 29: the step's character in the 🏢 Oficina view (name ≤ 40, look = small integers the client maps to its palette). */
-const LOOK_KEYS = ['skin', 'hair', 'hairColor', 'top', 'bottom', 'accessory'];
+const LOOK_KEYS = ['skin', 'hair', 'hairColor', 'top', 'bottom', 'accessory', 'layer'];
 function cleanPersona(p) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
   const out = {};

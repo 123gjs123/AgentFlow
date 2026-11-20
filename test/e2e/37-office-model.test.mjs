@@ -36,8 +36,8 @@ test('plano: escritorios sin superponerse, todo alcanzable desde la ventanilla; 
     for (const d of lay.desks) for (const t of [[d.gx, d.gy], [d.gx + 1, d.gy]]) { const k = t.join(','); assert.ok(!taken.has(k), `superpuestos en ${f.name}`); taken.add(k); }
     const walk = (t) => lay.grid.cells[t.gy * lay.cols + t.gx] === 1;
     for (const d of lay.desks) { assert.ok(walk(d.seat) && walk(d.visit)); assert.ok(P.findPath(lay.grid, lay.chair, d.seat), `asiento alcanzable ${d.id}`); assert.ok(P.findPath(lay.grid, lay.chair, d.visit)); }
-    for (const fu of lay.furniture) assert.ok(P.findPath(lay.grid, lay.chair, fu.access) || (fu.access.gx === lay.chair.gx && fu.access.gy === lay.chair.gy), `${fu.id} alcanzable`);
-    assert.deepEqual(lay.chair, { gx: 1, gy: 2 });
+    for (const fu of lay.furniture.filter((x) => !x.wall)) assert.ok(P.findPath(lay.grid, lay.chair, fu.access) || (fu.access.gx === lay.chair.gx && fu.access.gy === lay.chair.gy), `${fu.id} alcanzable`);
+    assert.deepEqual(lay.chair, { gx: 1, gy: 1 });
   }
   assert.equal(L.officeLayout(chain(60)).rooms, 10);
   assert.equal(L.officeLayout(chain(61)).overflow, 1);
@@ -67,7 +67,7 @@ test('reductor: la tabla de eventos → lo que hace cada personaje (formas reale
   const r = (m) => { s = S.officeReduce(s, { runId: 'r_abc123', ...m }, ctx); };
   const ev = (stepId, event) => r({ type: 'run.event', stepId, event: { seq: ++seq, t: 100 + seq, ...event } });
   r({ type: 'run.started', trigger: 'api', t: 100 });
-  assert.equal(s.runs.r_abc123.ticket, 'A123'); assert.equal(s.focusRunId, 'r_abc123');
+  assert.match(s.runs.r_abc123.ticket, /^A\d{3}$/); assert.equal(s.focusRunId, 'r_abc123');
   r({ type: 'step.status', stepId: 's_a', status: 'running', t: 101 });
   const layout = L.officeLayout(flow);
   assert.equal(S.coordinatorTarget(s, layout).key, 'desk:s_a', 'el coordinador lleva la carpeta');

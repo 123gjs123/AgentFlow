@@ -7,7 +7,7 @@
 
 const MAX_LOG = 30;
 export const ACTIVE = new Set(['running', 'paused']);
-export const ticketOf = (runId) => `A${String(runId || '').replace(/[^a-z0-9]/gi, '').slice(-3).toUpperCase()}`;
+export const ticketOf = (runId) => { const h = String(runId || '').replace(/[^a-f0-9]/gi, '').slice(-4) || '0'; return `A${String(parseInt(h, 16) % 1000).padStart(3, '0')}`; };
 const baseStep = (id) => id.split('~')[0];
 export const initialScene = () => ({ runs: {}, order: [], focusRunId: null, inspector: false, log: [], trace: [] });
 

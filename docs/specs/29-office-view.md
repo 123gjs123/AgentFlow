@@ -84,6 +84,16 @@ The plan came from an architect review. The open questions are settled:
   - a queued step replays as queued.
 - **(L) A failed catch-up left the office blind** to a run already going. Live events of an unknown run now start following it.
 
+
+**Visual redesign (2026-11-20, after the user's feedback "está muy distante de lo que te pasé en la imagen").** The first drawing (dark floor, plain boxes, stick figures) was redone against the reference illustration, with an independent art-direction review whose 15 points were applied:
+- **Room.** Warm and bright: thick rosy-beige walls with a skirting board, a cream tiled floor with a sheen, light pooling from a window with blinds and trees, a diorama cut edge with a contact shadow on the dark app. A compact plan: the reception is a pocket closed by a half-wall with glass (doorway at the back of the room).
+- **Furniture.** Wooden desks with a bevel, an inset modesty panel and metal legs; half-frosted cubicle partitions; office chairs; monitors with a title bar and buttons, or the terminal of a command (clipped, with a progress bar while it runs); mugs, pencil cups, books, a thermos or a lamp. Metal shelving with binders that have spine labels, archive boxes and pothos hanging from the line of shelves; grey filing cabinets for Archivo. The coordinator's counter has low framed glass, a monitor, coloured folders, an emblem, a chair, and Tomás sitting behind it when idle.
+- **Reception.** The red turn display hangs on the left wall (TURNO / VENT., tickets as A + 3 digits, dim history); a TURNOS kiosk with a slanted screen and a paper ticket; blue waiting chairs where other runs sit seen from behind with their ticket; the Entrada/Salida cabinet with wire trays and the rubber stamp; a tall ficus, a water cooler and a coffee corner.
+- **People.** Bigger heads, warm-brown outlines, a shaded side, eyes with catchlights, brows, a nose, cheeks, hair with a fringe and a highlight (short, long, wavy, bun, curly, bald), clothes in layers (shirt, blazer, cardigan, hoodie). They sit behind their desk facing the viewer; their forearms and hands are drawn after the desk top, so they type on the keyboard.
+- **Signs.** Every sign is mounted on something: shelf boards and COORDINADOR on their faces, and a two-line nameplate on each desk front (function and name, with a status pip and chips for 🔒 or i/n). Labels live in their own layer, so nothing covers them; speech bubbles are shorter and never overlap each other. Floor arrows run along the aisles with one elbow.
+- **Zoom.** 100 % (fit) to 250 %, centred, kept per browser.
+- **Persona editor.** It also offers the clothes layer (`look.layer`, accepted by the server).
+
 **Known limits, deferred.**
 - Replay does not show pauses, resumes or earlier attempts of a retried break. Those status changes are not stored as events.
 - Not yet built:

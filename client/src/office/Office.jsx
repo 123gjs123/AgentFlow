@@ -5,16 +5,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api, onWs } from '../api.js';
 import { castOf, deskSign, KIND_LABEL, COORDINATOR, autoLook } from './model.js';
-import { officeLayout, iso, depth, shelfAccess, furnitureAccess, TILE_W, TILE_H } from './layout.js';
+import { officeLayout, depth, shelfAccess } from './layout.js';
 import { pathCache, pointAlong } from './path.js';
-import { initialScene, officeReduce, coordinatorTarget, timelineOfRun, replayClock, describeScene, poseOf, activityText, ACTIVE } from './scene.js';
+import { ticketOf, initialScene, officeReduce, coordinatorTarget, timelineOfRun, replayClock, describeScene, poseOf, activityText, ACTIVE } from './scene.js';
 import { renderer } from './characters.jsx';
-import { Box, Floor, Sign, center } from './Furniture.jsx';
+import { P, center, OfficeDefs, Room, DeskBase, DeskTop, ShelfPiece, FilingPiece, CounterBase, CounterTop, TurnDisplay, KioskPiece, WaitingChairs, WaitingBacks, TrayPiece, DecorPiece, Partition, OfficeChair, HalfWall, Plaque } from './Furniture.jsx';
+const WALLTOP = 130;
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch {} } };
 const RELEVANT = new Set(['run.started', 'step.status', 'run.event', 'run.paused', 'run.resumed', 'run.finally', 'run.finished', 'review.started', 'review.done']);
 const SPEED_TILES = 3; // tiles per second
-const COORD_LOOK = { skin: 1, hair: 0, hairColor: 1, top: 7, bottom: 0, accessory: 1 };
+const COORD_LOOK = { skin: 1, hair: 0, hairColor: 1, top: 8, bottom: 0, accessory: 2 }; // navy blazer, headset
 
 function useReducedMotion() {
   const [pref, setPref] = useState(() => ls.get('afs.office.reducedMotion')); // '1' | '0' | null (follow the system)
@@ -36,6 +37,10 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
   const [sound, setSoundState] = useState(() => ls.get('afs.office.sound') === '1');
   const setSound = (v) => { ls.set('afs.office.sound', v ? '1' : '0'); setSoundState(v); };
   const [showLog, setShowLog] = useState(false);
+  const scrollRef = useRef(null);
+  const [zoom, setZoomState] = useState(() => Number(ls.get('afs.office.zoom')) || 1);
+  useEffect(() => { const el = scrollRef.current; if (!el) return; el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2; el.scrollTop = (el.scrollHeight - el.clientHeight) / 2; }, [zoom, layout.hash]); // eslint-disable-line react-hooks/exhaustive-deps
+  const setZoom = (z) => { const v = Math.min(2.5, Math.max(1, Math.round(z * 100) / 100)); ls.set('afs.office.zoom', String(v)); setZoomState(v); };
 
   // ---------- live scene: catch-up of runs already going, then /ws ----------
   const [scene, setScene] = useState(initialScene);
@@ -82,7 +87,7 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
     if (!run) return;
     const timeline = timelineOfRun(run);
     setRunsList(null);
-    setReplay({ runId, ticket: `A${String(runId).replace(/[^a-z0-9]/gi, '').slice(-3).toUpperCase()}`, timeline, clock: replayClock(timeline), speed, v: 0, i: 0, scene: initialScene(), playing: true });
+    setReplay({ runId, ticket: ticketOf(runId), timeline, clock: replayClock(timeline), speed, v: 0, i: 0, scene: initialScene(), playing: true });
   };
   useEffect(() => {
     if (!replay?.playing) return undefined;
@@ -160,13 +165,13 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
   useEffect(() => { if (reduced || hidden || !run || !ACTIVE.has(run.status)) return undefined; const iv = setInterval(() => setFrame((f) => (f + 1) % 4), 350); return () => clearInterval(iv); }, [reduced, hidden, run?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- geometry ----------
-  const corners = [iso(0, 0), iso(layout.cols, 0), iso(layout.cols, layout.rows), iso(0, layout.rows)];
-  const minX = Math.min(...corners.map((p) => p.x)) - 40; const maxX = Math.max(...corners.map((p) => p.x)) + 40;
-  const minY = -120; const maxY = Math.max(...corners.map((p) => p.y)) + 40;
+  const corners = [P(0, 0, WALLTOP), P(layout.cols, 0, WALLTOP), P(layout.cols, layout.rows), P(0, layout.rows), P(0, 0, WALLTOP)];
+  const minX = Math.min(...corners.map((p) => p.x)) - 30; const maxX = Math.max(...corners.map((p) => p.x)) + 30;
+  const minY = Math.min(...corners.map((p) => p.y)) - 40; const maxY = Math.max(...corners.map((p) => p.y)) + 40;
   const stepById = new Map(flow.steps.map((s) => [s.id, s]));
   const key = (e, fn) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); fn(); } };
   const btn = (label, fn) => ({ role: 'button', tabIndex: 0, 'aria-label': label, onClick: (e) => { e.stopPropagation(); fn(); }, onKeyDown: (e) => key(e, fn) });
-  const others = shown.order.filter((id) => id !== shown.focusRunId && ACTIVE.has(shown.runs[id]?.status)).slice(-5);
+  const others = shown.order.filter((id) => id !== shown.focusRunId && ACTIVE.has(shown.runs[id]?.status)).slice(-3);
   const drill = !!run?.rehearsal;
   const summary = describeScene(shown, cast, flow);
   const [liveText, setLiveText] = useState(summary);
@@ -174,56 +179,63 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
 
   const statusOf = (id) => run?.steps[id]?.status || (run ? 'idle' : stepById.get(id)?.lastRun?.status || 'idle');
   const activityOf = (id) => (run && ACTIVE.has(run.status) ? run.steps[id]?.activity || 'idle' : run?.steps[id]?.activity === 'storm' ? 'storm' : 'idle');
+  const moodOf = (id) => (statusOf(id) === 'success' && run ? 'happy' : undefined);
+  const pipOf = (status) => ({ running: 'running', queued: 'running', paused: 'running', success: 'ok', error: 'err', timeout: 'err', skipped: 'skip' }[status] || 'idle');
 
-  const floorRooms = Array.from({ length: layout.rooms }, (_, r) => <Floor key={r} gx={0} gy={r * layout.roomH} w={layout.cols} h={layout.roomH} className={`office-floor${r % 2 ? ' alt' : ''}`} />);
+  const rooms = Array.from({ length: layout.rooms }, (_, r) => <Room key={r} room={r} cols={layout.cols} gy0={r * layout.roomH} rows={layout.roomH} tall={r === 0} lastRoom={r === layout.rooms - 1} />);
+  // arrows on the floor: along the aisles with one elbow (never across the desks)
   const edgeLines = flow.edges.map((e) => {
     const a = deskOf(e.source); const b = deskOf(e.target); if (!a || !b) return null;
-    const p = center(a.visit.gx, a.visit.gy); const q = center(b.seat.gx, b.seat.gy);
+    const p = center(a.visit.gx, a.visit.gy); const m = center(b.visit.gx, a.visit.gy); const q = center(b.visit.gx, b.visit.gy);
     const hot = run && (run.steps[e.source]?.status === 'success') && ACTIVE.has(run.status);
+    const d = `M${p.x} ${p.y} L${m.x} ${m.y} L${q.x} ${q.y}`;
     return (
       <g key={e.id} data-testid="office-edge" data-edge={e.id} className={`office-edge${hot ? ' hot' : ''}`} {...btn(`Flecha de ${stepById.get(e.source)?.name} a ${stepById.get(e.target)?.name}`, () => onOpenEdge(e.id))}>
-        <line x1={p.x} y1={p.y} x2={q.x} y2={q.y} className="office-edge-hit" />
-        <line x1={p.x} y1={p.y} x2={q.x} y2={q.y} className="office-edge-line" />
+        <path d={d} className="office-edge-hit" />
+        <path d={d} className="office-edge-line" />
+        <circle cx={q.x} cy={q.y} r="3.5" className="office-edge-dot" />
       </g>
     );
   });
 
-  // static furniture and desks, sorted by depth (back to front)
-  const items = [];
+  // everything that stands on the floor, sorted back to front; labels go in their own layer above (never covered)
+  const items = []; const labels = [];
+  const tickets = [run && ACTIVE.has(run.status) ? run.ticket : null, ...others.map((id) => shown.runs[id].ticket)].filter(Boolean);
+  const coordWalker = walkers.current.get('coordinator');
+  const coordSeated = coordWalker && !coordWalker.path && coordWalker.targetKey === 'chair';
   for (const f of layout.furniture) {
-    const d = depth(f.gx + f.w - 1, f.gy + f.h - 1);
+    const d = depth(f.gx + Math.max(1, f.w) - 1, f.gy + Math.max(1, f.h) - 1);
     if (f.shelf) {
-      const label = { contexto: 'Contexto', memoria: 'Memoria', expedientes: 'Expedientes' }[f.shelf];
+      const label = { contexto: 'CONTEXTO', memoria: 'MEMORIA', expedientes: 'EXPEDIENTES' }[f.shelf];
       const open = () => (f.shelf === 'memoria' ? onOpenFlowTab('memory') : f.shelf === 'expedientes' ? onOpenRun(null) : onOpenFlowTab('settings'));
-      items.push([d, <g key={f.id} data-testid={`office-shelf-${f.shelf}`} className="office-item" {...btn(`Estantería ${label}`, open)}>
-        <Box gx={f.gx} gy={f.gy} w={f.w} h={f.h} height={46} top="var(--office-shelf-top)" left="var(--office-shelf)" right="var(--office-shelf-dark)" />
-        {[0, 1, 2].map((k) => { const a = iso(f.gx + 0.2, f.gy + 1); return <rect key={k} x={a.x - 6 + k * 14} y={a.y - 38 + k * 2} width="10" height="12" className={`office-binder b${k}`} />; })}
-        <Sign gx={f.gx} gy={f.gy} w={f.w} h={f.h} dy={-56}>{label}</Sign>
-      </g>]);
+      items.push([d, <g key={f.id} data-testid={`office-shelf-${f.shelf}`} className="office-item" {...btn(`Estantería ${label}`, open)}><ShelfPiece gx={f.gx} gy={f.gy} w={f.w} label={label} variant={{ contexto: 0, memoria: 1, expedientes: 2 }[f.shelf]} /></g>]);
     } else if (f.id === 'window') {
       const bellOn = !!run?.bell;
-      items.push([d, <g key={f.id} data-testid="office-window" data-bell={bellOn ? '1' : '0'} className="office-item" {...btn(bellOn ? 'Ventanilla: hay un break esperando tu revisión' : 'Ventanilla del coordinador', () => (bellOn && paused ? onOpenReview() : onOpenRun(shown.focusRunId)))}>
-        <Box gx={f.gx} gy={f.gy} w={f.w} h={f.h} height={34} top="var(--office-counter-top)" />
-        <Sign gx={f.gx} gy={f.gy} w={f.w} h={f.h} dy={-46}>{bellOn ? '🔔 Ventanilla' : 'Ventanilla'}</Sign>
+      const chairAt = P(f.gx + 0.75, f.gy - 0.05);
+      items.push([d, <g key={f.id} data-testid="office-window" data-bell={bellOn ? '1' : '0'} className={`office-item${bellOn ? ' ringing' : ''}`} {...btn(bellOn ? 'Ventanilla: hay un break esperando tu revisión' : 'Ventanilla del coordinador', () => (bellOn && paused ? onOpenReview() : onOpenRun(shown.focusRunId)))}>
+        <OfficeChair x={chairAt.x} y={chairAt.y} color="#2d3340" />
+        {coordSeated && <g transform={`translate(${chairAt.x},${chairAt.y})`} pointerEvents="none">{renderer.render({ look: COORD_LOOK, pose: 'type', frame, drill, coordinator: true, part: 'body' })}</g>}
+        <CounterBase gx={f.gx} gy={f.gy} w={f.w} />
+        {coordSeated && <g transform={`translate(${chairAt.x},${chairAt.y})`} pointerEvents="none">{renderer.render({ look: COORD_LOOK, pose: 'type', frame, drill, coordinator: true, part: 'front' })}</g>}
+        <CounterTop gx={f.gx} gy={f.gy} w={f.w} bell={bellOn} id={flow.id} />
       </g>]);
     } else if (f.id === 'display') {
-      items.push([d, <g key={f.id} data-testid="office-display" data-ticket={run && ACTIVE.has(run.status) ? run.ticket : ''} className="office-item" {...btn(`Turno ${run?.ticket || '—'}`, () => onOpenRun(shown.focusRunId))}>
-        <Box gx={f.gx} gy={f.gy} height={58} top="#111827" left="#0b1220" right="#111827" />
-        <text className="office-display-text" x={iso(f.gx + 0.5, f.gy + 0.5).x} y={iso(f.gx + 0.5, f.gy + 0.5).y - 44} textAnchor="middle">{run && ACTIVE.has(run.status) ? run.ticket : '—'}</text>
-      </g>]);
+      items.push([-100, <g key={f.id} data-testid="office-display" data-ticket={run && ACTIVE.has(run.status) ? run.ticket : ''} className="office-item" {...btn(`Turno ${run?.ticket || '—'}`, () => onOpenRun(shown.focusRunId))}><TurnDisplay gy={f.gy} tickets={tickets} /></g>]);
     } else if (f.id === 'entrada' || f.id === 'salida') {
       const stamp = f.id === 'salida' ? run?.stamp || '' : '';
-      items.push([d, <g key={f.id} data-testid={`office-${f.id}`} data-stamp={stamp} className="office-item" {...btn(f.id === 'entrada' ? 'Bandeja de Entrada (lo que recibe el flujo)' : `Bandeja de Salida${stamp ? `: ${stamp}` : ''}`, () => onOpenRun(shown.focusRunId))}>
-        <Box gx={f.gx} gy={f.gy} height={14} top="var(--office-tray)" />
-        <Sign gx={f.gx} gy={f.gy} dy={-24}>{f.id === 'entrada' ? 'Entrada' : 'Salida'}</Sign>
-        {stamp && <text className={`office-stamp ${stamp === 'APROBADO' ? 'ok' : 'bad'}`} x={iso(f.gx + 0.5, f.gy + 0.5).x} y={iso(f.gx + 0.5, f.gy + 0.5).y - 34} textAnchor="middle">{stamp}</text>}
-      </g>]);
+      items.push([d, <g key={f.id} data-testid={`office-${f.id}`} data-stamp={stamp} className="office-item" {...btn(f.id === 'entrada' ? 'Bandeja de Entrada (lo que recibe el flujo)' : `Bandeja de Salida${stamp ? `: ${stamp}` : ''}`, () => onOpenRun(shown.focusRunId))}><TrayPiece gx={f.gx} gy={f.gy} label={f.id === 'entrada' ? 'ENTRADA' : 'SALIDA'} stamp={stamp} /></g>]);
     } else if (f.id === 'archivo') {
-      items.push([d, <g key={f.id} data-testid="office-archivo" data-finally={run?.finally || ''} className="office-item" {...btn('Archivo ("Al terminar" y entregables)', () => onOpenFlowTab('settings'))}>
-        <Box gx={f.gx} gy={f.gy} w={f.w} h={f.h} height={40} top="var(--office-shelf-top)" left="var(--office-shelf)" right="var(--office-shelf-dark)" />
-        <Sign gx={f.gx} gy={f.gy} w={f.w} h={f.h} dy={-50}>Archivo</Sign>
-      </g>]);
+      items.push([d, <g key={f.id} data-testid="office-archivo" data-finally={run?.finally || ''} className="office-item" {...btn('Archivo ("Al terminar" y entregables)', () => onOpenFlowTab('settings'))}><FilingPiece gx={f.gx} gy={f.gy} w={f.w} /></g>]);
     }
+  }
+  for (const dco of layout.decor) {
+    const d = depth(dco.gx + Math.ceil(dco.w) - 1, dco.gy + Math.ceil(dco.h) - 1);
+    if (dco.id === 'kiosk') items.push([d, <KioskPiece key={dco.id} gx={dco.gx} gy={dco.gy} />]);
+    else if (dco.id === 'waiting') {
+      items.push([d - 0.5, <WaitingChairs key={dco.id} gx={dco.gx} gy={dco.gy} w={dco.w} />]);
+      items.push([d + 0.5, <WaitingBacks key={`${dco.id}:b`} gx={dco.gx} gy={dco.gy} w={dco.w} />]);
+    } else if (dco.kind === 'halfwall') items.push([depth(dco.gx, dco.gy + dco.h - 1) + 0.3, <HalfWall key={dco.id} gx={dco.gx} gy={dco.gy} d={dco.h} />]);
+    else items.push([d, <DecorPiece key={dco.id} kind={dco.kind} gx={dco.gx} gy={dco.gy} />]);
   }
   for (const desk of layout.desks) {
     const s = stepById.get(desk.id); if (!s) continue;
@@ -231,59 +243,73 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
     const status = statusOf(desk.id); const activity = activityOf(desk.id);
     const walker = walkers.current.get(`step:${desk.id}`);
     const away = walker && (walker.path || walker.targetKey !== 'seat');
-    const a = iso(desk.gx + 1, desk.gy + 0.5);
     const isCmd = s.kind === 'command';
     const comp = run?.computers[desk.id] || (isCmd ? (status === 'error' ? 'err' : status === 'success' ? 'ok' : 'idle') : null);
-    const seat = center(desk.seat.gx, desk.seat.gy);
+    const seat = P(desk.gx + 0.42, desk.gy - 0.02);
     const label = `${c?.name} · ${s.name} (${KIND_LABEL[s.kind] || s.kind}): ${activityText(activity)}`;
-    items.push([depth(desk.seat.gx, desk.seat.gy), <g key={desk.id} data-testid="office-desk" data-step={desk.id} data-activity={activity} data-status={status} data-name={c?.name}
+    const pose = poseOf(activity, false);
+    const personCls = `office-person${drill ? ' drill' : ''}${status === 'error' || status === 'timeout' ? ' storm' : ''}`;
+    const variant = desk.gx + desk.gy;
+    items.push([depth(desk.gx + 1, desk.gy), <g key={desk.id} data-testid="office-desk" data-step={desk.id} data-activity={activity} data-status={status} data-name={c?.name}
       className={`office-desk${selectedId === desk.id ? ' selected' : ''} st-${status}`} {...btn(label, () => onOpenStep(desk.id))}>
-      <Box gx={desk.gx} gy={desk.gy} w={2} h={1} height={20} top={selectedId === desk.id ? 'var(--office-desk-sel)' : 'var(--office-desk-top)'} left="var(--office-desk)" right="var(--office-desk-dark)" />
-      {isCmd ? (
-        <g data-testid="office-computer" data-state={comp} className={`office-computer ${comp}`}>
-          <rect x={a.x - 16} y={a.y - 48} width="32" height="22" rx="2" className="office-screen" />
-          <text x={a.x} y={a.y - 34} textAnchor="middle" className="office-screen-text">{comp === 'err' ? '✗ error' : comp === 'ok' ? '✓ ok' : `> ${String(s.command || '').slice(0, 9)}`}</text>
-        </g>
-      ) : <rect x={a.x - 8} y={a.y - 28} width="16" height="5" className="office-papers" />}
-      {s.kind === 'flow' && <text x={a.x} y={a.y - 30} textAnchor="middle">☎</text>}
-      {!away && <g transform={`translate(${seat.x},${seat.y})`} className={`office-person${drill ? ' drill' : ''}`} data-testid="office-person" data-activity={activity}>{renderer.render({ look: c.look, pose: poseOf(activity, false), frame, drill })}</g>}
-      <Sign gx={desk.gx} gy={desk.gy} w={2} h={1} dy={-60} className="office-desk-sign">{deskSign(s)}</Sign>
-      <Sign gx={desk.gx} gy={desk.gy} w={2} h={1} dy={-48} className="office-name">{c?.name}{s.coordinator ? ' 🧭' : ''}</Sign>
-      {st?.locked && <text x={a.x + 22} y={a.y - 18}>🔒</text>}
-      {st?.item && <text x={a.x - 30} y={a.y - 18} className="office-item-badge">{st.item.i}/{st.item.total}</text>}
-      {!run && s.lastRun?.status && <text x={a.x + 24} y={a.y - 28} className={`office-last ${s.lastRun.status}`}>{s.lastRun.status === 'success' ? '✓' : s.lastRun.status === 'error' ? '✗' : '·'}</text>}
+      <polygon className="office-hit" points={[P(desk.gx - 0.1, desk.gy - 1, 72), P(desk.gx + 2.1, desk.gy - 1, 72), P(desk.gx + 2.1, desk.gy - 1, 0), P(desk.gx + 2.1, desk.gy + 1, 0), P(desk.gx - 0.1, desk.gy + 1, 0), P(desk.gx - 0.1, desk.gy + 1, 72)].map((p) => `${p.x},${p.y}`).join(' ')} />
+      <Partition gx={desk.gx} gy={desk.gy - 0.95} />
+      <OfficeChair x={seat.x} y={seat.y} color={['#2d3340', '#3a3f4b', '#33302d'][variant % 3]} />
+      {!away && <g transform={`translate(${seat.x},${seat.y})`} className={personCls} data-testid="office-person" data-activity={activity}>{renderer.render({ look: c.look, pose, frame, drill, mood: moodOf(desk.id), part: 'body' })}</g>}
+      <DeskBase gx={desk.gx} gy={desk.gy} />
+      {!away && <g transform={`translate(${seat.x},${seat.y})`} className={personCls}>{renderer.render({ look: c.look, pose, frame, drill, part: 'front' })}</g>}
+      <g data-testid={isCmd ? 'office-computer' : undefined} data-state={isCmd ? comp : undefined} className={isCmd ? `office-computer ${comp}` : undefined}>
+        <DeskTop id={desk.id} gx={desk.gx} gy={desk.gy} variant={variant} accent={['#f5c542', '#ef4444', '#3b82f6', '#22c55e', '#a855f7'][variant % 5]} flowPhone={s.kind === 'flow'}
+          computer={isCmd ? { state: comp, label: comp === 'err' ? '✗ ERROR' : comp === 'ok' ? '✓ OK' : comp === 'running' ? '>_' : `> ${String(s.command || '').slice(0, 7)}` } : null} />
+      </g>
     </g>]);
+    const at = P(desk.gx + 1, desk.gy + 0.86, 31);
+    const chips = [st?.locked ? '🔒' : null, st?.item ? `${st.item.i}/${st.item.total}` : null].filter(Boolean);
+    labels.push(<g key={`l:${desk.id}`} className={`office-desk-label${selectedId === desk.id ? ' selected' : ''}`}><Plaque x={at.x} y={at.y} text={deskSign(s).toUpperCase()} sub={`${c?.name}${s.coordinator ? ' · 🧭' : ''}`} pip={pipOf(status)} chips={chips} /></g>);
   }
-  items.sort((x, y) => x[0] - y[0]);
 
-  // walkers: the coordinator, people away from their seat
-  const walkerEls = [];
-  const placeWalker = (k, content, extra) => {
+  // walkers: the coordinator when he is out of his chair, people away from their seat (same depth order)
+  const placeWalker = (k, content, extra, hide) => {
     const w = walkers.current.get(k); if (!w) return;
     const c = center(w.pos.gx, w.pos.gy);
-    walkerEls.push([w.pos.gx + w.pos.gy, <g key={k} ref={(el) => { w.el = el; }} transform={`translate(${c.x},${c.y})`} data-tile={`${Math.round(w.pos.gx)},${Math.round(w.pos.gy)}`} data-moving={w.path ? '1' : '0'} {...extra}>{content(!!w.path)}</g>]);
+    items.push([w.pos.gx + w.pos.gy + 0.4, <g key={k} ref={(el) => { w.el = el; }} transform={`translate(${c.x},${c.y})`} data-tile={`${Math.round(w.pos.gx)},${Math.round(w.pos.gy)}`} data-moving={w.path ? '1' : '0'} visibility={hide ? 'hidden' : undefined} {...extra}>{content(!!w.path)}</g>]);
   };
-  placeWalker('coordinator', (mv) => renderer.render({ look: COORD_LOOK, pose: mv ? 'walk' : coord.key === 'chair' ? 'sit' : 'stand', frame, drill, coordinator: true }),
-    { 'data-testid': 'office-coordinator', 'data-target': coord.key, className: 'office-walker', ...btn(`${COORDINATOR}, coordinador`, () => onOpenRun(shown.focusRunId)) });
+  placeWalker('coordinator', (mv) => renderer.render({ look: COORD_LOOK, pose: mv ? 'walk' : 'stand', frame, drill, coordinator: true }),
+    { 'data-testid': 'office-coordinator', 'data-target': coord.key, className: 'office-walker', ...btn(`${COORDINATOR}, coordinador`, () => onOpenRun(shown.focusRunId)) }, coordSeated);
   for (const desk of layout.desks) {
     const w = walkers.current.get(`step:${desk.id}`);
     if (!w || (!w.path && w.targetKey === 'seat')) continue;
     const c = cast.get(desk.id); const activity = activityOf(desk.id);
-    placeWalker(`step:${desk.id}`, (mv) => renderer.render({ look: c.look, pose: poseOf(activity, mv), frame, drill }),
+    placeWalker(`step:${desk.id}`, (mv) => renderer.render({ look: c.look, pose: mv ? 'walk' : activity === 'reading' ? 'read' : 'stand', frame, drill }),
       { 'data-testid': 'office-walker', 'data-step': desk.id, 'data-activity': activity, className: `office-walker${drill ? ' drill' : ''}`, ...btn(`${c.name}: ${activityText(activity)}`, () => onOpenStep(desk.id)) });
   }
-  walkerEls.sort((x, y) => x[0] - y[0]);
+  // the queue: other runs going at the same time, seen from behind on the waiting chairs, with their ticket
+  others.forEach((id, i) => {
+    const t = layout.queue[i]; if (!t) return; const p = P(t.gx + 0.5, t.gy + 0.45);
+    items.push([depth(t.gx, t.gy) + 0.2, <g key={`q:${id}`} transform={`translate(${p.x},${p.y})`} data-testid="office-queue-person" data-ticket={shown.runs[id].ticket} className="office-item" {...btn(`Turno ${shown.runs[id].ticket} esperando`, () => onOpenRun(id))}>{renderer.render({ look: autoLook(id), pose: 'sit', legs: true, frame, facing: 'away' })}<g transform="translate(14,-58)"><rect x="-1" y="-8" width="30" height="13" rx="3" className="office-ticket-bg" /><text x="14" y="2" textAnchor="middle" className="office-ticket">{shown.runs[id].ticket}</text></g></g>]);
+  });
+  items.sort((x, y) => x[0] - y[0]);
 
-  // bubbles (over everything)
-  const bubbles = [];
-  if (run && ACTIVE.has(run.status)) for (const desk of layout.desks) {
-    const st = run.steps[desk.id]; if (!st?.bubble) continue;
-    const w = walkers.current.get(`step:${desk.id}`); const p = w ? center(w.pos.gx, w.pos.gy) : center(desk.seat.gx, desk.seat.gy);
-    const text = String(st.bubble).slice(0, 28);
-    bubbles.push(<g key={desk.id} className="office-bubble" transform={`translate(${p.x},${p.y - 66})`}><rect x={-(text.length * 3.4) - 6} y="-12" width={text.length * 6.8 + 12} height="18" rx="9" /><text textAnchor="middle" y="1">{text}</text></g>);
+  // bubbles (over everything), nudged up so they never overlap each other
+  const bubbles = []; const placed = [];
+  if (run && ACTIVE.has(run.status)) {
+    const list = [];
+    for (const desk of layout.desks) {
+      const st = run.steps[desk.id]; if (!st?.bubble) continue;
+      const w = walkers.current.get(`step:${desk.id}`); const away = w && (w.path || w.targetKey !== 'seat');
+      const p = away ? center(w.pos.gx, w.pos.gy) : P(desk.gx + 0.42, desk.gy - 0.02);
+      const raw = String(st.bubble); const text = raw.length > 18 ? `${raw.slice(0, 17)}…` : raw;
+      list.push({ id: desk.id, x: p.x - 10, y: p.y - 86, text, w: Math.max(28, text.length * 5.8 + 16) });
+    }
+    list.sort((a, b) => a.y - b.y);
+    for (const b of list) {
+      let y = b.y;
+      for (let k = 0; k < 6; k++) { const hit = placed.find((o) => Math.abs(o.x - b.x) < (o.w + b.w) / 2 && Math.abs(o.y - y) < 24); if (!hit) break; y = hit.y - 24; }
+      placed.push({ ...b, y });
+      const bw = b.w;
+      bubbles.push(<g key={b.id} className="office-bubble" transform={`translate(${b.x},${y})`}><path d={`M${-bw / 2} -11 h${bw} a5 5 0 0 1 5 5 v10 a5 5 0 0 1 -5 5 h${-bw / 2 + 4} l3 8 l-10 -8 h${-bw / 2 + 3} a5 5 0 0 1 -5 -5 v-10 a5 5 0 0 1 5 -5 z`} /><text textAnchor="middle" y="3.5">{b.text}</text></g>);
+    }
   }
-  // the queue: other runs going at the same time, waiting with their ticket
-  const queue = others.map((id, i) => { const t = layout.queue[i]; const p = center(t.gx, t.gy); return <g key={id} transform={`translate(${p.x},${p.y})`} data-testid="office-queue-person" data-ticket={shown.runs[id].ticket} className="office-item" {...btn(`Turno ${shown.runs[id].ticket} esperando`, () => onOpenRun(id))}>{renderer.render({ look: autoLook(id), pose: 'wait', frame })}<text y="-54" textAnchor="middle" className="office-ticket">{shown.runs[id].ticket}</text></g>; });
 
   return (
     <div className={`office${reduced ? ' reduced' : ''}${hidden ? ' paused' : ''}`} data-testid="office" data-mode={replay ? 'replay' : 'live'} data-reduced-motion={reduced ? '1' : '0'} data-animating={animating && !hidden ? '1' : '0'} data-run={run?.ticket || ''} data-drill={drill ? '1' : '0'}>
@@ -292,12 +318,13 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
         <label className="toggle small" title="Sin desplazamientos ni animaciones"><input type="checkbox" data-testid="office-reduced" checked={reduced} onChange={(e) => setReduced(e.target.checked)} /> Movimiento reducido</label>
         <label className="toggle small" title="La campana de la ventanilla en un break o un error"><input type="checkbox" data-testid="office-sound" checked={sound} onChange={(e) => setSound(e.target.checked)} /> Sonido</label>
         <button className="ghost small" data-testid="office-log-btn" onClick={() => setShowLog((v) => !v)}>📜 Bitácora</button>
+        <span className="office-zoom"><button className="ghost small" data-testid="office-zoom-out" disabled={zoom <= 1} onClick={() => setZoom(zoom - 0.25)} title="Alejar">−</button><span className="small muted">{Math.round(zoom * 100)}%</span><button className="ghost small" data-testid="office-zoom-in" disabled={zoom >= 2.5} onClick={() => setZoom(zoom + 0.25)} title="Acercar">+</button></span>
       </div>
       {runsList && (
         <div className="office-replay-pick">
           <select data-testid="office-replay-run" defaultValue="" onChange={(e) => e.target.value && startReplay(e.target.value, Number(document.querySelector('[data-testid="office-replay-speed"]')?.value) || 8)}>
             <option value="">{runsList.length ? 'Elegí una ejecución…' : 'No hay ejecuciones terminadas'}</option>
-            {runsList.map((r) => <option key={r.id} value={r.id}>{`A${String(r.id).replace(/[^a-z0-9]/gi, '').slice(-3).toUpperCase()} · ${new Date(r.startedAt).toLocaleString()} · ${r.status}`}</option>)}
+            {runsList.map((r) => <option key={r.id} value={r.id}>{`${ticketOf(r.id)} · ${new Date(r.startedAt).toLocaleString()} · ${r.status}`}</option>)}
           </select>
           <select data-testid="office-replay-speed" defaultValue="8">{[1, 4, 8, 16].map((x) => <option key={x} value={x}>{x}×</option>)}</select>
           <button className="ghost small" onClick={() => setRunsList(null)}>✕</button>
@@ -310,16 +337,15 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
           <button className="ghost small" data-testid="office-replay-stop" onClick={() => setReplay(null)}>✕ Volver al vivo</button>
         </div>
       )}
-      <div className="office-scroll" onClick={onBackground}>
-        <svg className="office-svg" viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`} width="100%" height="100%" style={{ minWidth: Math.min(maxX - minX, 2400) * 0.55, minHeight: Math.min(maxY - minY, 2000) * 0.55 }} preserveAspectRatio="xMidYMid meet" role="group" aria-label={`Oficina del flujo «${flow.name}»`}>
-          <g>{floorRooms}</g>
+      <div className="office-scroll" ref={scrollRef} onClick={onBackground}>
+        <svg className="office-svg" viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`} width={zoom > 1 ? (maxX - minX) * zoom : '100%'} height={zoom > 1 ? (maxY - minY) * zoom : '100%'} style={zoom > 1 ? undefined : { minWidth: Math.min(maxX - minX, 2400) * 0.55, minHeight: Math.min(maxY - minY, 2000) * 0.55 }} preserveAspectRatio="xMidYMid meet" role="group" aria-label={`Oficina del flujo «${flow.name}»`}>
+          <OfficeDefs />
+          <g>{rooms}</g>
           <g className="office-edges">{edgeLines}</g>
           <g>{items.map((x) => x[1])}</g>
-          <g>{queue}</g>
-          <g>{walkerEls.map((x) => x[1])}</g>
+          <g className="office-labels">{labels}</g>
           <g className="office-bubbles">{bubbles}</g>
-          {!run && <g className="office-idle"><text x={iso(1.5, 3.5).x} y={iso(1.5, 3.5).y} textAnchor="middle" className="office-steam">☕</text></g>}
-          {layout.overflow > 0 && <text x={iso(layout.cols - 4, 1).x} y={iso(layout.cols - 4, 1).y - 60} className="office-sign">+{layout.overflow} más · ver en 🔲 Cajas</text>}
+          {layout.overflow > 0 && <text x={P(layout.cols - 4, 1, 150).x} y={P(layout.cols - 4, 1, 150).y} className="office-overflow">+{layout.overflow} más · ver en 🔲 Cajas</text>}
         </svg>
       </div>
       <div className="sr-only" aria-live="polite" data-testid="office-summary">{liveText}</div>

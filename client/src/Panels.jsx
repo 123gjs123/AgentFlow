@@ -769,8 +769,9 @@ function Versions({ flow, onChange }) {
 }
 
 /** Spec 29: who sits at this step's desk in the 🏢 Oficina view (name and look; empty = automatic). */
-const LOOK_LABEL = { skin: 'Piel', hair: 'Pelo', hairColor: 'Color de pelo', top: 'Ropa', bottom: 'Pantalón', accessory: 'Accesorio' };
-const HAIR_LABEL = { short: 'corto', long: 'largo', bun: 'rodete', curly: 'rulos', bald: 'sin pelo' };
+const LOOK_LABEL = { skin: 'Piel', hair: 'Pelo', hairColor: 'Color de pelo', top: 'Ropa', bottom: 'Pantalón', accessory: 'Accesorio', layer: 'Abrigo' };
+const HAIR_LABEL = { short: 'corto', long: 'largo', bun: 'rodete', curly: 'rulos', bald: 'sin pelo', wavy: 'ondulado' };
+const LAYER_LABEL = { none: 'camisa', blazer: 'saco', cardigan: 'cárdigan', hoodie: 'buzo' };
 const ACC_LABEL = { none: 'nada', glasses: 'anteojos', headset: 'auriculares', cap: 'gorra', scarf: 'bufanda', earrings: 'aros' };
 function PersonaBox({ flow, step, onChange }) {
   const auto = castOf({ ...flow, steps: flow.steps.map((s) => (s.id === step.id ? { ...s, persona: undefined } : s)) }).get(step.id);
@@ -785,8 +786,8 @@ function PersonaBox({ flow, step, onChange }) {
   const swatch = (k, i) => {
     const v = PALETTE[k][i]; const on = (mine?.look?.[k] ?? 0) === i;
     const isColor = typeof v === 'string' && v.startsWith('#');
-    return <button key={i} type="button" className={`swatch${on ? ' active' : ''}`} title={k === 'hair' ? HAIR_LABEL[v] : k === 'accessory' ? ACC_LABEL[v] : v} onClick={() => set({ look: { ...(p.look || {}), [k]: i } })}
-      style={isColor ? { background: v } : undefined}>{isColor ? '' : (k === 'hair' ? HAIR_LABEL[v] : ACC_LABEL[v])}</button>;
+    return <button key={i} type="button" className={`swatch${on ? ' active' : ''}`} title={k === 'hair' ? HAIR_LABEL[v] : k === 'accessory' ? ACC_LABEL[v] : k === 'layer' ? LAYER_LABEL[v] : v} onClick={() => set({ look: { ...(p.look || {}), [k]: i } })}
+      style={isColor ? { background: v } : undefined}>{isColor ? '' : (k === 'hair' ? HAIR_LABEL[v] : k === 'layer' ? LAYER_LABEL[v] : ACC_LABEL[v])}</button>;
   };
   return (
     <details className="ctx-block" data-testid="persona-box">

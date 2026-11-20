@@ -13,12 +13,13 @@ export const NAMES = ['Lucía', 'Marta', 'Diego', 'Valeria', 'Bruno', 'Sofía', 
 /** A step's function suggests who sits there (the office of the reference illustration). */
 const FUNCTION_NAMES = [[/an[aá]lisis|analiz/i, 'Lucía'], [/planific/i, 'Marta'], [/ejecu|automat/i, 'Diego'], [/revis/i, 'Valeria'], [/archiv/i, 'Bruno']];
 export const PALETTE = {
-  skin: ['#f5d0b5', '#e8b48f', '#d19a6c', '#b07a4f', '#8d5a3a', '#5e3b26'],
-  hair: ['short', 'long', 'bun', 'curly', 'bald'],
+  skin: ['#f7d6bd', '#eebf9c', '#d9a37a', '#bb8259', '#94603f', '#6a432c'],
+  hair: ['short', 'long', 'bun', 'curly', 'bald', 'wavy'],
   hairColor: ['#2b1d14', '#5a3825', '#a0672f', '#d9a441', '#c4c4c4', '#7a1f1f', '#1f2f5a'],
-  top: ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#64748b'],
-  bottom: ['#1e293b', '#334155', '#78350f', '#1e3a8a'],
-  accessory: ['none', 'glasses', 'headset', 'cap', 'scarf', 'earrings'],
+  top: ['#2a9d8f', '#e9b23a', '#2f7d4f', '#7b4bc4', '#e07a3a', '#c94b4b', '#3b6fd8', '#d1557f', '#1f3a7a'],
+  bottom: ['#2b3445', '#3d4656', '#5a4636', '#24365e'],
+  accessory: ['none', 'glasses', 'glasses', 'headset', 'cap', 'scarf', 'earrings'],
+  layer: ['none', 'blazer', 'cardigan', 'hoodie'],
 };
 export const LOOK_KEYS = Object.keys(PALETTE);
 const pick = (list, v) => list[((Number(v) % list.length) + list.length) % list.length];
@@ -26,7 +27,7 @@ const pick = (list, v) => list[((Number(v) % list.length) + list.length) % list.
 export const lookValues = (look) => Object.fromEntries(LOOK_KEYS.map((k) => [k, pick(PALETTE[k], look[k] ?? 0)]));
 export function autoLook(id) {
   const h = hash32(String(id));
-  return { skin: h % 6, hair: (h >>> 3) % 5, hairColor: (h >>> 6) % 7, top: (h >>> 9) % 8, bottom: (h >>> 12) % 4, accessory: (h >>> 15) % 6 };
+  return { skin: h % 6, hair: (h >>> 3) % 6, hairColor: (h >>> 6) % 7, top: (h >>> 9) % 9, bottom: (h >>> 12) % 4, accessory: (h >>> 15) % 7, layer: (h >>> 18) % 4 };
 }
 /** Map(stepId → {name, look (indexes), auto}). Steps in flow order (append-stable), names never repeat while there are names left. */
 export function castOf(flow) {
