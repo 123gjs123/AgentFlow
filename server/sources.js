@@ -62,10 +62,13 @@ export function resolveSource(src, { flow, input = '', runId } = {}) {
       const abs = absPath(p, flow); out.ref = abs;
       let st = null; try { st = fs.statSync(abs); } catch {}
       if (!st) { out.ok = false; warn(`no existe ${abs}`); out.line = `${ICON[src.type]} ${L()}: ${abs} (NO EXISTE)${note}`; break; }
+      if (store.forbiddenSource(abs, flow)) { out.ok = false; warn(`no se permite: ${abs} es una carpeta de la app (datos, carpetas de otros flujos o instalación)`); out.line = `${ICON[src.type]} ${L()}: (NO PERMITIDO)${note}`; break; }
       if (st.isDirectory()) {
         out.addDirs.push(abs); out.tools.push('Read', 'Grep', 'Glob');
         out.line = `📁 ${L()}: carpeta ${abs} (${countFiles(abs).toLocaleString()} archivos) — explórala con Glob/Grep y abre con Read lo que necesites${note}`;
       } else {
+        // Claude gets the file's folder: never one that holds the app's data, other flows' folders or the installation
+        if (store.forbiddenSource(path.dirname(abs), flow)) { out.ok = false; warn(`no se permite: para leer ${abs} Claude tendría acceso a ${path.dirname(abs)}, que contiene las carpetas de la app — muévelo a una carpeta propia`); out.line = `${ICON[src.type]} ${L()}: (NO PERMITIDO)${note}`; break; }
         out.addDirs.push(path.dirname(abs)); out.tools.push('Read');
         out.line = `📄 ${L()}: archivo ${abs} (${path.extname(abs).slice(1) || 'sin extensión'}, ${st.size.toLocaleString()} bytes) — ábrelo con Read si lo necesitas${note}`;
       }

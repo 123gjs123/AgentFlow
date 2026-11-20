@@ -445,7 +445,7 @@ test('revisión 14c: "reiniciar ejecuciones" no rompe un destino fijo; una acci�
     const st2 = role('Hook', '[[mock:say y]]', { id: 's_h', actions: [{ id: 'a_h', type: 'http.post', approval: 'auto', params: { url: `http://127.0.0.1:${srv.address().port}/h`, body: 'x' } }] });
     const f2 = await s.flow('Vivas', [st2], [], { policies: [] });
     const { runId: r1 } = await s.uiOk('POST', `/api/flows/${f2.id}/run`, { input: '', breakpoints: false });
-    await until(async () => fs.existsSync(path.join(s.dirs.data, 'actions', `${f2.id}.json`)) && /started/.test(fs.readFileSync(path.join(s.dirs.data, 'actions', `${f2.id}.json`), 'utf8')), 8000);
+    await until(async () => fs.existsSync(s.flowFile(f2.id, 'actions.json')) && /started/.test(fs.readFileSync(s.flowFile(f2.id, 'actions.json'), 'utf8')), 8000);
     const { runId: r2 } = await s.uiOk('POST', `/api/flows/${f2.id}/run`, { input: '', breakpoints: false });
     await sleep(800); release();
     const [x1, x2] = [await s.waitRun(f2.id, r1), await s.waitRun(f2.id, r2)];
@@ -542,7 +542,7 @@ test('code review: "Detener" corta una acción en curso', async () => {
     const st = role('Hook', '[[mock:say y]]', { id: 's_st', actions: [{ id: 'a_st', type: 'http.post', approval: 'auto', params: { url: `http://127.0.0.1:${srv.address().port}/h`, body: 'x' } }] });
     const f = await s.flow('Detener acción', [st], [], { policies: [] });
     const { runId } = await s.uiOk('POST', `/api/flows/${f.id}/run`, { input: '', breakpoints: false });
-    await until(async () => fs.existsSync(path.join(s.dirs.data, 'actions', `${f.id}.json`)) && /started/.test(fs.readFileSync(path.join(s.dirs.data, 'actions', `${f.id}.json`), 'utf8')), 8000);
+    await until(async () => fs.existsSync(s.flowFile(f.id, 'actions.json')) && /started/.test(fs.readFileSync(s.flowFile(f.id, 'actions.json'), 'utf8')), 8000);
     const t0 = Date.now();
     await s.uiOk('POST', `/api/flows/${f.id}/stop`, {});
     const r = await s.waitRun(f.id, runId);

@@ -49,7 +49,7 @@ test('ISO-3: un flujo de antes sigue en tu carpeta de usuario (su archivo no se 
   await s.kill();
   const cfg = path.join(s.dirs.data, 'config.json');
   const c = JSON.parse(fs.readFileSync(cfg, 'utf8')); c.isolationSince = Date.now() + 1e9; fs.writeFileSync(cfg, JSON.stringify(c)); // everything existing is "from before"
-  const file = path.join(s.dirs.data, 'flows', `${f.id}.json`); const before = fs.readFileSync(file, 'utf8');
+  const file = s.flowFile(f.id, 'flow.json'); const before = fs.readFileSync(file, 'utf8');
   await s.start();
   try {
     assert.equal(fs.readFileSync(file, 'utf8'), before, 'arrancar no reescribe el flujo');

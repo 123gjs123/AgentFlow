@@ -13,7 +13,7 @@ import { resolveContext, contextAccess } from './sources.js';
 
 const est = (n) => Math.ceil(n / 4);
 const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + `\n… [${s.length - n} chars más]` : s || '');
-const SECRET_NAME = /token|secret|password|passwd|apikey|api_key|pwd|credential/i;
+const SECRET_NAME = store.SECRET_NAME;
 
 function readDefinition(step, flow) {
   const kind = step.kind === 'skill' ? 'skill' : step.kind === 'agent' ? 'agent' : null;

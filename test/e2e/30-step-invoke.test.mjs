@@ -108,7 +108,7 @@ test('pestaña Invocar: contrato del step, snippets con host/puerto/flujo/slug r
   const g = await s.getFlow(f.id);
   g.steps.push(cmd('Nuevo paso', 'Write-Output n', { id: 's_n' })); g.steps[0].name = 'Preparar todo';
   await s.uiOk('PUT', `/api/flows/${f.id}`, g);
-  const file = path.join(s.dirs.data, 'invoke', `${f.id}.md`);
+  const file = s.flowFile(f.id, 'INVOKE.md');
   const doc = await until(() => fs.existsSync(file) && /### Nuevo paso/.test(fs.readFileSync(file, 'utf8')) && /### Preparar todo/.test(fs.readFileSync(file, 'utf8')));
   assert.ok(doc, 'data/invoke/<flujo>.md se actualizó');
   await s.uiOk('DELETE', `/api/flows/${f.id}`);
@@ -333,11 +333,11 @@ test('revisión 12d: los snippets curl funcionan pegados en bash sin jq (?format
 test('revisión 12e: un flujo de antes del spec 12 recibe sus slugs al arrancar (INVOKE.md y /flows llamables); ids sin escapar; flujo completo sin jq; "step" crudo en la URL del step', async () => {
   const f = await s.flow('Legado', [cmd('Build', 'Write-Output 1', { id: 's_1' }), cmd('Build', 'Write-Output 2', { id: 's_2' })], []);
   await s.kill();
-  const file = path.join(s.dirs.data, 'flows', `${f.id}.json`);
+  const file = s.flowFile(f.id, 'flow.json');
   const j = JSON.parse(fs.readFileSync(file, 'utf8')); for (const st of j.steps) delete st.slug; fs.writeFileSync(file, JSON.stringify(j));
-  fs.rmSync(path.join(s.dirs.data, 'invoke'), { recursive: true, force: true });
+  fs.rmSync(s.flowFile(f.id, 'INVOKE.md'), { force: true });
   await s.start();
-  const mdFile = path.join(s.dirs.data, 'invoke', `${f.id}.md`);
+  const mdFile = s.flowFile(f.id, 'INVOKE.md');
   const md = await until(() => fs.existsSync(mdFile) && fs.readFileSync(mdFile, 'utf8'));
   assert.ok(md, 'INVOKE.md escrito al arrancar');
   assert.ok(!/undefined/.test(md), 'sin steps/undefined/run');

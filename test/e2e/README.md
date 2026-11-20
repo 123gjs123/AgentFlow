@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (339 tests)
+## Qué cubre (375 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -73,6 +73,9 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `31-skill-sources` | Spec 13: skills desde URL git/tree/zip/SKILL.md (offline: insteadOf + HTTPS con cert de prueba), carpeta copiada o vinculada, zip; revisión antes de instalar; solo este flujo (`--add-dir`) o Mi Claude Code con confirmación; zip-slip/enlaces/límites/SSRF/TLS/hooks; conflictos; exportar/importar; actualizar con diff y archivos; UI |
 | `32-skill-updates` | Spec 13 completo: actualizaciones de skills (git ls-remote / ETag 304 / hash; segundo plano sin ventanas de credenciales y con freno; resultados viejos descartados; aviso 🔔; programador sin cuarentena), paquetes con referencia a la URL de origen, proxy corporativo explícito (CONNECT a la IP revisada, TLS por el túnel, NO_PROXY, 407), skills de Mi Claude Code gestionadas, UI |
 | `33-flow-isolation` | Spec 11: carpeta propia por flujo (los de antes siguen en tu carpeta hasta activarla), token por flujo (solo abre su flujo; admin desactivable; atado a la máquina; nunca en claro), step 🔀 Flujo y ctx.invokeFlow (solo el input, resultado de vuelta, recursión y 5 niveles, cancelar, cuarentena), llamadas entre flujos, un comando no encuentra los secretos de la app, UI |
+| `34-flow-folders` | Spec 09: una carpeta por flujo (flow.json portable, state.json de la máquina), migración automática de la carpeta vieja (respaldo completo, cortes en cada fase, archivo bloqueado, re-ejecución que solo agrega), correr solo toca state.json, renombrar la carpeta al reiniciar, borrar |
+| `35-linked-folders` | Spec 09: carpetas vinculadas (p. ej. un repo git): cuarentena al vincular y ante cambios de afuera que tocan lo que se ejecuta, detiene lo que corre, conflicto, carpeta desenchufada, rutas prohibidas, ids, git limpio y sin secretos, mover/desvincular/volver a vincular/borrar, importar una carpeta, 📂 y README, CWD_IN_DATA |
+| `36-ui-flow-folders` | Spec 09 en el navegador: 🔗 vincular y mover, selector agrupado (🔗, no disponible), 📂, banner de revisión de un vinculado |
 | `28-watch` | Spec 10 🔔 Novedades: rama git (primera foto, commits nuevos, se acumulan hasta "Visto", aviso 🔔), archivos y comando elemento por elemento, error sin perder la foto, Jira con Haiku de solo lectura (la app hace el diff), "ejecutar desde este step" y API externa `/status`, URL (ETag / contenido / HTTP de error), polling saneado, UI con 🔔 en el nodo |
 | `27-for-each` | Spec 15 DATA-10: "para cada": un step corre una vez por elemento de una lista JSON de arriba (`{{item.key}}`, `$env:AFS_ITEM`), de a N, junta los resultados en una lista; si uno falla los demás corren; lista vacía omite lo que sigue; origen que no es lista da error claro; UI 🔁 |
 

@@ -37,7 +37,7 @@ export async function startServer({ env = {}, name = 'e2e' } = {}) {
   const prod = fs.existsSync(path.join(ROOT, 'dist', 'index.html'));
   const fullEnv = {
     ...process.env, PORT: String(port), HOST: '127.0.0.1', AFS_DATA: dirs.data, CLAUDE_BIN: MOCK, AFS_MOCK_LOG: mockLog, AFS_MOCK_STATE: dirs.state,
-    AFS_TIME_SCALE: '0.01', USERPROFILE: dirs.home, HOME: dirs.home, NODE_ENV: prod ? 'production' : 'development', ...env,
+    AFS_TIME_SCALE: '0.01', AFS_REVEAL: '0', USERPROFILE: dirs.home, HOME: dirs.home, NODE_ENV: prod ? 'production' : 'development', ...env,
   };
   const base = `http://127.0.0.1:${port}`;
   const srv = { base, port, tmp, dirs, mockLog, env: fullEnv, proc: null, output: '' };
@@ -55,6 +55,9 @@ export async function startServer({ env = {}, name = 'e2e' } = {}) {
     srv.token = (await srv.ui('GET', '/api/info')).body.token;
     return srv;
   };
+  // spec 09: each flow lives in data/flows/<slug>--<id>/
+  srv.flowDir = (id) => { const root = path.join(dirs.data, 'flows'); const n = fs.existsSync(root) && fs.readdirSync(root).find((x) => !x.startsWith('.') && x.endsWith(`--${id}`)); return n ? path.join(root, n) : null; };
+  srv.flowFile = (id, ...rel) => path.join(srv.flowDir(id) || path.join(dirs.data, 'flows', `flujo--${id}`), ...rel);
   /** Hard kill (simulates a crash): no cleanup runs in the server. */
   srv.kill = async () => {
     if (!srv.proc || srv.proc.exitCode !== null) return;

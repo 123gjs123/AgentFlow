@@ -92,7 +92,12 @@ export function cleanDeliverables(list) {
 
 // ---------------- deliverables ----------------
 const safeId = (s) => String(s).replace(/[^\w-]/g, '_');
-export const outputsDir = (flowId, runId) => path.join(store.DATA, 'outputs', safeId(flowId), safeId(runId));
+export const outputsDir = (flowId, runId) => store.flowFile(flowId, 'outputs', safeId(runId));
+/** A deliverable path stored in a run, rebased onto where the flow's outputs live now (spec 09: migrated or renamed folders). */
+export function localPath(flowId, runId, stored) {
+  const m = String(stored || '').match(new RegExp(`[\\\\/]outputs[\\\\/](?:[^\\\\/]+[\\\\/])?${safeId(runId)}[\\\\/](.+)$`));
+  return m ? path.join(outputsDir(flowId, runId), m[1]) : String(stored || '');
+}
 const slug = (s) => String(s || 'step').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.-]+/g, '-').replace(/^[-.]+|-+$/g, '').slice(0, 50) || 'step';
 
 /** The content a deliverable takes, and its format check (DLV-7). Returns {text} or {error}. */
@@ -158,12 +163,12 @@ export function writeDeliverables(flow, step, run, { key, output, json, render }
 }
 
 // what this flow copied where (sha), so its own earlier copy can be replaced and anybody else's file never is
-const COPIES = (flowId) => path.join(store.DATA, 'copies', `${safeId(flowId)}.json`);
+const COPIES = (flowId) => store.flowFile(flowId, 'copies.json');
 const readCopies = (flowId) => { try { return JSON.parse(fs.readFileSync(COPIES(flowId), 'utf8')); } catch { return {}; } };
 const writeCopies = (flowId, m) => { fs.mkdirSync(path.dirname(COPIES(flowId)), { recursive: true }); fs.writeFileSync(COPIES(flowId), JSON.stringify(m)); };
 
 // ---------------- ledger (idempotency) ----------------
-const LEDGER = (flowId) => path.join(store.DATA, 'actions', `${safeId(flowId)}.json`);
+const LEDGER = (flowId) => store.flowFile(flowId, 'actions.json');
 const readLedger = (flowId) => { try { return JSON.parse(fs.readFileSync(LEDGER(flowId), 'utf8')); } catch { return []; } };
 const KEEP_MS = 400 * 86400e3; // entries are pruned by AGE (a count cap would silently drop de-duplication)
 const writeLedger = (flowId, l) => { fs.mkdirSync(path.dirname(LEDGER(flowId)), { recursive: true }); const cut = Date.now() - KEEP_MS; fs.writeFileSync(LEDGER(flowId), JSON.stringify(l.filter((x) => (x.at || 0) > cut).slice(-20000), null, 1)); };
@@ -360,7 +365,7 @@ export async function executeAction(flow, plan, { signal, runId } = {}) {
 }
 
 // ---------------- approvals (actions in "confirm": the run never waits; a person decides later) ----------------
-const APPROVALS = (flowId) => path.join(store.DATA, 'approvals', `${safeId(flowId)}.json`);
+const APPROVALS = (flowId) => store.flowFile(flowId, 'approvals.json');
 export const pendingOf = (flowId) => { try { return JSON.parse(fs.readFileSync(APPROVALS(flowId), 'utf8')); } catch { return []; } };
 const savePending = (flowId, l) => { fs.mkdirSync(path.dirname(APPROVALS(flowId)), { recursive: true }); fs.writeFileSync(APPROVALS(flowId), JSON.stringify(l, null, 1)); };
 /** Index of what waits for a person, across runs (a newer run of the step does not hide an older pending action). */

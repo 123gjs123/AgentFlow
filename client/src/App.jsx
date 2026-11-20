@@ -7,7 +7,7 @@ import Canvas, { autoLayout, wouldCycle } from './Canvas.jsx';
 import { StepPanel, FlowPanel, EdgePanel } from './Panels.jsx';
 import ReviewModal from './Review.jsx';
 import { PreflightModal } from './Requirements.jsx';
-import { ExportModal, importFile, QuarantineBanner } from './ExportImport.jsx';
+import { ExportModal, importFile, QuarantineBanner, FlowFolderModal } from './ExportImport.jsx';
 import { AddSkillModal } from './SkillPicker.jsx';
 import { SettingsModal } from './Settings.jsx';
 import { AttentionButton, AttentionDrawer, AttentionToasts, flowPrefix } from './Attention.jsx';
@@ -348,7 +348,7 @@ export default function App() {
     } catch (e) { notify(e.message); }
   }
   async function deleteFlow() {
-    if (!confirm(`¿Eliminar el flujo "${flow.name}" con sus chats y ejecuciones?`)) return;
+    if (!confirm(`¿Eliminar el flujo "${flow.name}" con sus chats y ejecuciones?${flows.find((f) => f.id === flow.id)?.origin === 'linked' ? ' Su carpeta vinculada (flow.json) no se toca.' : ''}`)) return;
     try {
       clearTimeout(saveTimer.current); dirty.current = false;
       await api.del(`/api/flows/${flow.id}`);
@@ -471,7 +471,12 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         <div className="brand">⛓️ Agent Flow Studio</div>
         <select value={flow?.id || ''} onChange={(e) => openFlow(e.target.value)}>
           {!flow && <option value="">— sin flujos —</option>}
-          {flows.map((f) => <option key={f.id} value={f.id}>{flowPrefix(attention, f.id)}{f.name}</option>)}
+          {flows.some((f) => f.origin === 'linked') ? (
+            <>
+              <optgroup label="En esta app">{flows.filter((f) => f.origin !== 'linked').map((f) => <option key={f.id} value={f.id}>{flowPrefix(attention, f.id)}{f.name}</option>)}</optgroup>
+              <optgroup label="Vinculados (carpetas)">{flows.filter((f) => f.origin === 'linked').map((f) => <option key={f.id} value={f.id} disabled={f.available === false} title={f.path}>🔗 {flowPrefix(attention, f.id)}{f.name} · {String(f.path || '').split(/[\\/]/).pop()}{f.available === false ? ' (no disponible)' : ''}</option>)}</optgroup>
+            </>
+          ) : flows.map((f) => <option key={f.id} value={f.id}>{flowPrefix(attention, f.id)}{f.name}</option>)}
         </select>
         <span data-tour="flows" className="row">
           <button onClick={() => createFlow()}>+ Flujo</button>
@@ -481,6 +486,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
         <button className="ghost" onClick={() => importInput.current?.click()} title="Importar un flujo (.afsflow.json)">⬆ Importar</button>
         <input ref={importInput} type="file" accept=".json,application/json" multiple style={{ display: 'none' }} onChange={(e) => { onImport([...e.target.files]); e.target.value = ''; }} />
         {flow && <button className="ghost" onClick={() => setExportOpen(true)} title="Exportar este flujo para compartirlo (.afsflow.json)">⬇ Exportar</button>}
+        <button className="ghost" data-testid="folder-btn" onClick={() => setModal('folder')} title="Carpeta del flujo: abrirla, vincular una carpeta (por ejemplo de un repo git), mover este flujo a una, desvincular">📂</button>
         {flow && <button className="ghost" onClick={() => window.open(`?flow=${encodeURIComponent(flow.id)}`, '_blank')} title="Abrir este flujo en otra pestaña (cada pestaña puede tener su flujo; si dos editan el mismo, los cambios se combinan)">⧉</button>}
         {flow && <button className="ghost danger" onClick={deleteFlow} title="Eliminar flujo">🗑</button>}
         <div className="sep" />
@@ -584,6 +590,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
       {toast && <div className="toast">{toast}</div>}
       {skillReview && flow?.id === skillReview.flowId && <AddSkillModal flow={flow} initial={skillReview.token ? skillReview : { ...skillReview, skills: [] }} onClose={() => setSkillReview(null)} onDone={(inst) => { setSkillReview(null); notify(`Skills instaladas: ${inst.map((x) => x.name).join(', ')}`); }} />}
       {modal === 'picker' && <StepPicker catalog={catalog} onPick={addStep} onClose={() => setModal(null)} />}
+      {modal === 'folder' && <FlowFolderModal notify={notify} flow={flow} flows={flows} onClose={() => setModal(null)} onChanged={async (id) => { await loadFlows(); if (id) await openFlow(id); else { const list = await api.get('/api/flows'); const first = list.find((f) => f.available !== false); if (first) openFlow(first.id); else setFlow(null); } }} />}
       {modal === 'ai' && <AiFlowModal cwd={flow?.cwd} onClose={() => setModal(null)} onCreated={async (f) => { setModal(null); await loadFlows(); openFlow(f.id); notify(`Flujo “${f.name}” creado: revisa cada step y ejecútalo`); }} />}
       {modal?.help && <HelpModal section={modal.help} setSection={(k) => setModal({ help: k })} onClose={() => setModal(null)} flow={flow} flows={flows} onTour={() => { setModal(null); setTourStep(0); }} />}
       {tourStep !== null && <Tour step={tourStep} setStep={setTourStep} onClose={endTour} />}

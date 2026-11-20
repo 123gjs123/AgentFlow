@@ -8,6 +8,7 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import * as store from './store.js';
@@ -19,7 +20,7 @@ import { lastInit, lastRateLimit, probeInit, claudeBin } from './claude.js';
 import { previewStep, definitionFile } from './context.js';
 import * as integ from './integrations.js';
 import { SOURCE_TYPES, checkSource } from './sources.js';
-import { exportFlow, importBundle, quarantineProblem, slug } from './bundle.js';
+import { exportFlow, importBundle, quarantineProblem, slug, executableParts, readFlowFolder } from './bundle.js';
 import { parseSchema } from './schema.js';
 import { needsPreflight } from './preflight.js';
 import * as CRED from './credentials.js';
@@ -68,7 +69,13 @@ const wrap = (fn) => async (req, res) => {
 };
 const CODES = { 400: 'BAD_REQUEST', 401: 'UNAUTHORIZED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 409: 'CONFLICT', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'UNPROCESSABLE', 500: 'INTERNAL' };
 const fail = (status, msg, code) => Object.assign(new Error(msg), { status, code });
-const need = (id) => { const f = store.getFlow(id); if (!f) throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND'); return f; };
+const need = (id) => {
+  const f = store.getFlow(id);
+  if (f) return f;
+  const link = store.linkOf(id); // spec 09: a linked folder that is not there right now (never "not found": it comes back)
+  if (link) { const st = store.linkState(link.id); throw Object.assign(fail(409, `${st.status === 'invalid' ? 'El flow.json vinculado no es válido' : st.status === 'forbidden' ? 'La carpeta vinculada no está permitida' : 'La carpeta del flujo no está disponible'}: ${link.path}${st.error ? ` (${st.error})` : ''}`, 'FLOW_UNAVAILABLE'), { path: link.path }); }
+  throw fail(404, 'Flujo no encontrado', 'FLOW_NOT_FOUND');
+};
 
 // ============ external API (token) ============
 const ext = express.Router();
@@ -400,7 +407,7 @@ function cleanStepExtras(steps) {
 }
 async function gate(flow, res, only = null) {
   const qp = quarantineProblem(flow);
-  if (qp) { res.status(qp.status); return { error: qp.error, code: qp.code, reasons: flow.quarantine.reasons }; }
+  if (qp) { res.status(qp.status); return { error: qp.error, code: qp.code, reasons: qp.reasons || flow.quarantine?.reasons || [] }; }
   // An invalid JSON schema would only fail after Claude ran (and spent tokens): reject it before starting, like the external API.
   for (const s of (flow.steps || []).filter((x) => !only || (only instanceof Set ? only.has(x.id) : x.id === only))) {
     if (s.kind === 'command' || s.output?.format !== 'json' || !String(s.output.schema || '').trim()) continue;
@@ -449,7 +456,7 @@ function cleanEdge(e) {
   }
   return out;
 }
-app.get('/api/flows', wrap(() => store.listFlows()));
+app.get('/api/flows', wrap(() => store.listFlows({ all: true })));
 app.post('/api/flows', wrap((req) => {
   const f = store.newFlow(typeof req.body?.name === 'string' ? req.body.name : undefined);
   if (req.body?.template === 'demo') {
@@ -625,7 +632,7 @@ function deliverableFile(flowId, runId, fileRef, stepRef) {
   const scoped = stepRef ? all.filter((d) => d.stepKey === stepRef) : all;
   const hits = scoped.filter((x) => x.id === fileRef || x.name === fileRef);
   if (hits.length > 1) throw fail(409, `Hay ${hits.length} archivos "${fileRef}" (de distintos steps o elementos): indica ?step=<step o step~n>`, 'FILE_AMBIGUOUS');
-  const f = hits[0];
+  const f = hits[0] && { ...hits[0], path: OUT.localPath(flowId, runId, hits[0].path) };
   const root = path.resolve(OUT.outputsDir(flowId, runId));
   if (!f || !path.resolve(f.path).startsWith(root + path.sep) || !fs.existsSync(f.path)) throw fail(404, `Archivo no encontrado: ${fileRef}`, 'FILE_NOT_FOUND');
   return f;
@@ -706,6 +713,8 @@ app.get('/api/flows/:id/export', wrap((req, res) => {
 app.post('/api/flows/import', wrap((req) => {
   const body = req.body || {};
   const policies = (x) => { if (!Array.isArray(x)) return undefined; const out = []; for (const p of x.slice(0, 50)) { try { out.push(POL.cleanPolicy({ ...p, source: 'import' }, 'flow')); } catch {} } return out; };
+  // spec 09 WS-4: a flow folder (flow.json + chats/) imports like a bundle: new id, quarantine when it executes things
+  if (body.path !== undefined && body.bundle === undefined) body.bundle = readFlowFolder(store.validateLinkPath(body.path));
   const { flow, warnings, chats, runs } = importBundle(body.bundle, { steps: cleanStepExtras, edge: cleanEdge, sources: (x) => cleanSources(x), finally: (x) => cleanFinally(x), requirements: (x) => cleanRequirements(x), policies }, { name: typeof body.name === 'string' ? body.name : undefined });
   engine.topoLevels(flow); // rejects cycles
   const saved = store.saveFlow(flow);
@@ -721,10 +730,87 @@ app.post('/api/flows/import', wrap((req) => {
   try { skillReview = SK.stageImport(body.bundle?.skills, saved.id); } catch (e) { warnings.push(`Skills del paquete descartadas: ${e.message}`); }
   return { flow: saved, quarantine: saved.quarantine || null, warnings, ...(skillReview ? { skillReview: { ...skillReview, flowId: saved.id } } : {}) };
 }));
-/** "Revisé este flujo, habilitar": lifts the import quarantine. */
-app.post('/api/flows/:id/trust', wrap((req) => {
+// ----- spec 09: linked folders, reveal, README -----
+/** What a linked flow.json may contain: the same cleaning as a save from the UI (never written back by itself). */
+function sanitizeLinked(f) {
+  const steps = (Array.isArray(f.steps) ? f.steps : []).filter((s) => s && typeof s === 'object' && typeof s.id === 'string').slice(0, 200).map((s) => store.newStep({ ...s, contextSources: cleanSources(s.contextSources) }));
+  cleanStepExtras(steps);
+  const ids = new Set(steps.map((s) => s.id));
+  const edges = (Array.isArray(f.edges) ? f.edges : []).filter((e) => e && ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
+  const str = (v, d = '') => (typeof v === 'string' ? v : d);
+  const vars = f.vars && typeof f.vars === 'object' && !Array.isArray(f.vars) ? Object.fromEntries(Object.entries(f.vars).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)])) : {};
+  const policies = Array.isArray(f.policies) ? f.policies.slice(0, 50).flatMap((p) => { try { return [POL.cleanPolicy({ ...p }, 'flow')]; } catch { return []; } }) : undefined;
+  const out = { ...f, watchPolling: f.watchPolling && typeof f.watchPolling === 'object' ? W.cleanPolling(f.watchPolling) : undefined, name: str(f.name).trim().slice(0, 200) || 'Flujo vinculado', description: str(f.description), cwd: str(f.cwd), vars, contextSources: cleanSources(f.contextSources), finally: cleanFinally(f.finally) ?? undefined, requirements: cleanRequirements(f.requirements), policies, steps, edges };
+  engine.topoLevels(out); // a cycle: the flow is "invalid", nothing runs
+  return out;
+}
+const linkEvents = (id) => { engine.bus.emit('msg', { type: 'flows.changed' }); const f = store.getFlow(id); if (f) engine.flowChanged(f); attention.refreshFlow(id); };
+store.setLinkHooks({
+  sanitize: sanitizeLinked,
+  executableParts,
+  onExternalChange: (id, { quarantined }) => setImmediate(() => {
+    if (quarantined) { engine.stopRuns(id); engine.clearSchedule(id); W.clearPolling(id); }
+    clearPreflightCache(id); linkEvents(id);
+  }),
+  onLinkStatus: (id, status) => setImmediate(() => {
+    if (status === 'available') { const f = store.getFlow(id); if (f) { engine.syncSchedule(f); W.syncPolling(f); } } else { engine.clearSchedule(id); W.clearPolling(id); }
+    linkEvents(id);
+  }),
+});
+const LINK_POLL_MS = Math.max(200, 5000 * (Number(process.env.AFS_TIME_SCALE) > 0 ? Number(process.env.AFS_TIME_SCALE) * 10 : 1));
+setInterval(() => { store.pollLinks().catch((e) => console.error('[link]', e.message)); }, LINK_POLL_MS).unref();
+const asStoreError = (fn) => { try { return fn(); } catch (e) { if (e.status) throw fail(e.status, e.message, e.code); throw e; } };
+app.post('/api/flows/link', wrap((req) => {
+  const id = asStoreError(() => store.linkFolder(req.body?.path, { asCopy: req.body?.asCopy === true }));
+  const flow = need(id);
+  engine.syncSchedule(flow); W.syncPolling(flow);
+  engine.bus.emit('msg', { type: 'flows.changed' }); attention.refreshFlow(id);
+  return { flow, quarantine: flow.quarantine || null, path: store.linkOf(id)?.path };
+}));
+app.delete('/api/flows/link/:id', wrap((req) => {
+  const id = req.params.id;
+  if (!store.linkOf(id)) throw fail(404, 'Ese flujo no está vinculado', 'LINK_NOT_FOUND');
+  const keep = req.body?.keepLocalCopy === true || req.query.keepLocalCopy === '1';
+  engine.stopRuns(id); engine.clearSchedule(id); W.clearPolling(id);
+  store.unlinkFlow(id, { keepLocalCopy: keep });
+  if (!keep) { TOK.revoke(id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: id }); } else { const f = store.getFlow(id); if (f) { engine.syncSchedule(f); W.syncPolling(f); engine.flowChanged(f); } }
+  engine.bus.emit('msg', { type: 'flows.changed' }); attention.refreshFlow(id);
+  return { ok: true, keptLocalCopy: keep };
+}));
+app.post('/api/flows/:id/move-to', wrap((req) => {
   need(req.params.id);
-  const f = store.updateFlow(req.params.id, (fl) => { delete fl.quarantine; engine.bumpRev(fl); });
+  const p = asStoreError(() => store.moveFlowTo(req.params.id, req.body?.path));
+  const flow = need(req.params.id);
+  engine.bus.emit('msg', { type: 'flows.changed' }); engine.flowChanged(flow);
+  return { flow, path: p };
+}));
+/** WS-9: open the flow's folder in the file manager (path decided here, never taken from the request). */
+app.post('/api/flows/:id/reveal', wrap((req) => {
+  need(req.params.id);
+  const dir = store.flowLocation(req.params.id);
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw fail(409, `La carpeta no está disponible: ${dir}`, 'FLOW_UNAVAILABLE');
+  if (process.env.AFS_REVEAL === '0') return { path: dir, opened: false };
+  const cmd = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+  return new Promise((ok, ko) => {
+    const c = spawn(cmd, [dir], { detached: true, stdio: 'ignore', shell: false, windowsHide: false });
+    c.once('error', (e) => ko(fail(500, `No se pudo abrir la carpeta: ${e.message}`, 'REVEAL_FAILED')));
+    c.once('spawn', () => { c.unref(); ok({ path: dir, opened: true }); });
+  });
+}));
+/** WS-11: README.md of the flow (in a linked folder only on request: it is the person's repo). */
+app.post('/api/flows/:id/readme', wrap((req) => {
+  const flow = need(req.params.id);
+  const dir = store.flowLocation(flow.id);
+  const r = writeReadme(flow, dir);
+  if (r === 'not-ours') throw fail(409, 'Ya hay un README.md que no generó la app: no se sobrescribe', 'README_NOT_OURS');
+  if (r === 'error') throw fail(500, 'No se pudo escribir README.md', 'README_FAILED');
+  return { path: path.join(dir, 'README.md'), status: r };
+}));
+/** "Revisé este flujo, habilitar": lifts the import quarantine. */
+app.post('/api/flows/:id/trust', wrap((req, res) => {
+  const cur = need(req.params.id);
+  if (req.body?.baseRev !== undefined && Number(req.body.baseRev) !== (cur.rev || 0)) { res.status(409); return { error: 'El flujo cambió mientras lo revisabas: revisa la versión nueva antes de habilitarlo', code: 'FLOW_CONFLICT', flow: cur }; }
+  const f = store.updateFlow(req.params.id, (fl) => { delete fl.quarantine; delete fl.trust; engine.bumpRev(fl); }); // trust = what was reviewed now (definition and, for a linked flow, its folder's Claude configuration)
   engine.flowChanged(f);
   return f;
 }));
@@ -947,18 +1033,31 @@ app.get('/api/flows/:id/invoke.md', wrap((req, res) => {
   res.type('text/markdown; charset=utf-8').send(integ.invokeDoc(flow, invokeBases()));
   return undefined;
 }));
-// STEPINV-9: data/invoke/<flow>.md follows every change of the flow (written only when its text changes)
+// STEPINV-9: <flow folder>/INVOKE.md follows every change of the flow (written only when its text changes)
 const invokeTimers = new Map(); const invokeLast = new Map();
 const writeInvokeDoc = (flowId) => {
   const flow = store.getFlow(flowId);
-  const file = path.join(store.DATA, 'invoke', `${flowId.replace(/[^\w-]/g, '_')}.md`);
   if (!flow) { invokeLast.delete(flowId); return; }
+  const file = store.flowFile(flowId, 'INVOKE.md');
   try {
     const md = integ.invokeDoc(flow, invokeBases());
     if (invokeLast.get(flowId) === md && fs.existsSync(file)) return;
+    try { if (fs.readFileSync(file, 'utf8') === md) { invokeLast.set(flowId, md); return; } } catch {} // a restart does not touch an unchanged file
     fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, md); invokeLast.set(flowId, md);
   } catch (e) { console.error('[invoke.md]', e.message); }
+  writeReadme(flow);
 };
+/** Spec 09 WS-11: README.md of the flow's folder (only when the text changed; never over a README the person wrote). */
+function writeReadme(flow, dir = store.flowDir(flow.id)) {
+  const file = path.join(dir, 'README.md');
+  try {
+    const md = integ.flowReadme(flow);
+    let cur = null; try { if (!fs.lstatSync(file).isFile()) return 'not-ours'; cur = fs.readFileSync(file, 'utf8'); } catch {}
+    if (cur === md) return 'same';
+    if (cur !== null && !cur.startsWith(integ.README_MARK)) return 'not-ours';
+    fs.writeFileSync(file, md); return 'written';
+  } catch (e) { console.error('[README.md]', e.message); return 'error'; }
+}
 const scheduleInvokeDoc = (flowId) => { clearTimeout(invokeTimers.get(flowId)); invokeTimers.set(flowId, setTimeout(() => { invokeTimers.delete(flowId); writeInvokeDoc(flowId); }, 300)); };
 const invokeRev = new Map();
 engine.bus.on('msg', (m) => {
@@ -1020,11 +1119,13 @@ engine.bus.on('msg', (msg) => {
   for (const c of wss.clients) if (c.readyState === 1) c.send(data);
 });
 
+// spec 09: one folder per flow (migrates the old layout once; a locked file stops the start, nothing is lost)
+try { store.ensureLayout(); } catch (e) { console.error(e.message); process.exit(1); }
 store.getConfig(); // ensure token exists
 // a stray rejected promise (a check, a hook, a socket) must not take the whole app down: log it loudly instead
 process.on('unhandledRejection', (e) => { console.error('[unhandledRejection]', e?.stack || e); });
 
-for (const f of store.listFlows()) { const g = store.getFlow(f.id); if (g?.steps?.some((s) => !s.slug)) store.updateFlow(f.id, () => {}); }
+for (const f of store.listFlows()) { if (store.linkOf(f.id)) continue; const g = store.getFlow(f.id); if (g?.steps?.some((s) => !s.slug)) store.updateFlow(f.id, () => {}); } // a linked flow.json is never rewritten at boot (its slugs settle in memory, saved on the next edit)
 for (const f of store.listFlows()) { const full = store.getFlow(f.id); if (full) { engine.syncSchedule(full); W.syncPolling(full); scheduleInvokeDoc(full.id); } }
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `El puerto ${PORT} ya está en uso: ¿hay otro Agent Flow Studio corriendo?` : e.message); process.exit(1); });
 server.listen(PORT, HOST, () => {

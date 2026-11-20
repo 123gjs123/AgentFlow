@@ -49,7 +49,14 @@ export const getState = () => state;
 /** The items of one flow, from what is on disk + the live paused runs. Cheap: no network, no Claude. */
 function compute(flowId, cachedPreflight) {
   const flow = store.getFlow(flowId);
-  if (!flow) return [];
+  if (!flow) {
+    // spec 09: a linked folder that is not there (unplugged drive, renamed folder): say so, never forget the flow
+    const link = store.linkOf(flowId);
+    if (!link) return [];
+    const st = store.linkState(flowId);
+    return [{ flowId, flowName: link.name, id: `linked:${flowId}`, kind: 'linked_unavailable', severity: 'warn', title: st.status === 'invalid' ? 'El flow.json vinculado no es válido' : st.status === 'forbidden' ? 'La carpeta vinculada no está permitida' : 'La carpeta del flujo no está disponible',
+      detail: clip(`${link.path}${st.error ? ` — ${st.error}` : ''}`, 160), createdAt: Date.now(), stateKey: st.status, target: { flowId, open: 'flow' } }];
+  }
   const out = [];
   const base = { flowId, flowName: flow.name };
   const stepName = (id) => flow.steps.find((s) => s.id === id)?.name || id;
@@ -72,8 +79,8 @@ function compute(flowId, cachedPreflight) {
       detail: clip(cause, 160), createdAt: fl.endedAt, stateKey: fl.runId, target: { flowId, runId: fl.runId, ...open } });
   }
   if (flow.quarantine) {
-    out.push({ ...base, id: `quar:${flowId}`, kind: 'quarantine', severity: 'warn', title: 'Flujo importado en revisión',
-      detail: 'Viene de otra máquina: revisa sus comandos y accesos antes de habilitarlo.', createdAt: flow.quarantine.since || Date.now(),
+    out.push({ ...base, id: `quar:${flowId}`, kind: 'quarantine', severity: 'warn', title: flow.quarantine.from?.linked ? 'Flujo vinculado en revisión' : 'Flujo importado en revisión',
+      detail: flow.quarantine.from?.linked ? 'Su flow.json cambió fuera de la app o se acaba de vincular: revisa sus comandos y accesos antes de habilitarlo.' : 'Viene de otra máquina: revisa sus comandos y accesos antes de habilitarlo.', createdAt: flow.quarantine.since || Date.now(),
       stateKey: String(flow.quarantine.since || ''), target: { flowId, open: 'quarantine' } });
   }
   // blocked: credentials (local, cheap) + the requirements already checked (cache only: never probes the network)
@@ -147,7 +154,7 @@ export function refresh(flowId) {
   clearTimeout(timers.get(flowId));
   timers.set(flowId, setTimeout(() => { timers.delete(flowId); try { recompute(flowId); } catch (e) { console.error('attention', e.message); } }, 200));
 }
-export function refreshAll() { for (const f of store.listFlows()) refresh(f.id); }
+export function refreshAll() { for (const f of store.listFlows({ all: true })) refresh(f.id); }
 export function removeFlow(flowId) {
   items.delete(flowId); failures.delete(flowId);
   for (const k of Object.keys(state.dismissed)) if (k.endsWith(`:${flowId}`)) delete state.dismissed[k];
@@ -173,13 +180,13 @@ export function init(d) {
   deps = d; cachedPf = d.cachedPreflight || null;
   load();
   recoveries.clear();
-  for (const f of store.listFlows()) {
+  for (const f of store.listFlows({ all: true })) {
     const runs = store.listRuns(f.id).filter((r) => r.status !== 'running' && r.status !== 'paused').reverse(); // oldest → newest
     for (const r of runs) if (FAILED.has(r.status) || (r.status === 'success' && !r.only && !r.from)) track(f.id, FAILED.has(r.status) ? store.getRun(f.id, r.id) : r);
   }
   recoveries.clear(); // what was resolved while the server was down is not news
   const live = new Set();
-  for (const f of store.listFlows()) { recompute(f.id, { quiet: true }); for (const i of items.get(f.id) || []) live.add(i.id); }
+  for (const f of store.listFlows({ all: true })) { recompute(f.id, { quiet: true }); for (const i of items.get(f.id) || []) live.add(i.id); }
   // everything present at boot counts as already notified (no toast storm after a restart); prune stale entries
   for (const i of [...items.values()].flat()) state.notified[i.id] = i.stateKey;
   for (const k of Object.keys(state.dismissed)) if (!live.has(k)) delete state.dismissed[k];

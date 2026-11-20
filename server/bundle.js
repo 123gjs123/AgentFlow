@@ -13,7 +13,7 @@ export const BUNDLE_FORMAT = 'agent-flow-studio/flow';
 export const BUNDLE_VERSION = 1;
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const APP_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return '0'; } })();
-export const SECRET_NAME = /(token|secret|password|passwd|pwd|apikey|api_key|credential|private|auth)/i;
+export const SECRET_NAME = store.SECRET_NAME; // one list (spec 09 adversarial: GH_KEY, JIRA_PAT…)
 const MACHINE_STEP = ['lastRun', 'chatSessionId', 'chatContextHash'];
 const MACHINE_FLOW = ['globalSessionId', 'globalContextHash', 'reviewSessionId', 'reviewContextHash', 'quarantine', 'rev', 'updatedAt', 'createdAt', 'workspace'];
 
@@ -123,12 +123,29 @@ export function importBundle(bundle, clean, { name } = {}) {
   const needed = [...new Set(credentialRefs(flow).map((r) => r.name))].filter((n) => !have.has(n));
   if (needed.length) warnings.push(`Usa credenciales que no están cargadas en esta máquina: ${needed.join(', ')}. Cárgalas en ⚙ Configuración › Credenciales (con el mismo nombre).`);
   const reasons = executableParts(flow);
+  if (flow.cwd) reasons.push(`trabaja en ${flow.cwd} (Claude también lee la configuración .claude de esa carpeta)`);
+  if ((flow.contextSources || []).length || steps.some((s) => (s.contextSources || []).length)) reasons.push('le da a Claude carpetas o archivos de esta máquina como contexto');
   if (reasons.length) flow.quarantine = { since: Date.now(), from: { exportedAt: bundle.exportedAt || null, app: bundle.app || null, name: src.name || null }, reasons };
   return { flow, warnings, chats: bundle.chats && typeof bundle.chats === 'object' ? bundle.chats : null, runs: Array.isArray(bundle.runs) ? bundle.runs : null };
 }
 
 /** 423 while an imported flow is under review. */
 export function quarantineProblem(flow) {
+  // spec 09: a linked flow whose working folder's Claude configuration changed goes back to review here (runs, chats, /ask, review)
+  if (flow && !flow.quarantine && flow.cwd && store.linkOf(flow.id)) { const q = store.linkedConfigCheck(flow.id); if (q) flow = { ...flow, quarantine: q }; }
   if (!flow?.quarantine) return null;
-  return { status: 423, code: 'QUARANTINED', error: `Este flujo es importado y está en revisión: contiene cosas que se ejecutarían en esta máquina (${flow.quarantine.reasons.slice(0, 3).join('; ')}${flow.quarantine.reasons.length > 3 ? '…' : ''}). Revísalo y pulsa "Revisé este flujo, habilitar" en la app.` };
+  return { status: 423, code: 'QUARANTINED', reasons: flow.quarantine.reasons, error: `${flow.quarantine.from?.linked ? 'Este flujo vinculado cambió fuera de la app (o se acaba de vincular) y está en revisión' : 'Este flujo es importado y está en revisión'}: contiene cosas que se ejecutarían en esta máquina (${flow.quarantine.reasons.slice(0, 3).join('; ')}${flow.quarantine.reasons.length > 3 ? '…' : ''}). Revísalo y pulsa "Revisé este flujo, habilitar" en la app.` };
+}
+
+/** Spec 09 WS-4: a flow FOLDER (flow.json + optional chats/) read as a bundle; it then goes through importBundle. */
+export function readFlowFolder(dir) {
+  const f = path.join(dir, 'flow.json');
+  let st; try { st = fs.lstatSync(f); } catch { throw Object.assign(new Error('La carpeta no tiene flow.json'), { status: 422, code: 'LINK_NO_FLOW' }); }
+  if (!st.isFile() || st.size > 5 * 1024 * 1024) throw Object.assign(new Error('flow.json no es un archivo común de hasta 5 MB'), { status: 422, code: 'LINK_INVALID' });
+  let def; try { def = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { def = null; }
+  if (!def || typeof def !== 'object' || !Array.isArray(def.steps)) throw Object.assign(new Error('flow.json no es un flujo válido'), { status: 422, code: 'LINK_INVALID' });
+  const { format, formatVersion, ...flow } = def;
+  const chats = {};
+  try { for (const n of fs.readdirSync(path.join(dir, 'chats')).filter((x) => x.endsWith('.json')).slice(0, 300)) { try { const l = JSON.parse(fs.readFileSync(path.join(dir, 'chats', n), 'utf8')); if (Array.isArray(l)) chats[n.slice(0, -5)] = l; } catch {} } } catch {}
+  return { format: BUNDLE_FORMAT, version: BUNDLE_VERSION, exportedAt: null, app: null, flow, ...(Object.keys(chats).length ? { chats } : {}) };
 }

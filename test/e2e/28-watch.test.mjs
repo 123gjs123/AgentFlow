@@ -220,7 +220,7 @@ test('revisión: una credencial solo viaja a su propio sitio; el secreto de un c
     assert.match(by('w_other').error, /no se envía a http:\/\/127\.0\.0\.2:9/);
     assert.equal(by('w_out').state, 'error');
     assert.match(by('w_out').error, /dentro de la carpeta del flujo/);
-    const stored = fs.readFileSync(path.join(s.dirs.data, 'watch', `${f.id}.json`), 'utf8');
+    const stored = fs.readFileSync(s.flowFile(f.id, 'sources.json'), 'utf8');
     assert.ok(!stored.includes('TOPSECRET42'), 'el secreto no queda en el estado');
     assert.match(stored, /token=/);
   } finally { srv.close(); }
@@ -273,7 +273,7 @@ test('revisión 2: un secreto con comillas o barras tampoco queda en el estado (
   const r = await check(f.id);
   const by = (id) => r.results.find((x) => x.watchId === id);
   assert.equal(by('w_json').state, 'first', by('w_json').error);
-  const stored = fs.readFileSync(path.join(s.dirs.data, 'watch', `${f.id}.json`), 'utf8');
+  const stored = fs.readFileSync(s.flowFile(f.id, 'sources.json'), 'utf8');
   assert.ok(!stored.includes('SECRET'), stored.slice(0, 400));
   for (const id of ['w_link', 'w_direct']) assert.ok(by(id).state === 'error' || by(id).count === 0, JSON.stringify(by(id)));
   const st8 = JSON.parse(stored);

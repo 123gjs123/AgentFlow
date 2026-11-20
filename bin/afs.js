@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // afs — run Agent Flow Studio flows from a terminal, script or CI.
 import fs from 'node:fs';
+import path from 'node:path';
 import { call, callUi, ensureServer, flowPath, runAndWait, BASE } from './client.js';
 
 const HELP = `afs — invoca flujos de Agent Flow Studio
@@ -171,10 +172,11 @@ async function main() {
     return 0;
   }
   if (cmd === 'import') {
-    if (!pos[0]) { err('Uso: afs import <archivo.afsflow.json>'); return 2; }
-    let bundle;
-    try { bundle = JSON.parse(fs.readFileSync(pos[0], 'utf8')); } catch (e) { err(`No se pudo leer ${pos[0]}: ${e.message}`); return 2; }
-    const r = await callUi('POST', '/api/flows/import', { bundle });
+    if (!pos[0]) { err('Uso: afs import <archivo.afsflow.json | carpeta-con-flow.json>'); return 2; }
+    let body;
+    // spec 09 WS-4: a flow folder (flow.json + chats/) is read by the local app; a bundle file is sent as is
+    try { if (fs.statSync(pos[0]).isDirectory()) body = { path: path.resolve(pos[0]) }; else body = { bundle: JSON.parse(fs.readFileSync(pos[0], 'utf8')) }; } catch (e) { err(`No se pudo leer ${pos[0]}: ${e.message}`); return 2; }
+    const r = await callUi('POST', '/api/flows/import', body);
     console.log(opts.json ? JSON.stringify({ id: r.flow.id, name: r.flow.name, quarantine: r.quarantine, warnings: r.warnings }) : `${r.flow.name}  (${r.flow.id})`);
     if (r.quarantine) err(`🔒 En revisión: ${r.quarantine.reasons.join(' · ')}\nRevísalo en la app y pulsa "Revisé este flujo, habilitar" antes de ejecutarlo.`);
     for (const w of r.warnings) err(`⚠ ${w}`);

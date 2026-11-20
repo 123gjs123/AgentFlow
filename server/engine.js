@@ -52,6 +52,14 @@ const flowCwd = (flow) => store.flowCwd(flow); // spec 11: custom cwd, else the 
 export { flowCwd };
 /** Spec 22 (B1): a configured working directory that does not exist is an error, never a silent fallback to home. */
 export function cwdProblem(flow) {
+  // spec 09/11: never work inside the app's data folder (config, tokens, other flows' state) — e.g. a cwd in a linked flow.json
+  if (flow.cwd && fs.existsSync(flow.cwd)) {
+    const low = (p) => { let r = p; try { r = fs.realpathSync.native(p); } catch {} return process.platform === 'win32' ? path.resolve(r).toLowerCase() : path.resolve(r); };
+    const rel = path.relative(low(store.DATA), low(flow.cwd));
+    const relW = path.relative(low(store.WORKSPACES()), low(flow.cwd)); const otherWs = relW && !relW.startsWith('..') && !path.isAbsolute(relW) && relW.split(/[\\/]/)[0].toLowerCase() !== String(flow.id).toLowerCase();
+    if (otherWs) return { status: 422, code: 'CWD_OTHER_FLOW', error: `El directorio de trabajo del flujo es la carpeta propia de otro flujo (${flow.cwd}): cada flujo trabaja en la suya (spec 11).` };
+    if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) return { status: 422, code: 'CWD_IN_DATA', error: `El directorio de trabajo del flujo está dentro de la carpeta de datos de la app (${flow.cwd}): elige otro en "Directorio de trabajo".` };
+  }
   if (flow.cwd && !fs.existsSync(flow.cwd)) return { status: 422, code: 'CWD_MISSING', error: `El directorio de trabajo del flujo no existe: ${flow.cwd}. Créalo o corrige "Directorio de trabajo" (los steps no se ejecutan en tu carpeta de usuario por error).` };
   return null;
 }
@@ -1040,6 +1048,8 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
   if (from && !flow.steps.some((s) => s.id === from)) throw Object.assign(new Error('Step no encontrado'), { status: 404, code: 'STEP_NOT_FOUND' });
   { const qp = quarantineProblem(flow); if (qp) throw Object.assign(new Error(qp.error), { status: qp.status, code: qp.code }); }
+  // spec 09: a linked flow whose working folder's Claude configuration changed goes back to review before running
+  { const q = store.linkedConfigCheck(flow.id); if (q) throw Object.assign(new Error(`Este flujo vinculado quedó en revisión: ${q.reasons[0]}`), { status: 423, code: 'QUARANTINED' }); }
   { const cp = cwdProblem(flow); if (cp) throw Object.assign(new Error(cp.error), { status: cp.status, code: cp.code }); }
   // Spec 28 policy "noParallelRuns": shared environments are wiped by parallel runs of the same flow
   if (POL.has(flow, 'noParallelRuns') && isRunning(flowId)) throw Object.assign(new Error('Este flujo ya se está ejecutando y su política no permite dos ejecuciones a la vez (ambientes compartidos). Espera a que termine o detenla.'), { status: 409, code: 'FLOW_BUSY' });
@@ -1138,7 +1148,7 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
             const noteReload = () => { if (!reloaded) return; reloaded = false; run.steps[id]?.events?.unshift({ kind: 'hook_log', text: 'Se ejecutó con la definición del step y las variables actualizadas en el break.', t: now(), seq: ++run.eventSeq }); };
             const reload = () => {
               const cur = store.getFlow(flowId); const s = cur?.steps.find((x) => x.id === id);
-              if (!s) return;
+              if (!s || cur.quarantine) return; // spec 09: a definition that changed outside the app (quarantined) never runs here
               const { lastRun, memory, chatSessionId, chatContextHash, ...def } = structuredClone(s);
               const i = rflow.steps.findIndex((x) => x.id === id);
               rflow.steps[i] = { ...rflow.steps[i], ...def }; step = rflow.steps[i];

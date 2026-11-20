@@ -111,7 +111,7 @@ test('GET /api/attention nunca dispara comprobaciones de red (usa solo el prefli
 
 test('rendimiento: con 2000 ejecuciones en disco, los avisos no releen el historial en cada evento', async () => {
   const f = await s.flow('Historial grande', [cmd('Ok', 'Write-Output ok', { id: 's_ok' })]);
-  const dir = path.join(s.dirs.data, 'runs', f.id);
+  const dir = s.flowFile(f.id, 'runs');
   fs.mkdirSync(dir, { recursive: true });
   const t0 = Date.now() - 3600e3;
   for (let i = 0; i < 2000; i++) fs.writeFileSync(path.join(dir, `r_old${i}.json`), JSON.stringify({ id: `r_old${i}`, flowId: f.id, status: 'success', startedAt: t0 + i, endedAt: t0 + i + 1, steps: {}, events: [] }));
@@ -271,7 +271,7 @@ test('reinicio con el fallo resuelto en disco: el siguiente fallo programado SÍ
     await until(() => sinkLines().length >= 1);
     await c.kill();
     // while the server was down a complete run succeeded (written straight to disk)
-    const dir = path.join(c.dirs.data, 'runs', f.id);
+    const dir = c.flowFile(f.id, 'runs');
     fs.writeFileSync(path.join(dir, 'r_okoffline.json'), JSON.stringify({ id: 'r_okoffline', flowId: f.id, status: 'success', trigger: 'schedule', startedAt: Date.now(), endedAt: Date.now() + 1, steps: {}, events: [] }));
     await c.start();
     fs.rmSync(sink, { force: true });

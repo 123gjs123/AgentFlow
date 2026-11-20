@@ -648,3 +648,32 @@ export function invokeDoc(flow, { localBase, remote, cliPath }) {
   }
   return out.join('\n');
 }
+
+// ---------------- spec 09 WS-11: README.md of a flow's folder ----------------
+export const README_MARK = '<!-- generado por Agent Flow Studio: se sobrescribe -->';
+const KIND_LABEL = { role: 'rol', agent: 'agente', skill: 'skill', command: 'comando', flow: 'flujo' };
+/**
+ * A human summary of the flow, from its PORTABLE definition only: never var values, memory, last runs, tokens, local
+ * paths or command/hook bodies. Deterministic (no dates): regenerating gives the same bytes.
+ */
+export function flowReadme(flow) {
+  const one = (s, n = 200) => { const t = mdLine(String(s ?? '').split(/\r?\n/).find((l) => l.trim()) || '').replace(/\b(https?:\/\/)[^\s/?#]*@/g, '$1').replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, '$1'); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+  const steps = flow.steps || [];
+  const name = (id) => mdLine(steps.find((s) => s.id === id)?.name || id);
+  const out = [README_MARK, '', `# ${mdLine(flow.name)}`, ''];
+  if (flow.description) out.push(one(flow.description, 600), '');
+  out.push('## Steps', '', '| Step | Tipo | Slug | Qué hace |', '|---|---|---|---|');
+  for (const s of steps) {
+    const what = s.kind === 'command' ? `comando (${s.shell || 'powershell'})` : s.kind === 'flow' ? 'llama a otro flujo' : one(s.task);
+    out.push(`| ${mdLine(s.name)} | ${KIND_LABEL[s.kind] || mdLine(s.kind)}${s.hooks ? ' · tiene hooks' : ''} | ${s.slug ? `\`${String(s.slug).replace(/`/g, '')}\`` : ''} | ${what} |`);
+  }
+  out.push('');
+  if ((flow.edges || []).length) { out.push('## Conexiones', ''); for (const e of flow.edges) out.push(`- ${name(e.source)} → ${name(e.target)}${e.label ? ` (${mdLine(e.label)})` : ''}`); out.push(''); }
+  const vars = Object.keys(flow.vars || {});
+  if (vars.length) out.push('## Variables', '', vars.map((v) => `- \`${v.replace(/`/g, '')}\``).join('\n'), '', 'Los valores no se escriben aquí.', '');
+  const req = (flow.requirements || []).map((r) => r?.name || r?.label).filter(Boolean);
+  if (req.length) out.push('## Requisitos', '', ...req.map((r) => `- ${mdLine(r)}`), '');
+  if (flow.schedule?.everyMinutes) out.push(`Programación: cada ${Number(flow.schedule.everyMinutes) || 0} min (se activa en la app).`, '');
+  out.push('## Cómo ejecutarlo', '', '- En Agent Flow Studio: abrir el flujo y ▶ Ejecutar.', `- Desde la terminal: \`afs run ${flow.id}\``, '- Desde fuera (curl, Jenkins): ver la pestaña 🔌 Invocar de la app.', '');
+  return out.join('\n');
+}
