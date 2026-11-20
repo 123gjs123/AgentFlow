@@ -31,6 +31,7 @@ import * as OUT from './outputs.js';
 import * as POL from './policies.js';
 import * as notify from './notify.js';
 import { checkSystem } from './system.js';
+import { runReport } from './report.js';
 import { cachedPreflight, setOnChecked } from './preflight.js';
 import { REQ_TYPES, preflight, preflightMessage, suggestRequirements, createFromTemplate, clearPreflightCache } from './preflight.js';
 import os from 'node:os';
@@ -631,6 +632,15 @@ app.post('/api/flows/:id/runs/:runId/cancel', wrap((req) => {
 app.post('/api/flows/:id/runs/:runId/resume', wrap((req) => { need(req.params.id); return engine.resumeRun(req.params.id, req.params.runId, req.body?.step || null, req.body || {}); }));
 app.get('/api/flows/:id/runs', wrap((req) => store.listRuns(req.params.id)));
 app.get('/api/flows/:id/runs/:runId', wrap((req) => engine.getRunLive(req.params.id, req.params.runId)));
+// 📋 the run's report (Markdown): why it ended that way, each step with its reason, warnings, «Al terminar», deliverables
+app.get('/api/flows/:id/runs/:runId/report', wrap((req, res) => {
+  const flow = need(req.params.id); const run = engine.getRunLive(flow.id, req.params.runId);
+  if (!run) throw fail(404, 'Ejecución no encontrada', 'RUN_NOT_FOUND');
+  const h = String(run.id).replace(/[^a-f0-9]/gi, '').slice(-4) || '0'; const ticket = `A${String(parseInt(h, 16) % 1000).padStart(3, '0')}`;
+  const markdown = runReport(flow, run, { ticket });
+  if (req.query.format === 'md') { res.setHeader('Content-Disposition', `attachment; filename="informe-${slug(flow.name)}-${run.id}.md"`); res.type('text/markdown; charset=utf-8').send(markdown); return undefined; }
+  return { markdown, ticket };
+}));
 // spec 14: ⚡ a declared action in "confirm" waits for a person (the run did not wait for it)
 const decideDeps = { getRun: (f, r) => engine.getRunLive(f, r), saveRun: (r) => store.saveRun(r), getFlow: store.getFlow, updateFlow: (id, fn) => { const fl = store.updateFlow(id, fn); if (fl) engine.flowChanged(fl); attention.refreshFlow(id); return fl; }, policyBlocked: (fl) => POL.has(fl, 'noExternalWrites'), quarantine: quarantineProblem };
 const decide = (flowId, runId, b) => OUT.decide(flowId, runId, String(b?.stepKey || ''), String(b?.actionId || ''), { approve: b?.approve === true, params: b?.params }, decideDeps);

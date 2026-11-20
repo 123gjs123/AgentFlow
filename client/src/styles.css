@@ -528,3 +528,7 @@ pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }
 .office-camera button { padding: 2px 9px; font-size: 14px; }
 .office-camera .office-zoom-val { font-size: 12px; min-width: 52px; }
 .office-camera-sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+.run-report table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0; }
+.run-report th, .run-report td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+.run-report pre { white-space: pre-wrap; max-height: 320px; overflow: auto; }
+.run-report h1 { font-size: 17px; } .run-report h2 { font-size: 14px; margin-top: 14px; }

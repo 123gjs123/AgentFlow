@@ -12,6 +12,9 @@ import SkillPicker from './SkillPicker.jsx';
 import ContextSources, { FsPicker } from './Sources.jsx';
 import RequirementsEditor from './Requirements.jsx';
 import ReviewPanel from './ReviewPanel.jsx';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
+import { Modal } from './Help.jsx';
 import { castOf, PALETTE, LOOK_KEYS } from './office/model.js';
 import { CharacterPreview } from './office/characters.jsx';
 
@@ -356,6 +359,7 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
   const [varsErr, setVarsErr] = useState('');
   const [runs, setRuns] = useState([]);
   const [runDetail, setRunDetail] = useState(null);
+  const [report, setReport] = useState(null); // {runId, markdown}
   const [cwdPicker, setCwdPicker] = useState(false);
   const [varsFocus, setVarsFocus] = useState(false);
   // Follow server-side changes (e.g. a hook's ctx.setVar) unless the user is editing the JSON or it holds an invalid draft.
@@ -451,7 +455,8 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
         <div className="panel-body pad">
           {runDetail ? (
             <div>
-              <button className="ghost small" onClick={() => setRunDetail(null)}>← volver</button>
+              <div className="row"><button className="ghost small" onClick={() => setRunDetail(null)}>← volver</button><button className="small" data-testid="run-report-btn" onClick={() => api.get(`/api/flows/${flow.id}/runs/${runDetail.id}/report`).then((r) => setReport({ runId: runDetail.id, ...r })).catch((e) => alert(e.message))} title="Qué pasó, por qué terminó así y cada paso con su motivo">📋 Informe</button></div>
+              {report && report.runId === runDetail.id && <RunReport flowId={flow.id} report={report} onClose={() => setReport(null)} />}
               <h4>{runDetail.id} · <span className={`status s-${runDetail.status}`}>{runDetail.status}</span> {runDetail.status === 'running' && <button className="danger small" onClick={() => api.post(`/api/flows/${flow.id}/runs/${runDetail.id}/cancel`).then(() => api.get(`/api/flows/${flow.id}/runs/${runDetail.id}`).then(setRunDetail)).catch(() => {})}>■ Cancelar</button>}</h4>
               <div className="muted small">
                 {runDetail.trigger}{runDetail.usePins === false ? ' · ignoró salidas fijadas' : ''}{runDetail.usedPins?.length ? ` · usó fijadas: ${runDetail.usedPins.join(', ')}` : ''}
@@ -479,6 +484,7 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
                   <span>{new Date(r.startedAt).toLocaleString()}</span>
                   <span className="chip">{r.rehearsal || r.trigger === 'rehearsal' ? `🧪 ensayo${r.trigger?.startsWith('flow:') ? ' (llamado por otro flujo)' : ''}` : r.trigger}{r.only ? ' · 1 step' : r.from ? ` · desde ${flow.steps.find((s) => s.id === r.from)?.name || r.from}` : ''}</span>
                   <span className="muted small grow">{r.input}</span>
+                  <button className="ghost small" data-testid="run-row-report" title="📋 Informe: qué pasó y por qué terminó así" onClick={(e) => { e.stopPropagation(); Promise.all([api.get(`/api/flows/${flow.id}/runs/${r.id}`), api.get(`/api/flows/${flow.id}/runs/${r.id}/report`)]).then(([d, rep]) => { setRunDetail(d); setReport({ runId: r.id, ...rep }); }).catch((er) => alert(er.message)); }}>📋</button>
                   {r.totals && <span className="muted small">{Math.round((r.totals.durationMs || 0) / 1000)} s{r.totals.costUsd ? ` · ≈US$${r.totals.costUsd.toFixed(3)}` : ''}</span>}
                   {r.status === 'running' && <button className="danger small" onClick={(e) => { e.stopPropagation(); api.post(`/api/flows/${flow.id}/runs/${r.id}/cancel`).then(() => api.get(`/api/flows/${flow.id}/runs`).then(setRuns)).catch(() => {}); }}>■ Cancelar</button>}
                 </li>
@@ -805,5 +811,18 @@ function PersonaBox({ flow, step, onChange }) {
         </div>
       </div>
     </details>
+  );
+}
+
+/** 📋 The run's report: readable here, downloadable as .md. */
+function RunReport({ flowId, report, onClose }) {
+  const html = DOMPurify.sanitize(marked.parse(report.markdown || ''));
+  return (
+    <Modal title={`📋 Informe de la ejecución ${report.ticket || ''}`} onClose={onClose} wide>
+      <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 6 }}>
+        <a className="btn ghost small" data-testid="run-report-download" href={`/api/flows/${flowId}/runs/${report.runId}/report?format=md`} download>⬇ Descargar .md</a>
+      </div>
+      <div className="md run-report" data-testid="run-report" dangerouslySetInnerHTML={{ __html: html }} />
+    </Modal>
   );
 }
