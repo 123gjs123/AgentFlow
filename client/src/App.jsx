@@ -442,6 +442,11 @@ export default function App() {
     try { await flushSave(); await api.post(`/api/flows/${flow.id}/steps/${id}/run`, { input }); }
     catch (e) { if (e.code === 'PREFLIGHT_FAILED') setPfModal({ retry: () => runStep(id, input) }); else notify(e.message); }
   }
+  /** ▶▶ That step and everything after it; the steps before keep their last output (spec 10). */
+  async function runFrom(id, input) {
+    try { await flushSave(); await api.post(`/api/flows/${flow.id}/run`, { input, from: id }); }
+    catch (e) { if (e.code === 'PREFLIGHT_FAILED') setPfModal({ retry: () => runFrom(id, input) }); else notify(e.message); }
+  }
   async function flushSave() {
     if (!dirty.current) return;
     clearTimeout(saveTimer.current);
@@ -586,7 +591,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
               <EdgePanel key={edgeObj.id} flow={flow} edge={edgeObj} onChange={(p) => patchEdge(edgeObj.id, p)} onDelete={() => { onDeleteEdges([edgeObj.id]); setSelectedEdge(null); }} onClose={() => setSelectedEdge(null)} />
             ) : step ? (
               <StepPanel key={step.id} onDuplicate={() => duplicateStep(step.id)} onSaveLib={() => saveToLibrary(step.id)} flow={flow} step={step} catalog={catalog} live={live[step.id]} watch={watchView} running={anyRunning} tab={stepTab} setTab={setStepTab}
-                onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onProbe={probe}
+                onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onRunFrom={(inp) => runFrom(step.id, inp)} onProbe={probe}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             ) : (
               <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} running={anyRunning} focusRun={focusRun} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}

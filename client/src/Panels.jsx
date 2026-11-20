@@ -169,7 +169,7 @@ function Field({ label, hint, children, div }) {
   return <Tag className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</Tag>;
 }
 
-export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab, setTab, onChange, onDelete, onRun, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
+export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab, setTab, onChange, onDelete, onRun, onRunFrom, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
   const [runInput, setRunInput] = useState('');
   const [runEvents, setRunEvents] = useState(null);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
@@ -304,6 +304,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
           <div className="run-box">
             <textarea rows={2} value={runInput} onChange={(e) => setRunInput(e.target.value)} placeholder="Input para ejecutar solo este step (opcional)" />
             <button className="primary" onClick={() => { onRun(runInput); setTab('activity'); }} disabled={status === 'running' || status === 'queued' || status === 'paused'}>▶ Ejecutar step</button>
+            {onRunFrom && flow.edges.some((e) => e.source === step.id) && <button data-testid="run-from-step" onClick={() => { onRunFrom(runInput); setTab('activity'); }} disabled={running || status === 'running' || status === 'queued' || status === 'paused'} title="Ejecuta este step y todos los que siguen. Los anteriores no se repiten: pasan su última salida. Sin input, usa el de la última ejecución completa.">▶▶ Desde aquí</button>}
           </div>
           {step.lastRun?.output && (
             <details className="last-out"><summary>Última salida ({step.lastRun.status})</summary><pre>{step.lastRun.output}</pre></details>

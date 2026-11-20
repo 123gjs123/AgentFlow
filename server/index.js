@@ -586,7 +586,14 @@ app.delete('/api/flows/:id', wrap((req) => { need(req.params.id); engine.stopRun
 // ----- runs -----
 // UI runs honour breaks unless {breakpoints:false}.
 const uiInput = (v) => (typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v, null, 2));
-app.post('/api/flows/:id/run', wrap(async (req, res) => (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input: uiInput(req.body?.input), trigger: 'manual', breakpoints: req.body?.breakpoints !== false, from: typeof req.body?.from === 'string' ? req.body.from : null }) })));
+// "desde este step" without an input reuses the input of the last whole run (the ticket it was working on)
+const lastFullInput = (flowId) => { const r = store.listRuns(flowId).filter((x) => !x.only && !x.from).sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0]; return r ? String(store.getRun(flowId, r.id)?.input ?? '') : ''; };
+app.post('/api/flows/:id/run', wrap(async (req, res) => {
+  const from = typeof req.body?.from === 'string' ? req.body.from : null;
+  let input = uiInput(req.body?.input);
+  if (from && !input.trim()) input = lastFullInput(req.params.id);
+  return (await gate(need(req.params.id), res)) || ({ runId: engine.startRun(req.params.id, { input, trigger: 'manual', breakpoints: req.body?.breakpoints !== false, from }) });
+}));
 // spec 10: 🔔 news of the watched sources
 app.get('/api/flows/:id/watch', wrap((req) => { need(req.params.id); return W.view(req.params.id); }));
 app.post('/api/flows/:id/watch/check', wrap(async (req) => { need(req.params.id); return W.checkFlow(req.params.id, { stepId: req.body?.stepId || null, watchId: req.body?.watchId || null, trigger: 'manual' }); }));
