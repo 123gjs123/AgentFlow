@@ -532,3 +532,5 @@ pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }
 .run-report th, .run-report td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
 .run-report pre { white-space: pre-wrap; max-height: 320px; overflow: auto; }
 .run-report h1 { font-size: 17px; } .run-report h2 { font-size: 14px; margin-top: 14px; }
+.denied-tools { border: 1px solid var(--warn, #c90); border-radius: 6px; padding: 6px 8px; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.denied-tools code { margin: 0 3px; word-break: break-all; }

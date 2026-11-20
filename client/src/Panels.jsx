@@ -306,6 +306,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
             <button className="primary" onClick={() => { onRun(runInput); setTab('activity'); }} disabled={status === 'running' || status === 'queued' || status === 'paused'}>▶ Ejecutar step</button>
             {onRunFrom && flow.edges.some((e) => e.source === step.id) && <button data-testid="run-from-step" onClick={() => { onRunFrom(runInput); setTab('activity'); }} disabled={running || status === 'running' || status === 'queued' || status === 'paused'} title="Ejecuta este step y todos los que siguen. Los anteriores no se repiten: pasan su última salida. Sin input, usa el de la última ejecución completa.">▶▶ Desde aquí</button>}
           </div>
+          <DeniedTools step={step} tools={tools} onChange={onChange} />
           {step.lastRun?.output && (
             <details className="last-out"><summary>Última salida ({step.lastRun.status})</summary><pre>{step.lastRun.output}</pre></details>
           )}
@@ -825,5 +826,23 @@ function RunReport({ flowId, report, onClose }) {
       </div>
       <div className="md run-report" data-testid="run-report" dangerouslySetInnerHTML={{ __html: html }} />
     </Modal>
+  );
+}
+
+/** A step that failed for a denied tool: allow exactly those tools with one click (added to the ones it already has). */
+export function deniedToolsOf(step) {
+  if (step.lastRun?.code !== 'PERMISSION_DENIED') return [];
+  const m = /Se denegaron herramientas: (.+?)\. Dale acceso/.exec(String(step.lastRun.error || ''));
+  return m ? m[1].split(',').map((t) => t.trim()).filter(Boolean) : [];
+}
+function DeniedTools({ step, tools, onChange }) {
+  const missing = deniedToolsOf(step).filter((t) => !tools.has(t));
+  if (!missing.length) return null;
+  const allow = () => onChange({ allowedTools: [...tools, ...missing].join(' ') });
+  return (
+    <div className="denied-tools" data-testid="denied-tools">
+      <div className="small">⛔ La última ejecución falló porque este step no tiene permitido: {missing.map((t) => <code key={t}>{t}</code>)}</div>
+      <button className="small" data-testid="allow-denied" onClick={allow} title="Las agrega a «Tools permitidas» sin quitar las que ya tiene">➕ Permitir {missing.length === 1 ? 'esta herramienta' : `estas ${missing.length} herramientas`}</button>
+    </div>
   );
 }

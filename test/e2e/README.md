@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (401 tests)
+## Qué cubre (402 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -79,7 +79,7 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `37-office-model` | Spec 29 (lógica pura + servidor): personajes (nombres distintos, función → nombre, persona), plano (sin superposiciones, todo alcanzable, salas, tope 60), BFS, el reductor evento por evento, breaks y ejecuciones superpuestas, la jornada igual al vivo, una ejecución real reconstruida, persona limpia y que no ejecuta |
 | `38-ui-office` | Spec 29 en el navegador: 🔲 Cajas / 🏢 Oficina (URL), en vivo (estantería, Tomás, computadora en rojo, RECHAZADO, bitácora), break con 🔔, clicks → paneles, jornada a 16×, movimiento reducido y pestaña oculta, editor del personaje |
 | `39-run-report` | 📋 Informe de una ejecución: dónde se cortó y por qué (error y última salida), cada paso con su motivo, «Al terminar», descarga .md, sin secretos; botón en Ejecuciones (lista y detalle) |
-| `40-run-from-step` | ▶▶ Desde aquí: reintentar desde el paso que falló; los anteriores pasan su última salida, sin input se reusa la de la última ejecución completa (las parciales no cuentan); botón en el step solo si tiene pasos después |
+| `40-run-from-step` | ▶▶ Desde aquí: reintentar desde el paso que falló; los anteriores pasan su última salida, sin input se reusa la de la última ejecución completa (las parciales no cuentan); botón en el step solo si tiene pasos después; ➕ Permitir las herramientas denegadas con un clic (sin pisar las que ya tiene) |
 | `28-watch` | Spec 10 🔔 Novedades: rama git (primera foto, commits nuevos, se acumulan hasta "Visto", aviso 🔔), archivos y comando elemento por elemento, error sin perder la foto, Jira con Haiku de solo lectura (la app hace el diff), "ejecutar desde este step" y API externa `/status`, URL (ETag / contenido / HTTP de error), polling saneado, UI con 🔔 en el nodo |
 | `27-for-each` | Spec 15 DATA-10: "para cada": un step corre una vez por elemento de una lista JSON de arriba (`{{item.key}}`, `$env:AFS_ITEM`), de a N, junta los resultados en una lista; si uno falla los demás corren; lista vacía omite lo que sigue; origen que no es lista da error claro; UI 🔁 |
 
