@@ -447,7 +447,9 @@ pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }
 .office-replay-pick, .office-replay-bar { position: absolute; top: 44px; right: 8px; z-index: 6; display: flex; gap: 6px; align-items: center; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
 .office-replay-pick select { width: auto; }
 .office-replay-bar { background: #2a2140; }
-.office-scroll { flex: 1; overflow: auto; padding: 44px 8px 48px; min-height: 0; }
+.office-scroll { flex: 1; overflow: auto; padding: 0; min-height: 0; display: grid; place-items: center; cursor: grab; }
+.office-scroll.dragging { cursor: grabbing; user-select: none; }
+.office-scroll > svg { margin: 44px 8px 48px; }
 .office-svg { display: block; margin: 0 auto; font-family: 'Segoe UI', system-ui, sans-serif; }
 .office-edge-line { stroke: #b49a78; stroke-width: 2; stroke-dasharray: 2 6; stroke-linecap: round; fill: none; opacity: .7; }
 .office-edge-dot { fill: #b49a78; opacity: .7; }
@@ -522,3 +524,7 @@ pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }
 .office-clock-min { animation: office-clock 60s linear infinite; transform-origin: 0 0; }
 @keyframes office-clock { to { transform: rotate(360deg); } }
 .office-hit { fill: rgba(0,0,0,0); }
+.office-camera { position: absolute; top: 8px; right: 8px; z-index: 7; display: flex; gap: 4px; align-items: center; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px; box-shadow: 0 4px 14px #0006; }
+.office-camera button { padding: 2px 9px; font-size: 14px; }
+.office-camera .office-zoom-val { font-size: 12px; min-width: 52px; }
+.office-camera-sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }

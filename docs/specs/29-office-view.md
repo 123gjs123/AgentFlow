@@ -94,12 +94,22 @@ The plan came from an architect review. The open questions are settled:
 - **Zoom.** 100 % (fit) to 250 %, centred, kept per browser.
 - **Persona editor.** It also offers the clothes layer (`look.layer`, accepted by the server).
 
+**Camera, and the reception in front (2026-11-20, the user's feedback).**
+- **The reception moved to the front-right corner** of the office (the last room), the corner closest to the viewer: the coordinator, behind his counter and facing you, is the first one you see. In front of it: the waiting chairs and the kiosk. Next to it: the turn display, now on a stand. Behind him: the Entrada/Salida cabinet and a ficus. A half-wall on its left is open at the back, towards the desks.
+- **Rotation in 4 angles (⟲ ⟳).** The plan never changes; only the camera does (`setView`, `rot`, `depthOf` in `layout.js`).
+  - Boxes draw their two faces closest to the camera.
+  - A decal on a face (monitor screens, drawers, the desk's modesty panel) is hidden when that face looks away. Panels seen from both sides (partitions, glass, chair backs) stay.
+  - The two walls are always the ones far from the camera.
+  - Signs are upright plaques, readable from every angle.
+  - Seen from behind a desk or the counter, the person shows their back (`facing: 'away'`); the people waiting face the counter.
+- **Zoom.** It lives in the controls at the top right: − / % (fit) / +, from 50 % to 300 %. The mouse wheel zooms around the cursor, and dragging the floor pans. Rotation and zoom are remembered per browser.
+- **Tests.** `38-ui-office` covers rotation, zoom (buttons, wheel, fit), a desk opened while rotated, and the reception in front. In a rotated view something may stand in front of a desk; the keyboard (Tab and Enter) always reaches it.
+
 **Known limits, deferred.**
 - Replay does not show pauses, resumes or earlier attempts of a retried break. Those status changes are not stored as events.
 - Not yet built:
   - sprite characters;
   - typing and ambient sounds;
-  - zoom and pan;
   - arcs for papers;
   - door animations;
   - an inspector walking the desks (it stands at the window);

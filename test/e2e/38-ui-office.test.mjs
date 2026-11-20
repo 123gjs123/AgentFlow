@@ -185,3 +185,36 @@ test('revisión 29: recargar durante una ejecución con la red lenta no repite p
     assert.equal(await page.getByTestId('office').getAttribute('data-mode'), 'live');
   } catch (e) { await captureOnFailure(page, { ...t, passed: false, name: t.name }); throw e; }
 });
+
+test('cámara: girar la oficina (4 ángulos) y el zoom (botones, rueda del mouse, ajustar); los clics siguen andando girada; la recepción está adelante', async (t) => {
+  if (skip(t)) return;
+  try {
+    const f = await s.flow('Oficina J', [role('Uno', 'x', { id: 's_1' }), role('Dos', 'x', { id: 's_2' })], [['s_1', 's_2']]);
+    await page.goto(`${s.base}/?flow=${f.id}&view=office`);
+    await page.getByTestId('office').waitFor();
+    const off = page.getByTestId('office');
+    const rot0 = Number(await off.getAttribute('data-rot'));
+    await page.getByTestId('office-rotate-right').click();
+    assert.equal(Number(await off.getAttribute('data-rot')), (rot0 + 1) % 4);
+    await desk('s_2').focus(); await page.keyboard.press('Enter'); // girada, algo puede quedar delante: el teclado siempre llega
+    assert.equal(await page.locator('.title-input').inputValue(), 'Dos', 'girada, un escritorio abre su step');
+    await page.getByTestId('office-rotate-left').click(); await page.getByTestId('office-rotate-left').click();
+    assert.equal(Number(await off.getAttribute('data-rot')), (rot0 + 3) % 4);
+    await page.getByTestId('office-rotate-right').click();
+    await page.getByTestId('office-zoom-fit').click();
+    assert.equal(Number(await off.getAttribute('data-zoom')), 1);
+    await page.getByTestId('office-zoom-in').click();
+    assert.ok(Number(await off.getAttribute('data-zoom')) > 1);
+    const box = await page.locator('.office-scroll').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    const z0 = Number(await off.getAttribute('data-zoom'));
+    await page.mouse.wheel(0, -300);
+    await page.waitForFunction((z) => Number(document.querySelector('[data-testid="office"]').dataset.zoom) > z, z0);
+    await page.getByTestId('office-zoom-fit').click();
+    // the reception (counter + coordinator) is in the front corner: lower on screen than every desk
+    await page.evaluate(() => { try { localStorage.setItem('afs.office.rot', '0'); } catch {} }); await page.reload(); await page.getByTestId('office').waitFor();
+    const counterY = (await page.getByTestId('office-window').boundingBox()).y;
+    for (const id of ['s_1', 's_2']) assert.ok(counterY > (await desk(id).boundingBox()).y, 'la recepción se ve adelante');
+    assert.deepEqual(page.errors, []);
+  } catch (e) { await captureOnFailure(page, { ...t, passed: false, name: t.name }); throw e; }
+});

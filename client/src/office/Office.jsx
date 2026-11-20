@@ -5,11 +5,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api, onWs } from '../api.js';
 import { castOf, deskSign, KIND_LABEL, COORDINATOR, autoLook } from './model.js';
-import { officeLayout, depth, shelfAccess } from './layout.js';
+import { officeLayout, depth, depthOf, shelfAccess, setView, facesViewer } from './layout.js';
 import { pathCache, pointAlong } from './path.js';
 import { ticketOf, initialScene, officeReduce, coordinatorTarget, timelineOfRun, replayClock, describeScene, poseOf, activityText, ACTIVE } from './scene.js';
 import { renderer } from './characters.jsx';
-import { P, center, OfficeDefs, Room, DeskBase, DeskTop, ShelfPiece, FilingPiece, CounterBase, CounterTop, TurnDisplay, KioskPiece, WaitingChairs, WaitingBacks, TrayPiece, DecorPiece, Partition, OfficeChair, HalfWall, Plaque } from './Furniture.jsx';
+import { P, center, OfficeDefs, Room, Shell, Walls, DeskBase, DeskTop, ShelfPiece, FilingPiece, CounterBase, CounterTop, TurnDisplay, KioskPiece, WaitingChairs, WaitingBacks, TrayPiece, DecorPiece, Partition, OfficeChair, HalfWall, Plaque } from './Furniture.jsx';
 const WALLTOP = 130;
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch {} } };
@@ -38,9 +38,37 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
   const setSound = (v) => { ls.set('afs.office.sound', v ? '1' : '0'); setSoundState(v); };
   const [showLog, setShowLog] = useState(false);
   const scrollRef = useRef(null);
-  const [zoom, setZoomState] = useState(() => Number(ls.get('afs.office.zoom')) || 1);
-  useEffect(() => { const el = scrollRef.current; if (!el) return; el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2; el.scrollTop = (el.scrollHeight - el.clientHeight) / 2; }, [zoom, layout.hash]); // eslint-disable-line react-hooks/exhaustive-deps
-  const setZoom = (z) => { const v = Math.min(2.5, Math.max(1, Math.round(z * 100) / 100)); ls.set('afs.office.zoom', String(v)); setZoomState(v); };
+  const [rotation, setRotationState] = useState(() => Number(ls.get('afs.office.rot')) || 0);
+  const rotate = (d) => { const v = (((rotation + d) % 4) + 4) % 4; ls.set('afs.office.rot', String(v)); setRotationState(v); walkers.current.clear(); };
+  setView(rotation, layout.cols, layout.rows); // every projection below goes through this camera
+  const [zoom, setZoomState] = useState(() => Math.min(3, Math.max(0.5, Number(ls.get('afs.office.zoom')) || 1)));
+  const zoomRef = useRef(zoom); zoomRef.current = zoom;
+  const [box, setBox] = useState({ w: 900, h: 700 });
+  useEffect(() => { const el = scrollRef.current; if (!el) return undefined; const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight })); ro.observe(el); setBox({ w: el.clientWidth, h: el.clientHeight }); return () => ro.disconnect(); }, []);
+  const anchor = useRef(null); // {mx, my, fx, fy}: keep the point under the cursor in place while zooming
+  const setZoom = (z, at) => {
+    const v = Math.min(3, Math.max(0.5, Math.round(z * 100) / 100));
+    const el = scrollRef.current;
+    if (el) { const r = el.getBoundingClientRect(); const mx = at ? at.x - r.left : el.clientWidth / 2; const my = at ? at.y - r.top : el.clientHeight / 2; anchor.current = { mx, my, fx: (el.scrollLeft + mx) / Math.max(1, el.scrollWidth), fy: (el.scrollTop + my) / Math.max(1, el.scrollHeight) }; }
+    ls.set('afs.office.zoom', String(v)); setZoomState(v);
+  };
+  useEffect(() => {
+    const el = scrollRef.current; if (!el) return;
+    const a = anchor.current; anchor.current = null;
+    if (a) { el.scrollLeft = a.fx * el.scrollWidth - a.mx; el.scrollTop = a.fy * el.scrollHeight - a.my; }
+    else { el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2; el.scrollTop = (el.scrollHeight - el.clientHeight) / 2; }
+  }, [zoom, rotation, layout.hash, box.w, box.h]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the mouse wheel zooms around the cursor; dragging the floor pans
+  useEffect(() => {
+    const el = scrollRef.current; if (!el) return undefined;
+    const wheel = (e) => { e.preventDefault(); setZoom(zoomRef.current * (e.deltaY < 0 ? 1.12 : 1 / 1.12), { x: e.clientX, y: e.clientY }); };
+    el.addEventListener('wheel', wheel, { passive: false });
+    return () => el.removeEventListener('wheel', wheel);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const drag = useRef(null);
+  const onPointerDown = (e) => { if (e.button !== 0) return; drag.current = { x: e.clientX, y: e.clientY, sl: scrollRef.current.scrollLeft, st: scrollRef.current.scrollTop, moved: false }; };
+  const onPointerMove = (e) => { const d = drag.current; if (!d) return; const dx = e.clientX - d.x; const dy = e.clientY - d.y; if (!d.moved && Math.hypot(dx, dy) < 5) return; d.moved = true; scrollRef.current.scrollLeft = d.sl - dx; scrollRef.current.scrollTop = d.st - dy; scrollRef.current.classList.add('dragging'); };
+  const onPointerUp = () => { const d = drag.current; drag.current = null; scrollRef.current?.classList.remove('dragging'); if (d?.moved) { const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); }; window.addEventListener('click', stop, { capture: true, once: true }); setTimeout(() => window.removeEventListener('click', stop, { capture: true }), 50); } };
 
   // ---------- live scene: catch-up of runs already going, then /ws ----------
   const [scene, setScene] = useState(initialScene);
@@ -165,9 +193,10 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
   useEffect(() => { if (reduced || hidden || !run || !ACTIVE.has(run.status)) return undefined; const iv = setInterval(() => setFrame((f) => (f + 1) % 4), 350); return () => clearInterval(iv); }, [reduced, hidden, run?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---------- geometry ----------
-  const corners = [P(0, 0, WALLTOP), P(layout.cols, 0, WALLTOP), P(layout.cols, layout.rows), P(0, layout.rows), P(0, 0, WALLTOP)];
+  const corners = [0, WALLTOP].flatMap((z) => [P(0, 0, z), P(layout.cols, 0, z), P(layout.cols, layout.rows, z), P(0, layout.rows, z)]).concat([P(0, 0, -20), P(layout.cols, layout.rows, -20), P(layout.cols, 0, -20), P(0, layout.rows, -20)]);
   const minX = Math.min(...corners.map((p) => p.x)) - 30; const maxX = Math.max(...corners.map((p) => p.x)) + 30;
   const minY = Math.min(...corners.map((p) => p.y)) - 40; const maxY = Math.max(...corners.map((p) => p.y)) + 40;
+  const fit = Math.min((box.w - 16) / (maxX - minX), (box.h - 16) / (maxY - minY)) || 1;
   const stepById = new Map(flow.steps.map((s) => [s.id, s]));
   const key = (e, fn) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); fn(); } };
   const btn = (label, fn) => ({ role: 'button', tabIndex: 0, 'aria-label': label, onClick: (e) => { e.stopPropagation(); fn(); }, onKeyDown: (e) => key(e, fn) });
@@ -204,7 +233,7 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
   const coordWalker = walkers.current.get('coordinator');
   const coordSeated = coordWalker && !coordWalker.path && coordWalker.targetKey === 'chair';
   for (const f of layout.furniture) {
-    const d = depth(f.gx + Math.max(1, f.w) - 1, f.gy + Math.max(1, f.h) - 1);
+    const d = depthOf(f.gx, f.gy, Math.max(1, f.w), Math.max(1, f.h));
     if (f.shelf) {
       const label = { contexto: 'CONTEXTO', memoria: 'MEMORIA', expedientes: 'EXPEDIENTES' }[f.shelf];
       const open = () => (f.shelf === 'memoria' ? onOpenFlowTab('memory') : f.shelf === 'expedientes' ? onOpenRun(null) : onOpenFlowTab('settings'));
@@ -212,15 +241,20 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
     } else if (f.id === 'window') {
       const bellOn = !!run?.bell;
       const chairAt = P(f.gx + 0.75, f.gy - 0.05);
-      items.push([d, <g key={f.id} data-testid="office-window" data-bell={bellOn ? '1' : '0'} className={`office-item${bellOn ? ' ringing' : ''}`} {...btn(bellOn ? 'Ventanilla: hay un break esperando tu revisión' : 'Ventanilla del coordinador', () => (bellOn && paused ? onOpenReview() : onOpenRun(shown.focusRunId)))}>
-        <OfficeChair x={chairAt.x} y={chairAt.y} color="#2d3340" />
-        {coordSeated && <g transform={`translate(${chairAt.x},${chairAt.y})`} pointerEvents="none">{renderer.render({ look: COORD_LOOK, pose: 'type', frame, drill, coordinator: true, part: 'body' })}</g>}
-        <CounterBase gx={f.gx} gy={f.gy} w={f.w} />
-        {coordSeated && <g transform={`translate(${chairAt.x},${chairAt.y})`} pointerEvents="none">{renderer.render({ look: COORD_LOOK, pose: 'type', frame, drill, coordinator: true, part: 'front' })}</g>}
-        <CounterTop gx={f.gx} gy={f.gy} w={f.w} bell={bellOn} id={flow.id} />
+      const behind = facesViewer(0, -1); // the camera looks from his side of the counter
+      const coordEl = (part) => coordSeated && <g transform={`translate(${chairAt.x},${chairAt.y})`} pointerEvents="none">{renderer.render({ look: COORD_LOOK, pose: behind ? 'sit' : 'type', frame, drill, coordinator: true, part, facing: behind ? 'away' : 'front' })}</g>;
+      items.push([depthOf(f.gx, f.gy - 1, f.w, 2), <g key={f.id} data-testid="office-window" data-bell={bellOn ? '1' : '0'} className={`office-item${bellOn ? ' ringing' : ''}`} {...btn(bellOn ? 'Ventanilla: hay un break esperando tu revisión' : 'Ventanilla del coordinador', () => (bellOn && paused ? onOpenReview() : onOpenRun(shown.focusRunId)))}>
+        {behind ? (<>
+          <CounterBase gx={f.gx} gy={f.gy} w={f.w} /><CounterTop gx={f.gx} gy={f.gy} w={f.w} bell={bellOn} id={flow.id} />
+          <OfficeChair x={chairAt.x} y={chairAt.y} color="#2d3340" />{coordEl('body')}
+        </>) : (<>
+          <OfficeChair x={chairAt.x} y={chairAt.y} color="#2d3340" />{coordEl('body')}
+          <CounterBase gx={f.gx} gy={f.gy} w={f.w} />{coordEl('front')}
+          <CounterTop gx={f.gx} gy={f.gy} w={f.w} bell={bellOn} id={flow.id} />
+        </>)}
       </g>]);
     } else if (f.id === 'display') {
-      items.push([-100, <g key={f.id} data-testid="office-display" data-ticket={run && ACTIVE.has(run.status) ? run.ticket : ''} className="office-item" {...btn(`Turno ${run?.ticket || '—'}`, () => onOpenRun(shown.focusRunId))}><TurnDisplay gy={f.gy} tickets={tickets} /></g>]);
+      items.push([d, <g key={f.id} data-testid="office-display" data-ticket={run && ACTIVE.has(run.status) ? run.ticket : ''} className="office-item" {...btn(`Turno ${run?.ticket || '—'}`, () => onOpenRun(shown.focusRunId))}><TurnDisplay gx={f.gx} gy={f.gy} tickets={tickets} /></g>]);
     } else if (f.id === 'entrada' || f.id === 'salida') {
       const stamp = f.id === 'salida' ? run?.stamp || '' : '';
       items.push([d, <g key={f.id} data-testid={`office-${f.id}`} data-stamp={stamp} className="office-item" {...btn(f.id === 'entrada' ? 'Bandeja de Entrada (lo que recibe el flujo)' : `Bandeja de Salida${stamp ? `: ${stamp}` : ''}`, () => onOpenRun(shown.focusRunId))}><TrayPiece gx={f.gx} gy={f.gy} label={f.id === 'entrada' ? 'ENTRADA' : 'SALIDA'} stamp={stamp} /></g>]);
@@ -229,12 +263,12 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
     }
   }
   for (const dco of layout.decor) {
-    const d = depth(dco.gx + Math.ceil(dco.w) - 1, dco.gy + Math.ceil(dco.h) - 1);
+    const d = depthOf(dco.gx, dco.gy, Math.ceil(dco.w), Math.ceil(dco.h));
     if (dco.id === 'kiosk') items.push([d, <KioskPiece key={dco.id} gx={dco.gx} gy={dco.gy} />]);
     else if (dco.id === 'waiting') {
       items.push([d - 0.5, <WaitingChairs key={dco.id} gx={dco.gx} gy={dco.gy} w={dco.w} />]);
       items.push([d + 0.5, <WaitingBacks key={`${dco.id}:b`} gx={dco.gx} gy={dco.gy} w={dco.w} />]);
-    } else if (dco.kind === 'halfwall') items.push([depth(dco.gx, dco.gy + dco.h - 1) + 0.3, <HalfWall key={dco.id} gx={dco.gx} gy={dco.gy} d={dco.h} />]);
+    } else if (dco.kind === 'halfwall') items.push([depthOf(dco.gx, dco.gy, 1, dco.h) - 0.2, <HalfWall key={dco.id} gx={dco.gx} gy={dco.gy} d={dco.h} />]);
     else items.push([d, <DecorPiece key={dco.id} kind={dco.kind} gx={dco.gx} gy={dco.gy} />]);
   }
   for (const desk of layout.desks) {
@@ -250,18 +284,28 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
     const pose = poseOf(activity, false);
     const personCls = `office-person${drill ? ' drill' : ''}${status === 'error' || status === 'timeout' ? ' storm' : ''}`;
     const variant = desk.gx + desk.gy;
-    items.push([depth(desk.gx + 1, desk.gy), <g key={desk.id} data-testid="office-desk" data-step={desk.id} data-activity={activity} data-status={status} data-name={c?.name}
-      className={`office-desk${selectedId === desk.id ? ' selected' : ''} st-${status}`} {...btn(label, () => onOpenStep(desk.id))}>
-      <polygon className="office-hit" points={[P(desk.gx - 0.1, desk.gy - 1, 72), P(desk.gx + 2.1, desk.gy - 1, 72), P(desk.gx + 2.1, desk.gy - 1, 0), P(desk.gx + 2.1, desk.gy + 1, 0), P(desk.gx - 0.1, desk.gy + 1, 0), P(desk.gx - 0.1, desk.gy + 1, 72)].map((p) => `${p.x},${p.y}`).join(' ')} />
-      <Partition gx={desk.gx} gy={desk.gy - 0.95} />
-      <OfficeChair x={seat.x} y={seat.y} color={['#2d3340', '#3a3f4b', '#33302d'][variant % 3]} />
-      {!away && <g transform={`translate(${seat.x},${seat.y})`} className={personCls} data-testid="office-person" data-activity={activity}>{renderer.render({ look: c.look, pose, frame, drill, mood: moodOf(desk.id), part: 'body' })}</g>}
-      <DeskBase gx={desk.gx} gy={desk.gy} />
-      {!away && <g transform={`translate(${seat.x},${seat.y})`} className={personCls}>{renderer.render({ look: c.look, pose, frame, drill, part: 'front' })}</g>}
+    const behind = facesViewer(0, -1); // the camera looks from the person's side of the desk
+    const hitPts = [P(desk.gx - 0.1, desk.gy - 1, 0), P(desk.gx + 2.1, desk.gy - 1, 0), P(desk.gx + 2.1, desk.gy + 1, 0), P(desk.gx - 0.1, desk.gy + 1, 0)];
+    const hx0 = Math.min(...hitPts.map((p) => p.x)); const hx1 = Math.max(...hitPts.map((p) => p.x)); const hy0 = Math.min(...hitPts.map((p) => p.y)) - 72; const hy1 = Math.max(...hitPts.map((p) => p.y));
+    const person = (part) => !away && <g transform={`translate(${seat.x},${seat.y})`} className={personCls} {...(part !== 'front' ? { 'data-testid': 'office-person', 'data-activity': activity } : {})}>{renderer.render({ look: c.look, pose: behind ? 'sit' : pose, frame, drill, mood: moodOf(desk.id), part, facing: behind ? 'away' : 'front' })}</g>;
+    const deskTop = (
       <g data-testid={isCmd ? 'office-computer' : undefined} data-state={isCmd ? comp : undefined} className={isCmd ? `office-computer ${comp}` : undefined}>
         <DeskTop id={desk.id} gx={desk.gx} gy={desk.gy} variant={variant} accent={['#f5c542', '#ef4444', '#3b82f6', '#22c55e', '#a855f7'][variant % 5]} flowPhone={s.kind === 'flow'}
           computer={isCmd ? { state: comp, label: comp === 'err' ? '✗ ERROR' : comp === 'ok' ? '✓ OK' : comp === 'running' ? '>_' : `> ${String(s.command || '').slice(0, 7)}` } : null} />
       </g>
+    );
+    items.push([depthOf(desk.gx, desk.gy - 1, 2, 2), <g key={desk.id} data-testid="office-desk" data-step={desk.id} data-activity={activity} data-status={status} data-name={c?.name}
+      className={`office-desk${selectedId === desk.id ? ' selected' : ''} st-${status}`} {...btn(label, () => onOpenStep(desk.id))}>
+      <rect className="office-hit" x={hx0} y={hy0} width={hx1 - hx0} height={hy1 - hy0} />
+      {behind ? (<>
+        <DeskBase gx={desk.gx} gy={desk.gy} />{deskTop}
+        <OfficeChair x={seat.x} y={seat.y} color={['#2d3340', '#3a3f4b', '#33302d'][variant % 3]} />{person('body')}
+        <Partition gx={desk.gx} gy={desk.gy - 0.95} />
+      </>) : (<>
+        <Partition gx={desk.gx} gy={desk.gy - 0.95} />
+        <OfficeChair x={seat.x} y={seat.y} color={['#2d3340', '#3a3f4b', '#33302d'][variant % 3]} />{person('body')}
+        <DeskBase gx={desk.gx} gy={desk.gy} />{person('front')}{deskTop}
+      </>)}
     </g>]);
     const at = P(desk.gx + 1, desk.gy + 0.86, 31);
     const chips = [st?.locked ? '🔒' : null, st?.item ? `${st.item.i}/${st.item.total}` : null].filter(Boolean);
@@ -286,7 +330,7 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
   // the queue: other runs going at the same time, seen from behind on the waiting chairs, with their ticket
   others.forEach((id, i) => {
     const t = layout.queue[i]; if (!t) return; const p = P(t.gx + 0.5, t.gy + 0.45);
-    items.push([depth(t.gx, t.gy) + 0.2, <g key={`q:${id}`} transform={`translate(${p.x},${p.y})`} data-testid="office-queue-person" data-ticket={shown.runs[id].ticket} className="office-item" {...btn(`Turno ${shown.runs[id].ticket} esperando`, () => onOpenRun(id))}>{renderer.render({ look: autoLook(id), pose: 'sit', legs: true, frame, facing: 'away' })}<g transform="translate(14,-58)"><rect x="-1" y="-8" width="30" height="13" rx="3" className="office-ticket-bg" /><text x="14" y="2" textAnchor="middle" className="office-ticket">{shown.runs[id].ticket}</text></g></g>]);
+    items.push([depth(t.gx, t.gy) + (facesViewer(0, 1) ? 0.6 : -0.6), <g key={`q:${id}`} transform={`translate(${p.x},${p.y})`} data-testid="office-queue-person" data-ticket={shown.runs[id].ticket} className="office-item" {...btn(`Turno ${shown.runs[id].ticket} esperando`, () => onOpenRun(id))}>{renderer.render({ look: autoLook(id), pose: 'sit', legs: true, frame, facing: facesViewer(0, -1) ? 'front' : 'away' })}<g transform="translate(14,-58)"><rect x="-1" y="-8" width="30" height="13" rx="3" className="office-ticket-bg" /><text x="14" y="2" textAnchor="middle" className="office-ticket">{shown.runs[id].ticket}</text></g></g>]);
   });
   items.sort((x, y) => x[0] - y[0]);
 
@@ -312,13 +356,21 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
   }
 
   return (
-    <div className={`office${reduced ? ' reduced' : ''}${hidden ? ' paused' : ''}`} data-testid="office" data-mode={replay ? 'replay' : 'live'} data-reduced-motion={reduced ? '1' : '0'} data-animating={animating && !hidden ? '1' : '0'} data-run={run?.ticket || ''} data-drill={drill ? '1' : '0'}>
+    <div className={`office${reduced ? ' reduced' : ''}${hidden ? ' paused' : ''}`} data-rot={rotation} data-zoom={zoom} data-testid="office" data-mode={replay ? 'replay' : 'live'} data-reduced-motion={reduced ? '1' : '0'} data-animating={animating && !hidden ? '1' : '0'} data-run={run?.ticket || ''} data-drill={drill ? '1' : '0'}>
+      <div className="office-camera" data-testid="office-camera">
+        <button className="ghost small" data-testid="office-rotate-left" onClick={() => rotate(-1)} title="Girar la oficina a la izquierda">⟲</button>
+        <button className="ghost small" data-testid="office-rotate-right" onClick={() => rotate(1)} title="Girar la oficina a la derecha">⟳</button>
+        <span className="office-camera-sep" />
+        <button className="ghost small" data-testid="office-zoom-out" disabled={zoom <= 0.5} onClick={() => setZoom(zoom / 1.25)} title="Alejar (o la rueda del mouse)">−</button>
+        <button className="ghost small office-zoom-val" data-testid="office-zoom-fit" onClick={() => setZoom(1)} title="Ajustar a la ventana">{Math.round(zoom * 100)}%</button>
+        <button className="ghost small" data-testid="office-zoom-in" disabled={zoom >= 3} onClick={() => setZoom(zoom * 1.25)} title="Acercar (o la rueda del mouse)">+</button>
+      </div>
       <div className="office-toolbar">
         <button className="ghost small" data-testid="office-replay-btn" onClick={openReplay} title="Repetir una ejecución pasada en cámara rápida">▶ Ver la jornada</button>
         <label className="toggle small" title="Sin desplazamientos ni animaciones"><input type="checkbox" data-testid="office-reduced" checked={reduced} onChange={(e) => setReduced(e.target.checked)} /> Movimiento reducido</label>
         <label className="toggle small" title="La campana de la ventanilla en un break o un error"><input type="checkbox" data-testid="office-sound" checked={sound} onChange={(e) => setSound(e.target.checked)} /> Sonido</label>
         <button className="ghost small" data-testid="office-log-btn" onClick={() => setShowLog((v) => !v)}>📜 Bitácora</button>
-        <span className="office-zoom"><button className="ghost small" data-testid="office-zoom-out" disabled={zoom <= 1} onClick={() => setZoom(zoom - 0.25)} title="Alejar">−</button><span className="small muted">{Math.round(zoom * 100)}%</span><button className="ghost small" data-testid="office-zoom-in" disabled={zoom >= 2.5} onClick={() => setZoom(zoom + 0.25)} title="Acercar">+</button></span>
+
       </div>
       {runsList && (
         <div className="office-replay-pick">
@@ -337,10 +389,12 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
           <button className="ghost small" data-testid="office-replay-stop" onClick={() => setReplay(null)}>✕ Volver al vivo</button>
         </div>
       )}
-      <div className="office-scroll" ref={scrollRef} onClick={onBackground}>
-        <svg className="office-svg" viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`} width={zoom > 1 ? (maxX - minX) * zoom : '100%'} height={zoom > 1 ? (maxY - minY) * zoom : '100%'} style={zoom > 1 ? undefined : { minWidth: Math.min(maxX - minX, 2400) * 0.55, minHeight: Math.min(maxY - minY, 2000) * 0.55 }} preserveAspectRatio="xMidYMid meet" role="group" aria-label={`Oficina del flujo «${flow.name}»`}>
+      <div className="office-scroll" ref={scrollRef} onClick={onBackground} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp}>
+        <svg className="office-svg" viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`} width={Math.round((maxX - minX) * fit * zoom)} height={Math.round((maxY - minY) * fit * zoom)} preserveAspectRatio="xMidYMid meet" role="group" aria-label={`Oficina del flujo «${flow.name}»`}>
           <OfficeDefs />
+          <Shell cols={layout.cols} rows={layout.rows} />
           <g>{rooms}</g>
+          <Walls cols={layout.cols} rows={layout.rows} />
           <g className="office-edges">{edgeLines}</g>
           <g>{items.map((x) => x[1])}</g>
           <g className="office-labels">{labels}</g>

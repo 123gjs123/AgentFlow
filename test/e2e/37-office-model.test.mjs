@@ -37,7 +37,7 @@ test('plano: escritorios sin superponerse, todo alcanzable desde la ventanilla; 
     const walk = (t) => lay.grid.cells[t.gy * lay.cols + t.gx] === 1;
     for (const d of lay.desks) { assert.ok(walk(d.seat) && walk(d.visit)); assert.ok(P.findPath(lay.grid, lay.chair, d.seat), `asiento alcanzable ${d.id}`); assert.ok(P.findPath(lay.grid, lay.chair, d.visit)); }
     for (const fu of lay.furniture.filter((x) => !x.wall)) assert.ok(P.findPath(lay.grid, lay.chair, fu.access) || (fu.access.gx === lay.chair.gx && fu.access.gy === lay.chair.gy), `${fu.id} alcanzable`);
-    assert.deepEqual(lay.chair, { gx: 1, gy: 1 });
+    assert.deepEqual(lay.chair, { gx: lay.cols - 3, gy: lay.rows - 4 }, 'la recepción está en la esquina de adelante');
   }
   assert.equal(L.officeLayout(chain(60)).rooms, 10);
   assert.equal(L.officeLayout(chain(61)).overflow, 1);
