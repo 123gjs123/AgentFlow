@@ -15,7 +15,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const APP_VERSION = (() => { try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version; } catch { return '0'; } })();
 export const SECRET_NAME = /(token|secret|password|passwd|pwd|apikey|api_key|credential|private|auth)/i;
 const MACHINE_STEP = ['lastRun', 'chatSessionId', 'chatContextHash'];
-const MACHINE_FLOW = ['globalSessionId', 'globalContextHash', 'reviewSessionId', 'reviewContextHash', 'quarantine', 'rev', 'updatedAt', 'createdAt'];
+const MACHINE_FLOW = ['globalSessionId', 'globalContextHash', 'reviewSessionId', 'reviewContextHash', 'quarantine', 'rev', 'updatedAt', 'createdAt', 'workspace'];
 
 export const slug = (s) => String(s || 'flujo').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 60) || 'flujo';
 
@@ -30,6 +30,8 @@ export function exportFlow(flow, opts = {}) {
     for (const k of MACHINE_STEP) delete s[k];
     if (opts.memory === false) s.memory = [];
     if (s.pinned && !opts.pins) { delete s.pinned; if (!removed.includes('salidas fijadas')) removed.push('salidas fijadas'); }
+    // spec 11: ids are local to this machine; the name lets the importer relink the call
+    if (s.kind === 'flow' && s.flowRef) s.flowRefName = store.getFlow(s.flowRef)?.name || null;
   }
   if (!opts.secrets) {
     for (const [k, v] of Object.entries(f.vars || {})) if (SECRET_NAME.test(k) && v) { f.vars[k] = ''; removed.push(`valor de la variable "${k}" (parece un secreto)`); }
@@ -53,6 +55,8 @@ export function executableParts(flow) {
     for (const a of s.assertions || []) if (a?.type === 'command' && String(a.command || '').trim()) out.push(`aserción con comando en "${s.name}"`);
     if (s.kind !== 'command' && /(^|[\s,])(Bash|Edit|Write|NotebookEdit)\b/.test(String(s.allowedTools || ''))) out.push(`"${s.name}" puede usar la terminal o escribir archivos (${String(s.allowedTools).match(/(Bash|Edit|Write|NotebookEdit)[^\s,]*/g).slice(0, 4).join(', ')})`);
     if (s.permissionMode === 'bypassPermissions') out.push(`"${s.name}" salta los permisos (bypassPermissions)`);
+    if (s.kind === 'flow') { const t = s.flowRef ? store.getFlow(s.flowRef) : null; out.push(t ? `"${s.name}" invocaría tu flujo local «${t.name}» (${t.id}) con el input que trae el paquete` : `"${s.name}" invoca otro flujo (sin elegir)`); } // spec 11
+    if (/invokeFlow\s*\(/.test(String(s.hooks || ''))) out.push(`hooks de "${s.name}" invocan otro flujo`);
     // spec 14: declared actions change external systems; a deliverable destination writes on this machine
     for (const a of s.actions || []) if (a && typeof a === 'object') out.push(`acción declarada en "${s.name}": ${String(a.type).slice(0, 40)}${a.approval === 'auto' ? ' (automática)' : ''}`);
     for (const d of s.deliverables || []) for (const x of d?.destination || []) if (x?.path) out.push(`"${s.name}" copia un archivo a ${String(x.path).slice(0, 120)}`);
@@ -87,6 +91,15 @@ export function importBundle(bundle, clean, { name } = {}) {
     if (!Array.isArray(st.memory)) st.memory = [];
     return st;
   });
+  // spec 11: a 🔀 Flujo step points at a flow of THIS machine: relinked only to one flow with exactly that name
+  for (const st of steps) {
+    if (st.kind !== 'flow') continue;
+    const want = typeof st.flowRefName === 'string' ? st.flowRefName.trim().toLowerCase() : '';
+    const m = want ? store.listFlows().filter((x) => String(x.name).trim().toLowerCase() === want) : [];
+    if (m.length === 1) { st.flowRef = m[0].id; warnings.push(`«${st.name}» quedó apuntando a tu flujo local «${m[0].name}»: revísalo antes de habilitar el flujo importado`); }
+    else { if (st.flowRef || want) warnings.push(`«${st.name}» invocaba el flujo «${st.flowRefName || st.flowRef}»: ${m.length ? 'hay varios con ese nombre' : 'no existe en esta máquina'}; elígelo en el step`); st.flowRef = ''; }
+    delete st.flowRefName;
+  }
   if (clean.steps) clean.steps(steps);
   const ids = new Set(steps.map((s) => s.id));
   const edges = (Array.isArray(src.edges) ? src.edges : []).filter((e) => e && ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(clean.edge);

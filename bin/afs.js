@@ -12,6 +12,7 @@ Uso:
   afs status <flujo> <runId>                 Estado/salidas de una ejecución
   afs cancel <flujo> <runId>                 Cancela una ejecución en curso
   afs ui [--print]                           Abre la interfaz con su clave (o solo imprime el enlace)
+  afs token <flujo> [--rotate]               Muestra (o regenera) el token de ese flujo: solo abre ese flujo
   afs export <flujo> [-o archivo] [--chats] [--runs] [--no-memory]   Exporta a <nombre>.afsflow.json
   afs import <archivo.afsflow.json>          Importa un flujo (si trae comandos queda en revisión)
   afs resume <flujo> <runId> [opciones]      Decide en un break: --action continue|edit|retry|skip|stop
@@ -65,6 +66,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--feedback') opts.feedback = argv[++i];
   else if (a === '--no-wait') opts.noWait = true;
   else if (a === '--json') opts.json = true;
+  else if (a === '--rotate') opts.rotate = true;
   else if (a === '--timeout') opts.timeout = Number(argv[++i]);
   else pos.push(a);
 }
@@ -144,6 +146,17 @@ async function main() {
     if (opts.json) console.log(JSON.stringify(r, null, 2));
     else { console.log(`${r.status}`); for (const s of r.steps) console.log(`${ICON[s.status] || '·'} ${s.step}${s.code ? ` (${s.code})` : ''}`); if (r.result) console.log('\n' + r.result); }
     return r.status === 'running' ? 0 : exitOf(r);
+  }
+  if (cmd === 'token') {
+    if (!pos[0]) { err('Uso: afs token <flujo> [--rotate]'); return 2; }
+    const flows = await callUi('GET', '/api/flows');
+    const f = flows.find((x) => x.id === pos[0]) || flows.find((x) => x.name.toLowerCase() === pos[0].toLowerCase());
+    if (!f) { err(`Flujo no encontrado: ${pos[0]}`); return 2; }
+    let t;
+    if (opts.rotate) t = (await callUi('POST', `/api/flows/${f.id}/token`, {})).token;
+    else { const m = await callUi('GET', `/api/flows/${f.id}/token?reveal=1`); t = m.exists ? m.token : (await callUi('POST', `/api/flows/${f.id}/token`, {})).token; }
+    console.log(t);
+    return 0;
   }
   if (cmd === 'export') {
     if (!pos[0]) { err('Uso: afs export <flujo> [-o archivo] [--chats] [--runs] [--no-memory]'); return 2; }

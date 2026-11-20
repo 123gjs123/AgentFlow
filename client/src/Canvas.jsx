@@ -4,7 +4,7 @@ import dagre from '@dagrejs/dagre';
 
 export const NODE_W = 240;
 export const NODE_H = 96;
-const KIND = { role: ['Rol', '🎭'], agent: ['Agente', '🤖'], skill: ['Skill', '🧩'], command: ['Comando', '⌨️'] };
+const KIND = { role: ['Rol', '🎭'], agent: ['Agente', '🤖'], skill: ['Skill', '🧩'], command: ['Comando', '⌨️'], flow: ['Flujo', '🔀'] };
 
 /** Auto-order: left→right layered layout from the manual relations. */
 export function autoLayout(steps, edges) {
@@ -61,7 +61,7 @@ function StepNode({ data, selected }) {
   const status = live?.status || step.lastRun?.status || 'idle';
   const notRouted = status === 'skipped' && (live?.skipReason || step.lastRun?.skipReason) === 'not_routed';
   const [label, icon] = KIND[step.kind] || ['?', '•'];
-  const ref = step.kind === 'agent' ? step.agentRef : step.kind === 'skill' ? step.skillRef : step.kind === 'command' ? step.command : step.model;
+  const ref = step.kind === 'agent' ? step.agentRef : step.kind === 'skill' ? step.skillRef : step.kind === 'command' ? step.command : step.kind === 'flow' ? data.flowName || step.flowRef || 'sin elegir' : step.model;
   return (
     <div className={`node st-${status} ${notRouted ? 'not-routed' : ''} ${step.breakpoint ? 'has-break' : ''} ${selected ? 'sel' : ''}`}>
       <Handles />

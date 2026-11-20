@@ -14,6 +14,7 @@ import * as store from './store.js';
 import * as engine from './engine.js';
 import { listAgents, listSkills } from './catalog.js';
 import * as SK from './skills.js';
+import * as TOK from './tokens.js';
 import { lastInit, lastRateLimit, probeInit, claudeBin } from './claude.js';
 import { previewStep, definitionFile } from './context.js';
 import * as integ from './integrations.js';
@@ -52,7 +53,7 @@ const isLoopback = (ip = '') => ip === '127.0.0.1' || ip === '::1' || ip === '::
 const okHost = (h = '') => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(h);
 // A tunnel/reverse proxy (ngrok, cloudflared, nginx…) connects from loopback and may rewrite Host to localhost:
 // any forwarding header means the request really comes from elsewhere -> never treat it as local.
-const PROXY_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'forwarded', 'x-real-ip', 'cf-connecting-ip', 'true-client-ip', 'x-original-host', 'ngrok-trace-id'];
+const PROXY_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-server', 'x-forwarded', 'forwarded', 'via', 'x-real-ip', 'x-client-ip', 'x-cluster-client-ip', 'cf-connecting-ip', 'true-client-ip', 'x-original-host', 'ngrok-trace-id'];
 const proxied = (headers = {}) => PROXY_HEADERS.some((h) => headers[h] !== undefined);
 const isLocalReq = (req) => isLoopback(req.socket.remoteAddress) && okHost(req.headers.host) && !proxied(req.headers);
 
@@ -76,15 +77,31 @@ ext.use((req, res, next) => {
   res.on('finish', () => integ.logInbound({
     at, method: req.method, path: req.path.slice(0, 200), source: String(req.body?.source || req.query.source || '').slice(0, 20) || null,
     status: res.statusCode, code: res.locals.code || null, remoteIp: req.socket.remoteAddress, forwardedFor: req.get('x-forwarded-for') || null,
-    userAgent: (req.get('user-agent') || '').slice(0, 120), runId: res.locals.runId || null, dryRun: !!res.locals.dryRun,
+    userAgent: (req.get('user-agent') || '').slice(0, 120), runId: res.locals.runId || null, dryRun: !!res.locals.dryRun, scope: res.locals.scope || null,
   }));
   next();
 });
+// spec 11: the admin token (config.json, every flow, can be disabled) or a flow token (that flow only)
+const digest = (s) => crypto.createHash('sha256').update(String(s)).digest();
 ext.use((req, res, next) => {
-  const auth = req.get('authorization')?.replace(/^Bearer\s+/i, '') || req.get('x-afs-token') || req.query.token;
-  const token = store.getConfig().token;
-  const a = Buffer.from(String(auth || '')); const b = Buffer.from(token);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'Token inválido o ausente. Usa Authorization: Bearer <token> (lo ves en Ayuda → Invocar desde fuera).', code: 'UNAUTHORIZED' });
+  const auth = String(req.get('authorization')?.replace(/^Bearer\s+/i, '') || req.get('x-afs-token') || req.query.token || '');
+  const cfg = store.getConfig();
+  if (auth && crypto.timingSafeEqual(digest(auth), digest(cfg.token))) {
+    if (cfg.adminDisabled) { res.locals.code = 'ADMIN_DISABLED'; return res.status(401).json({ error: 'El token de administración está desactivado. Usa el token del flujo (pestaña 🔌 Invocar de un step) o reactívalo en Ayuda → Invocar desde fuera.', code: 'ADMIN_DISABLED' }); }
+    req.scope = { admin: true }; res.locals.scope = 'admin'; return next();
+  }
+  const flowId = auth ? TOK.resolve(auth) : null;
+  if (flowId && store.getFlow(flowId)) { req.scope = { flowId }; res.locals.scope = flowId; return next(); }
+  return res.status(401).json({ error: 'Token inválido o ausente. Usa Authorization: Bearer <token> (el del flujo: pestaña 🔌 Invocar de un step).', code: 'UNAUTHORIZED' });
+});
+// every /flows/:flow/* route goes through here: a flow token opens its own flow only (an unknown one is 403 too: no enumeration)
+ext.param('flow', (req, res, next, ref) => {
+  const f = store.findFlow(ref);
+  if (req.scope?.flowId && f?.id !== req.scope.flowId) {
+    const mine = store.getFlow(req.scope.flowId);
+    res.locals.code = 'FLOW_FORBIDDEN';
+    return res.status(403).json({ error: `Este token es del flujo «${mine?.name || req.scope.flowId}» y no da acceso a otro flujo. Usa el token de ese flujo o el de administración.`, code: 'FLOW_FORBIDDEN' });
+  }
   next();
 });
 const extFlow = (x) => { const f = store.findFlow(x); if (!f) throw fail(404, `Flujo no encontrado: ${x}`, 'FLOW_NOT_FOUND'); return f; };
@@ -100,8 +117,8 @@ const inputOf = (body, stepped = false, stepInPath = false) => {
 const stableJson = (v) => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((key) => [key, x[key]])) : x));
 const truthy = (v) => v === true || v === 1 || /^(1|true|yes|si|sí)$/i.test(String(v ?? ''));
 
-ext.get('/ping', wrap(() => ({ ok: true, app: 'agent-flow-studio' })));
-ext.get('/flows', wrap(() => store.listFlows().map((f) => {
+ext.get('/ping', wrap((req) => ({ ok: true, app: 'agent-flow-studio', scope: req.scope?.admin ? 'admin' : 'flow', ...(req.scope?.flowId ? { flowId: req.scope.flowId } : {}) })));
+ext.get('/flows', wrap((req) => store.listFlows().filter((f) => !req.scope?.flowId || f.id === req.scope.flowId).map((f) => {
   const full = store.getFlow(f.id);
   return { id: f.id, name: f.name, description: full.description, vars: Object.keys(full.vars || {}), steps: store.ensureSlugs(structuredClone(full)).steps.map((s) => ({ id: s.id, slug: s.slug, name: s.name, kind: s.kind })) };
 })));
@@ -197,7 +214,10 @@ const extRunRoute = (stepInPath) => wrap(asText(async (req, res) => {
   if (problem) throw fail(problem.status, problem.error, problem.code);
   { const blocked = await gate(flow, res, runSet); if (blocked) return blocked; }
   const trigger = String(body.source || req.query.source || 'api').slice(0, 20);
-  const runId = engine.startRun(flow.id, { input, only, from, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null, breakpoints: truthy(body.breakpoints) });
+  const chain = String(req.get('x-afs-call-chain') || '').split(',').map((x) => x.trim()).filter((x) => /^f_[\w-]{1,60}$/.test(x)).slice(0, 10);
+  if (chain.includes(flow.id)) throw fail(409, `Llamada circular entre flujos: ${[...chain, flow.id].map((id) => store.getFlow(id)?.name || id).join(' → ')}`, 'FLOW_RECURSION');
+  if (chain.length >= engine.MAX_FLOW_CHAIN) throw fail(409, `Cadena de flujos demasiado larga (máximo ${engine.MAX_FLOW_CHAIN})`, 'FLOW_CHAIN_TOO_DEEP');
+  const runId = engine.startRun(flow.id, { input, only, from, trigger, vars: body.vars || null, usePins: truthy(body.usePins), deadlineSec: body.deadlineSec, idempotencyKey: key || null, breakpoints: truthy(body.breakpoints), ...(chain.length ? { callChain: [...chain, flow.id] } : {}) });
   if (key) store.setIdem(`${flow.id}:${key}`, { runId, bodyHash, flowId: flow.id });
   res.locals.runId = runId;
   return respond(runId);
@@ -247,6 +267,7 @@ ext.post('/flows/:flow/ask', wrap(async (req) => {
   if (body.step) {
     const s = flow.steps.find((x) => x.id === body.step || x.name.toLowerCase() === String(body.step).toLowerCase());
     if (!s) throw fail(404, `Step no encontrado: ${body.step}`);
+    if (s.kind === 'flow') throw fail(409, 'Un step 🔀 Flujo no tiene chat: pregúntale al flujo que invoca', 'FLOW_STEP_NO_CHAT');
     ans = await engine.stepChat(flow.id, s.id, message, { origin: 'api', external: true });
     return { answer: ans.text, routedTo: s.name, status: ans.status, remembered: ans.remembered, ...pendingOf(ans) };
   }
@@ -354,6 +375,15 @@ function cleanRequirements(list) {
 function cleanStepExtras(steps) {
   const seen = new Set();
   for (const s of steps) {
+    // spec 11: a step that calls another flow (by id), optionally one of its steps, with an input template
+    if (s.kind === 'flow') {
+      s.flowRef = typeof s.flowRef === 'string' && /^f_[\w-]{1,60}$/.test(s.flowRef) ? s.flowRef : '';
+      s.flowStep = typeof s.flowStep === 'string' ? s.flowStep.slice(0, 120) : '';
+      s.flowScope = s.flowScope === 'from' ? 'from' : 'only';
+      s.waitResult = s.waitResult !== false;
+      s.flowInput = typeof s.flowInput === 'string' ? s.flowInput.slice(0, 20000) : '';
+      if (s.flowVars && typeof s.flowVars === 'object' && !Array.isArray(s.flowVars)) s.flowVars = Object.fromEntries(Object.entries(s.flowVars).filter(([k, v]) => /^[\w-]{1,60}$/.test(k) && typeof v === 'string').slice(0, 50).map(([k, v]) => [k, v.slice(0, 4000)])); else Reflect.deleteProperty(s, 'flowVars');
+    } else for (const k of ['flowRef', 'flowStep', 'flowScope', 'waitResult', 'flowInput', 'flowVars']) if (k in s) Reflect.deleteProperty(s, k);
     if ('watches' in s) {
       const w = W.cleanWatches(s.watches);
       if (w?.length) { for (const x of w) { if (seen.has(x.id)) x.id = `w_${crypto.randomBytes(4).toString('hex')}`; seen.add(x.id); } s.watches = w; } else Reflect.deleteProperty(s, 'watches');
@@ -453,6 +483,7 @@ app.put('/api/flows/:id', wrap((req, res) => {
   if (body.edges !== undefined && !Array.isArray(body.edges)) throw fail(400, '"edges" debe ser una lista', 'BAD_REQUEST');
   if (body.vars !== undefined && (typeof body.vars !== 'object' || body.vars === null || Array.isArray(body.vars))) throw fail(400, '"vars" debe ser un objeto', 'BAD_VARS');
   for (const k of ['name', 'description', 'cwd']) if (body[k] !== undefined && body[k] !== null && typeof body[k] !== 'string') throw fail(400, `"${k}" debe ser texto`, 'BAD_REQUEST');
+  if (body.workspace !== undefined && body.workspace !== null && !['own', 'home'].includes(body.workspace)) throw fail(400, '"workspace" debe ser "own" o "home"', 'BAD_REQUEST');
   const steps = (body.steps || []).filter((s) => s && typeof s === 'object' && typeof s.id === 'string').map((s) => ({ ...s, contextSources: cleanSources(s.contextSources) })).map((s) => {
     const prev = byId.get(s.id);
     return prev ? { ...s, memory: prev.memory, lastRun: prev.lastRun, pinned: prev.pinned, chatSessionId: prev.chatSessionId, chatContextHash: prev.chatContextHash } : store.newStep({ ...s, pinned: undefined });
@@ -470,7 +501,9 @@ app.put('/api/flows/:id', wrap((req, res) => {
   const ids = new Set(steps.map((s) => s.id));
   for (const s of cur.steps) if (!ids.has(s.id)) store.clearChat(cur.id, s.id); // no orphaned step chats
   const edges = (body.edges || []).filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target).map(cleanEdge);
-  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, requirements: cleanRequirements(body.requirements) ?? cur.requirements, policies: POL.cleanPolicies(body.policies, 'flow') ?? cur.policies, watchPolling: W.cleanPolling(body.watchPolling) ?? cur.watchPolling, steps, edges };
+  const next = { ...cur, name: body.name ?? cur.name, description: body.description ?? cur.description, cwd: body.cwd ?? cur.cwd, vars: body.vars ?? cur.vars, schedule: body.schedule ?? cur.schedule, runTimeoutSec: body.runTimeoutSec ?? cur.runTimeoutSec, contextSources: cleanSources(body.contextSources) ?? cur.contextSources, finally: cleanFinally(body.finally) ?? cur.finally, requirements: cleanRequirements(body.requirements) ?? cur.requirements, policies: POL.cleanPolicies(body.policies, 'flow') ?? cur.policies, watchPolling: W.cleanPolling(body.watchPolling) ?? cur.watchPolling, ...(body.workspace ? { workspace: body.workspace } : cur.workspace ? { workspace: cur.workspace } : {}), steps, edges };
+  // spec 11: Claude keeps its sessions per working folder: a new folder starts new conversations
+  if (store.flowCwdPath(next) !== store.flowCwdPath(cur)) { delete next.globalSessionId; delete next.globalContextHash; for (const s of next.steps) { delete s.chatSessionId; delete s.chatContextHash; } }
   engine.topoLevels(next); // throws on cycles
   next.rev = (cur.rev || 0) + 1;
   delete next.baseRev;
@@ -484,6 +517,24 @@ app.put('/api/flows/:id', wrap((req, res) => {
   return saved;
 }));
 // What is left in a flow besides its steps (shown when the canvas is empty, cleared by /reset).
+/** spec 11 ISO-9: calls between flows (🔀 Flujo steps and invokeFlow('…') literals in hooks). */
+function callsOf(flow) {
+  const all = store.listFlows();
+  const byName = (n) => all.filter((x) => String(x.name).trim().toLowerCase() === String(n).trim().toLowerCase());
+  const out = [];
+  for (const s of flow.steps || []) {
+    if (s.kind === 'flow') { const t = s.flowRef ? store.getFlow(s.flowRef) : null; out.push({ flowId: s.flowRef || null, name: t?.name || null, stepId: s.id, stepName: s.name, via: 'step', broken: !t }); }
+    for (const m of String(s.hooks || '').matchAll(/invokeFlow\(\s*(['"`])([^'"`]{1,200})\1/g)) { const t = store.getFlow(m[2]) || (byName(m[2]).length === 1 ? store.getFlow(byName(m[2])[0].id) : null); out.push({ flowId: t?.id || null, name: t?.name || m[2], stepId: s.id, stepName: s.name, via: 'hook', broken: !t }); }
+  }
+  return out;
+}
+app.get('/api/flows/:id/calls', wrap((req) => {
+  const flow = need(req.params.id);
+  const calledBy = [];
+  for (const f of store.listFlows()) { if (f.id === flow.id) continue; const full = store.getFlow(f.id); for (const c of callsOf(full || { steps: [] })) if (c.flowId === flow.id) calledBy.push({ flowId: f.id, name: f.name, stepId: c.stepId, stepName: c.stepName, via: c.via }); }
+  return { calls: callsOf(flow), calledBy };
+}));
+app.get('/api/flows/:id/workspace', wrap((req) => store.workspaceInfo(need(req.params.id))));
 app.get('/api/flows/:id/leftovers', wrap((req) => {
   const f = need(req.params.id);
   return { description: !!f.description?.trim(), vars: Object.keys(f.vars || {}).length, memory: (f.memory || []).length, chats: store.countChats(f.id), runs: store.countRuns(f.id), schedule: !!f.schedule?.enabled };
@@ -508,7 +559,7 @@ app.post('/api/flows/:id/reset', wrap((req) => {
   engine.syncSchedule(f); W.syncPolling(f);
   return f;
 }));
-app.delete('/api/flows/:id', wrap((req) => { engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); W.clearPolling(req.params.id); store.deleteFlow(req.params.id); SK.removeFlowSkills(req.params.id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: req.params.id }); engine.bus.emit('msg', { type: 'flows.changed' }); }));
+app.delete('/api/flows/:id', wrap((req) => { need(req.params.id); engine.stopRuns(req.params.id); engine.clearSchedule(req.params.id); W.clearPolling(req.params.id); store.deleteFlow(req.params.id); SK.removeFlowSkills(req.params.id); TOK.revoke(req.params.id); engine.bus.emit('msg', { type: 'flow.deleted', flowId: req.params.id }); engine.bus.emit('msg', { type: 'flows.changed' }); }));
 
 // ----- runs -----
 // UI runs honour breaks unless {breakpoints:false}.
@@ -596,6 +647,7 @@ app.post('/api/flows/:id/chat/:key', wrap((req) => {
   { const qp = quarantineProblem(store.getFlow(id)); if (qp) throw fail(qp.status, qp.error, qp.code); }
   // Spec 25 (C9): while the flow runs it follows its process; a human talks to a step only when stopped or in a break.
   { const ip = engine.interactionProblem(id, key); if (ip?.status) throw fail(ip.status, ip.error, ip.code); }
+  if (key !== '_global' && store.getFlow(id).steps.find((s) => s.id === key)?.kind === 'flow') throw fail(409, 'Un step 🔀 Flujo no tiene chat: abre el flujo que invoca para conversar con sus steps', 'FLOW_STEP_NO_CHAT');
   const p = key === '_global' ? engine.globalChat(id, message) : engine.stepChat(id, key, message, { improve: !!req.body?.improve, runId: typeof req.body?.runId === 'string' ? req.body.runId : null });
   p.catch((e) => console.error('chat error', e));
   return { accepted: true };
@@ -697,7 +749,7 @@ app.post('/api/context/check', wrap(async (req) => {
 /** Folder browser for choosing paths (this machine only, behind the UI key). */
 app.get('/api/fs/list', wrap((req) => {
   const flow = req.query.flow ? store.getFlow(String(req.query.flow)) : null;
-  let p = String(req.query.path || '').trim() || (flow?.cwd && fs.existsSync(flow.cwd) ? flow.cwd : os.homedir());
+  let p = String(req.query.path || '').trim() || (flow ? store.flowCwd(flow) : os.homedir());
   p = path.resolve(p);
   let st; try { st = fs.statSync(p); } catch { throw fail(404, `No existe: ${p}`, 'PATH_NOT_FOUND'); }
   if (!st.isDirectory()) p = path.dirname(p);
@@ -925,7 +977,13 @@ app.put('/api/info/public-url', wrap((req) => {
   for (const f of store.listFlows()) scheduleInvokeDoc(f.id); // the remote base of every INVOKE.md changed
   return out;
 }));
+// spec 11 ISO-4/10: the token of one flow (UI key only)
+app.get('/api/flows/:id/token', wrap((req) => TOK.meta(need(req.params.id).id, { reveal: req.query.reveal === '1' })));
+app.post('/api/flows/:id/token', wrap((req) => ({ token: TOK.issue(need(req.params.id).id), ...TOK.meta(req.params.id) })));
+app.delete('/api/flows/:id/token', wrap((req) => { TOK.revoke(need(req.params.id).id); return { exists: false }; }));
+app.put('/api/info/admin-token', wrap((req) => { if (typeof req.body?.enabled !== 'boolean') throw fail(400, '"enabled" debe ser true o false', 'BAD_REQUEST'); store.setConfig({ adminDisabled: !req.body.enabled }); return { adminEnabled: req.body.enabled }; }));
 app.get('/api/info', wrap(() => ({
+  adminEnabled: !store.getConfig().adminDisabled,
   token: store.getConfig().token, port: PORT, host: HOST, root: ROOT, publicUrl: store.getConfig().publicUrl || null,
   cli: path.join(ROOT, 'bin', 'afs.js'), mcp: path.join(ROOT, 'bin', 'mcp.js'), node: process.execPath,
 })));
@@ -985,6 +1043,8 @@ server.listen(PORT, HOST, () => {
     // a run started by news has the guards of an external run (its input comes from outside)
     runGuard: async (flow, only) => { const p = engine.externalRunProblem(flow, { only }); if (p) return p.error; const g = await gate(flow, { status() {} }, only); return g?.error || null; },
   });
+  // spec 11: a flow called by another passes the same checks as an external run (its input comes from outside)
+  engine.setChildGuard(async (flow, only) => { const g = await gate(flow, { status() {} }, only); return g?.error || null; });
   setOnChecked((flowId) => engine.bus.emit('msg', { type: 'preflight.checked', flowId }));
   notify.init({ getBaseUrl: () => `http://${HOST === '0.0.0.0' ? '127.0.0.1' : HOST}:${PORT}` });
   notify.bootSummary(recovered);

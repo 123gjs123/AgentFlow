@@ -88,6 +88,77 @@ export function Memory({ flowId, scope, items = [] }) {
   );
 }
 
+/** spec 11 ISO-3: the effective working folder and, without a custom one, the "own folder" choice. */
+/** spec 11 ISO-6: a step that runs another flow (only the input crosses; its result is this step's output). */
+function FlowStepEditor({ flow, step, onChange }) {
+  const [flows, setFlows] = useState([]);
+  const [target, setTarget] = useState(null);
+  useEffect(() => { api.get('/api/flows').then((l) => setFlows(l.filter((x) => x.id !== flow.id))).catch(() => {}); }, [flow.id]);
+  useEffect(() => { if (step.flowRef) api.get(`/api/flows/${step.flowRef}`).then(setTarget).catch(() => setTarget(null)); else setTarget(null); }, [step.flowRef]);
+  return (
+    <div className="ctx-block" data-testid="flow-step">
+      <div className="ctx-title">🔀 Invoca otro flujo</div>
+      <p className="muted small">Solo pasa el input: el otro flujo corre con sus variables, su memoria y su carpeta. Su resultado es la salida de este step. Llamadas circulares o de más de 5 niveles fallan.</p>
+      <Field label="Flujo">
+        <select data-testid="flow-step-ref" value={step.flowRef || ''} onChange={(e) => onChange({ flowRef: e.target.value, flowStep: '' })}>
+          <option value="">— elegir —</option>
+          {flows.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+        </select>
+        {step.flowRef && !target && <div className="warn-text small">Ese flujo ya no existe: elige otro.</div>}
+      </Field>
+      {target && (
+        <Field label="Step" hint="vacío = el flujo entero">
+          <div className="row">
+            <select data-testid="flow-step-step" value={step.flowStep || ''} onChange={(e) => onChange({ flowStep: e.target.value })}>
+              <option value="">— el flujo entero —</option>
+              {target.steps.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            {step.flowStep && <div className="seg small"><button className={step.flowScope !== 'from' ? 'active' : ''} onClick={() => onChange({ flowScope: 'only' })}>solo ese</button><button className={step.flowScope === 'from' ? 'active' : ''} onClick={() => onChange({ flowScope: 'from' })}>ese y los que siguen</button></div>}
+          </div>
+        </Field>
+      )}
+      <Field label="Input que le pasa" hint="vacío = la salida de los steps anteriores (o el input del flujo). Admite {{input}}, {{vars.x}}, {{steps.X.output}}">
+        <TplField flow={flow} step={step} rows={3} value={step.flowInput || ''} onChange={(v) => onChange({ flowInput: v })} placeholder="{{steps.Preparar.output}}" />
+      </Field>
+      <label className="toggle small"><input type="checkbox" data-testid="flow-step-wait" checked={step.waitResult !== false} onChange={(e) => onChange({ waitResult: e.target.checked })} /> Esperar su resultado <span className="muted">(si no, lo lanza y sigue: la salida es el id de esa ejecución; detener este flujo no lo detiene)</span></label>
+      {target && <div className="small"><a href={`/?flow=${target.id}`}>Abrir «{target.name}» →</a></div>}
+    </div>
+  );
+}
+
+/** spec 11 ISO-9: which flows this one calls and which call it. */
+function FlowCalls({ flow }) {
+  const [c, setC] = useState(null);
+  useEffect(() => { api.get(`/api/flows/${flow.id}/calls`).then(setC).catch(() => setC(null)); }, [flow.id, flow.rev]);
+  if (!c || (!c.calls.length && !c.calledBy.length)) return null;
+  const link = (x) => (x.flowId ? <a href={`/?flow=${x.flowId}`}>{x.name || x.flowId}</a> : <span className="warn-text">{x.name || '(sin elegir)'}</span>);
+  return (
+    <div className="ctx-block" data-testid="flow-calls">
+      <div className="ctx-title">🔀 Llamadas entre flujos</div>
+      {c.calls.length > 0 && <div className="small">Invoca: {c.calls.map((x, i) => <span key={i}>{i ? ' · ' : ''}{link(x)} <span className="muted">(desde «{x.stepName}»{x.via === 'hook' ? ', hook' : ''})</span>{x.broken ? <span className="warn-text"> ⚠ no existe</span> : null}</span>)}</div>}
+      {c.calledBy.length > 0 && <div className="small">La invocan: {c.calledBy.map((x, i) => <span key={i}>{i ? ' · ' : ''}{link(x)} <span className="muted">(«{x.stepName}»)</span></span>)}</div>}
+    </div>
+  );
+}
+
+function WorkspaceInfo({ flow, onChange }) {
+  const [ws, setWs] = useState(null);
+  useEffect(() => { api.get(`/api/flows/${flow.id}/workspace`).then(setWs).catch(() => setWs(null)); }, [flow.id, flow.cwd, flow.workspace]);
+  if (!ws) return null;
+  const writes = flow.steps.some((s) => s.kind === 'command' || /(^|\s)(Edit|Write|Bash)/.test(s.allowedTools || '') || s.permissionMode === 'acceptEdits');
+  return (
+    <div className="small" data-testid="flow-workspace">
+      <div className="muted">Trabaja en: <code>{ws.path}</code>{ws.mode === 'own' ? ' (carpeta propia del flujo)' : ws.mode === 'home' ? ' (tu carpeta de usuario)' : ''}</div>
+      {!flow.cwd && (
+        <label className="toggle"><input type="checkbox" data-testid="flow-own-folder" checked={ws.mode === 'own'} onChange={(e) => onChange({ workspace: e.target.checked ? 'own' : 'home' })} /> Usar una carpeta propia para este flujo (recomendado)
+          <span className="muted"> — las sesiones de Claude y lo que escriban los comandos no se mezclan con otros flujos ni con tu carpeta de usuario. Cambiarla empieza conversaciones nuevas.</span></label>
+      )}
+      {!flow.cwd && ws.mode === 'home' && writes && <div className="warn-text">⚠ Los steps que editan o ejecutan comandos trabajarán en tu carpeta de usuario.</div>}
+      <div className="muted">Las herramientas de archivos de Claude las limitan los permisos de cada step, no esta carpeta.</div>
+    </div>
+  );
+}
+
 function Field({ label, hint, children, div }) {
   const Tag = div ? 'div' : 'label';
   return <Tag className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</Tag>;
@@ -129,12 +200,12 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
         <div className="panel-body pad">
           <Field label="Tipo">
             <div className="seg">
-              {[['role', '🎭 Rol'], ['agent', '🤖 Agente'], ['skill', '🧩 Skill'], ['command', '⌨️ Comando']].map(([k, l]) => (
+              {[['role', '🎭 Rol'], ['agent', '🤖 Agente'], ['skill', '🧩 Skill'], ['command', '⌨️ Comando'], ['flow', '🔀 Flujo']].map(([k, l]) => (
                 <button key={k} className={step.kind === k ? 'active' : ''} onClick={() => onChange({ kind: k })}>{l}</button>
               ))}
             </div>
           </Field>
-          {step.kind !== 'command' && (
+          {step.kind !== 'command' && step.kind !== 'flow' && (
             <label className="toggle" data-testid="coordinator-toggle" title="El coordinador atiende el chat general: responde, consulta al step que corresponda o propone ejecutar. Hay uno por flujo.">
               <input type="checkbox" checked={!!step.coordinator} onChange={(e) => onChange({ coordinator: e.target.checked || undefined })} /> 🧭 Coordinador del flujo <span className="muted small">(atiende el chat general y decide qué step responde{flow.steps.some((x) => x.coordinator && x.id !== step.id) ? `; hoy lo es «${flow.steps.find((x) => x.coordinator && x.id !== step.id).name}» y dejará de serlo` : ''})</span>
             </label>
@@ -170,7 +241,8 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
               <SkillPicker flow={flow} catalog={catalog} value={step.skillRef} onChange={(v) => onChange({ skillRef: v })} />
             </Field>
           )}
-          {step.kind === 'command' ? (
+          {step.kind === 'flow' && <FlowStepEditor flow={flow} step={step} onChange={onChange} />}
+          {step.kind === 'flow' ? null : step.kind === 'command' ? (
             <>
               <Field div label="Comando" hint="stdin = salida de los steps anteriores ($env:STEP_UPSTREAM, JSON en $env:STEP_UPSTREAM_JSON); input del flujo en $env:FLOW_INPUT">
                 <TplField flow={flow} step={step} command className="mono" rows={4} value={step.command} onChange={(v) => onChange({ command: v })} placeholder="npx playwright test --grep @sanity" />
@@ -315,12 +387,13 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
             <div className="ctx-title">📎 Contexto del flujo{(flow.contextSources || []).length ? ` (${flow.contextSources.length})` : ''} <span className="muted small">— lo pueden consultar todos los steps</span></div>
             <ContextSources flow={flow} scope="flow" value={flow.contextSources} onChange={(v) => onChange({ contextSources: v })} />
           </div>
-          <Field label="Directorio de trabajo" hint="dónde trabajan Claude y los comandos (repo, proyecto). Si no existe, la ejecución no arranca">
+          <FlowCalls flow={flow} />
+          <Field label="Directorio de trabajo" hint="dónde trabajan Claude y los comandos (repo, proyecto). Vacío = la carpeta propia del flujo. Si no existe, la ejecución no arranca">
             <div className="row">
               <input className="mono" style={{ flex: 1 }} value={flow.cwd || ''} onChange={set('cwd')} placeholder="C:\Users\...\mi-repo" />
               <button className="small" onClick={() => setCwdPicker(true)}>Explorar…</button>
             </div>
-            {!flow.cwd && flow.steps.some((s) => s.kind === 'command' || /(^|\s)(Edit|Write|Bash)/.test(s.allowedTools || '') || s.permissionMode === 'acceptEdits') && <div className="warn-text small">⚠ Sin directorio: los steps que editan o ejecutan comandos trabajarán en tu carpeta de usuario.</div>}
+            <WorkspaceInfo flow={flow} onChange={onChange} />
             {cwdPicker && <FsPicker flow={flow} want="folder" start={flow.cwd} onClose={() => setCwdPicker(false)} onPick={(p) => { onChange({ cwd: p }); setCwdPicker(false); }} />}
           </Field>
           <div className="ctx-block" data-testid="flow-finally">
@@ -401,7 +474,7 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
                 <li key={r.id} onClick={() => api.get(`/api/flows/${flow.id}/runs/${r.id}`).then(setRunDetail)}>
                   <span className={`status s-${r.status}`}>{r.status}</span>
                   <span>{new Date(r.startedAt).toLocaleString()}</span>
-                  <span className="chip">{r.trigger === 'rehearsal' ? '🧪 ensayo' : r.trigger}{r.only ? ' · 1 step' : r.from ? ` · desde ${flow.steps.find((s) => s.id === r.from)?.name || r.from}` : ''}</span>
+                  <span className="chip">{r.rehearsal || r.trigger === 'rehearsal' ? `🧪 ensayo${r.trigger?.startsWith('flow:') ? ' (llamado por otro flujo)' : ''}` : r.trigger}{r.only ? ' · 1 step' : r.from ? ` · desde ${flow.steps.find((s) => s.id === r.from)?.name || r.from}` : ''}</span>
                   <span className="muted small grow">{r.input}</span>
                   {r.totals && <span className="muted small">{Math.round((r.totals.durationMs || 0) / 1000)} s{r.totals.costUsd ? ` · ≈US$${r.totals.costUsd.toFixed(3)}` : ''}</span>}
                   {r.status === 'running' && <button className="danger small" onClick={(e) => { e.stopPropagation(); api.post(`/api/flows/${flow.id}/runs/${r.id}/cancel`).then(() => api.get(`/api/flows/${flow.id}/runs`).then(setRuns)).catch(() => {}); }}>■ Cancelar</button>}

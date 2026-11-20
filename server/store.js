@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -102,11 +103,39 @@ export function findStep(flow, ref, { slugWins = false } = {}) {
 export function getConfig() {
   const f = path.join(dir(), 'config.json');
   let c = readJsonStrict(f, null); // a locked or corrupt file must not rotate the token everyone uses
-  if (!c?.token || !c?.uiKey) {
-    c = { ...(c || {}), token: c?.token || crypto.randomBytes(24).toString('base64url'), uiKey: c?.uiKey || crypto.randomBytes(24).toString('base64url') };
+  if (!c?.token || !c?.uiKey || !c?.isolationSince) {
+    // isolationSince (spec 11): flows created before it keep working in the user's folder until the person opts in
+    c = { ...(c || {}), token: c?.token || crypto.randomBytes(24).toString('base64url'), uiKey: c?.uiKey || crypto.randomBytes(24).toString('base64url'), isolationSince: c?.isolationSince || Date.now() };
     writeJson(f, c);
   }
   return c;
+}
+
+// ---------- spec 11 ISO-3: each flow works in its own folder ----------
+/** The flow's own working folder (not created here). Spec 09 moves it next to the flow; this is the only place to change. */
+export const WORKSPACES = () => process.env.AFS_WORKSPACES || path.join(os.homedir(), '.agent-flow-studio', 'workspaces');
+export const flowWorkspace = (flowId) => path.join(WORKSPACES(), safe(flowId));
+/** 'own' (its folder) or 'home' (the user's folder): an explicit choice, else by age (flows from before isolation: home). */
+export function workspaceMode(flow) {
+  if (flow?.workspace === 'own' || flow?.workspace === 'home') return flow.workspace;
+  const since = getConfig().isolationSince || 0;
+  return !flow?.createdAt || flow.createdAt < since ? 'home' : 'own';
+}
+/** The path flowCwd would use, without creating anything (comparisons, previews). */
+export function flowCwdPath(flow) {
+  if (flow?.cwd && fs.existsSync(flow.cwd)) return flow.cwd;
+  return !flow?.id || workspaceMode(flow) === 'home' ? os.homedir() : flowWorkspace(flow.id);
+}
+/** Where Claude and the commands of a flow work: its custom cwd, else its own folder (created lazily), else home. */
+export function flowCwd(flow) {
+  if (flow?.cwd && fs.existsSync(flow.cwd)) return flow.cwd;
+  if (!flow?.id || workspaceMode(flow) === 'home') return os.homedir();
+  const d = flowWorkspace(flow.id); fs.mkdirSync(d, { recursive: true }); return d;
+}
+export function workspaceInfo(flow) {
+  const mode = flow.cwd ? 'custom' : workspaceMode(flow);
+  const p = flow.cwd || (mode === 'home' ? os.homedir() : flowWorkspace(flow.id));
+  return { mode, path: p, legacy: !flow.createdAt || flow.createdAt < (getConfig().isolationSince || 0), exists: fs.existsSync(p), workspace: flowWorkspace(flow.id) };
 }
 export function setConfig(patch) {
   const c = { ...getConfig(), ...patch };
@@ -139,6 +168,9 @@ export function deleteFlow(id) {
   fs.rmSync(path.join(DATA, 'versions', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'reviews', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'watch', `${safe(id)}.json`), { force: true });
+  // its own folder: removed when empty, otherwise kept aside (it may hold work the person wants)
+  const ws = flowWorkspace(id);
+  try { if (fs.existsSync(ws)) { if (!fs.readdirSync(ws).length) fs.rmSync(ws, { recursive: true, force: true }); else { const to = path.join(WORKSPACES(), '_borrados', `${safe(id)}-${Date.now()}`); fs.mkdirSync(path.dirname(to), { recursive: true }); fs.renameSync(ws, to); } } } catch (e) { console.warn(`No se pudo apartar la carpeta del flujo borrado ${id} (${e.code || e.message}): queda en ${ws}`); }
   fs.rmSync(path.join(DATA, 'outputs', safe(id)), { recursive: true, force: true });
   fs.rmSync(path.join(DATA, 'actions', `${safe(id)}.json`), { force: true });
   fs.rmSync(path.join(DATA, 'approvals', `${safe(id)}.json`), { force: true });

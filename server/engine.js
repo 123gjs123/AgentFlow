@@ -12,6 +12,7 @@ import { quarantineProblem } from './bundle.js';
 import * as OUT from './outputs.js';
 import { resolveCredential } from './credentials.js';
 import { findAgent, findSkill } from './catalog.js';
+import { childEnv } from './safe.js';
 import { flowSkillDirs } from './skills.js';
 import * as P from './prompt.js';
 import { validate, parseSchema } from './schema.js';
@@ -47,7 +48,8 @@ const activeRuns = new Map(); // runId -> { controller, flowId }
 const activeChats = new Map(); // `${flowId}:${key}` -> controller
 
 const now = () => Date.now();
-const flowCwd = (flow) => (flow.cwd && fs.existsSync(flow.cwd) ? flow.cwd : os.homedir());
+const flowCwd = (flow) => store.flowCwd(flow); // spec 11: custom cwd, else the flow's own folder (or home for older flows)
+export { flowCwd };
 /** Spec 22 (B1): a configured working directory that does not exist is an error, never a silent fallback to home. */
 export function cwdProblem(flow) {
   if (flow.cwd && !fs.existsSync(flow.cwd)) return { status: 422, code: 'CWD_MISSING', error: `El directorio de trabajo del flujo no existe: ${flow.cwd}. Créalo o corrige "Directorio de trabajo" (los steps no se ejecutan en tu carpeta de usuario por error).` };
@@ -55,7 +57,7 @@ export function cwdProblem(flow) {
 }
 /** Steps that can change files or run commands. */
 export const stepWrites = (step) => step.kind === 'command' || /(^|[\s,])(Edit|Write|Bash|NotebookEdit)\b/.test(String(step.allowedTools || '')) || step.permissionMode === 'acceptEdits' || step.permissionMode === 'bypassPermissions';
-export const cwdWarning = (flow, step) => (!flow.cwd && stepWrites(step) ? `El flujo no tiene directorio de trabajo: este step puede editar o ejecutar comandos y lo hará en tu carpeta de usuario (${os.homedir()}). Define "Directorio de trabajo" en la pestaña Flujo.` : null);
+export const cwdWarning = (flow, step) => (!flow.cwd && store.workspaceMode(flow) === 'home' && stepWrites(step) ? `El flujo trabaja en tu carpeta de usuario (${os.homedir()}): este step puede editar o ejecutar comandos ahí. En la pestaña Flujo › Directorio de trabajo activa «Usar una carpeta propia para este flujo» o elige un directorio.` : null);
 
 // ---------- graph ----------
 export function topoLevels(flow) {
@@ -112,7 +114,7 @@ export function sh(cmd, { cwd, shell = 'powershell', input, env, signal, delayed
     else if (process.platform === 'win32') { file = 'powershell.exe'; args = ['-NoProfile', '-NonInteractive', '-Command', psWrap(cmd)]; }
     else { file = 'pwsh'; args = ['-NoProfile', '-NonInteractive', '-Command', cmd]; }
     const psEnv = file === 'powershell.exe' ? { AFS_PS_SCRIPT: cmd } : {};
-    const child = spawn(file, args, { cwd, env: { ...process.env, ...env, ...psEnv }, windowsHide: true, windowsVerbatimArguments: shell === 'cmd' });
+    const child = spawn(file, args, { cwd, env: childEnv({ ...env, ...psEnv }), windowsHide: true, windowsVerbatimArguments: shell === 'cmd' });
     if (child.pid) { try { onSpawn?.(child.pid); } catch {} }
     let stdout = '', stderr = ''; let settled = false; let grace = null;
     const settle = (r) => { if (settled) return; settled = true; clearTimeout(grace); try { onExit?.(child.pid); } catch {} resolve(r); };
@@ -171,6 +173,8 @@ function hookCtx({ flow, step, run, input, signal, log, upstream = [], data }) {
       const r = await executeStep(flow, s, inp ?? ctx.output ?? '', run, signal, [], { data, force: true, nested: `${s.id}~hook${run.nestedSeq}` });
       return r.output;
     },
+    // spec 11: an explicit call to another flow (by name or id); returns {runId, status, result, json}, throws on failure
+    invokeFlow: (ref, inp, o = {}) => invokeFlow(flow, run, signal, ref, inp ?? '', { ...o, byName: true, wait: o.wait !== false, stepKey: `${step.id}~hook` }, log),
     remember: (text) => addMemory(flow.id, step.id, text, 'hook'),
     setVar: (k, v) => { ctx.vars[k] = v; const fl = store.updateFlow(flow.id, (f) => { f.vars = { ...(f.vars || {}), [k]: v }; bumpRev(f); }); if (fl) flowChanged(fl); },
   };
@@ -486,7 +490,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     timer = setTimeout(() => { timedOut = true; log({ kind: 'timeout', text: `⏱ Tiempo agotado (${limitSec}s): se detiene el step.` }); stepCtl.abort(); }, limitSec * 1000);
   };
   const sig = stepCtl.signal;
-  const isAi = step.kind !== 'command';
+  const isAi = step.kind !== 'command' && step.kind !== 'flow'; // a 🔀 Flujo step calls another flow, not Claude
   let code = null;
   const usage = emptyUsage();
 
@@ -595,7 +599,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         log({ kind: 'tool_use', name: `shell:${step.shell}`, input: { cmd } });
         // stdin = output of previous steps (or the flow input for the first step)
         if (sig.aborted) break;
-        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...polEnv, ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name, ...(opts.item ? { AFS_ITEM: typeof opts.item.value === 'string' ? opts.item.value : JSON.stringify(opts.item.value), AFS_ITEM_INDEX: String(opts.item.index), AFS_ITEM_TOTAL: String(opts.item.total) } : {}) }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
+        const r = await sh(cmd, { cwd: flowCwd(flow), shell: step.shell, input: up || ctx.input, env: { ...polEnv, ...q.env, FLOW_INPUT: ctx.input || '', STEP_UPSTREAM: up, STEP_UPSTREAM_JSON: JSON.stringify(upJson), AFS_RUN_ID: run.id, AFS_STEP: step.name, AFS_CALL_CHAIN: (run.callChain?.length ? run.callChain : [run.flowId]).join(','), ...(opts.item ? { AFS_ITEM: typeof opts.item.value === 'string' ? opts.item.value : JSON.stringify(opts.item.value), AFS_ITEM_INDEX: String(opts.item.index), AFS_ITEM_TOTAL: String(opts.item.total) } : {}) }, signal: sig, delayed: q.values.length > 0, onSpawn: trackPid, onExit: untrackPid });
         r.stdout = hide(r.stdout); r.stderr = hide(r.stderr); // a credential printed by the command never reaches the output or the activity
         log({ kind: 'tool_result', content: (r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).slice(0, 20000), isError: r.code !== 0 });
         output = takeRoutes(r.stdout.trim());
@@ -615,6 +619,19 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
         json = c.json;
         if (c.error) { error = c.error; code = c.code; }
       }
+    } else if (step.kind === 'flow') {
+      // spec 11 ISO-6/7: only the input crosses; the called flow runs with its own vars, memory and folder
+      const up = upstream.map((u) => u.output || (u.json != null ? JSON.stringify(u.json, null, 2) : '')).filter(Boolean).join('\n\n');
+      const rnd = (tpl) => P.render(String(tpl), { flow, vars: flow.vars, input: ctx.input, upstream: up, data, ...rctx });
+      const inp = String(step.flowInput || '').trim() ? rnd(step.flowInput) : up || ctx.input || '';
+      const fvars = step.flowVars && typeof step.flowVars === 'object' && !Array.isArray(step.flowVars) ? Object.fromEntries(Object.entries(step.flowVars).map(([k, v]) => [k, rnd(v)])) : null;
+      addRefInputs();
+      rs.inputView = { kind: 'flow', flowRef: step.flowRef || null, step: step.flowStep || null, scope: step.flowScope || 'only', input: clipS(inp, 20000), upstream: upMeta };
+      startClock();
+      try {
+        const r = await invokeFlow(flow, run, sig, step.flowRef, inp, { step: step.flowStep || null, scope: step.flowScope, vars: fvars, wait: step.waitResult !== false, timeoutSec: step.timeoutSec, stepKey: opts.nested || step.id }, log);
+        output = String(r.result ?? ''); json = r.json; rs.childRun = { flowId: r.flowId, runId: r.runId, status: r.status };
+      } catch (e) { error = e.message; code = e.code || 'CHILD_FAILED'; if (e.childRun) rs.childRun = e.childRun; }
     } else {
       if ((step.input?.mode || 'full') === 'summary') {
         for (const u of upstream) {
@@ -962,7 +979,62 @@ const NOT_A_FAILURE = new Set(['hook', 'review', 'not_routed', 'rehearsal', 'emp
  * arrows are all inactive is skipped as 'not_routed' (not a failure) and its own arrows stay inactive.
  * The flow is snapshotted at start: edits made while it runs don't change this run (REL-4).
  */
-export function startRun(flowId, { input = '', only = null, from = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null, breakpoints = false, rehearsal = false } = {}) {
+// ---------------- spec 11 ISO-6/7/8: explicit calls to another flow ----------------
+let childGuard = async () => null;
+/** index.js gives the same checks as an external run (preflight, schemas, policies): a call is a run from outside. */
+export function setChildGuard(fn) { childGuard = fn; }
+export const MAX_FLOW_CHAIN = 5;
+const flowErr = (code, msg, extra = {}) => Object.assign(new Error(msg), { code, ...extra });
+/**
+ * Runs another flow for a step (by id) or a hook (by name or id). Only the input crosses; the result comes back.
+ * The chain of calls travels with the runs: revisiting a flow or going deeper than 5 fails before starting anything.
+ */
+export async function invokeFlow(parentFlow, run, signal, ref, input, opts = {}, log = () => {}) {
+  if (!ref) throw flowErr('FLOW_REF_MISSING', 'No se indicó qué flujo invocar');
+  let child = store.getFlow(String(ref));
+  if (!child && opts.byName) {
+    const r = String(ref).trim().toLowerCase();
+    const m = store.listFlows().filter((f) => String(f.name).trim().toLowerCase() === r);
+    if (m.length > 1) throw flowErr('FLOW_AMBIGUOUS', `Hay ${m.length} flujos llamados «${ref}»: usa su id`);
+    child = m[0] ? store.getFlow(m[0].id) : null;
+  }
+  if (!child) throw flowErr('FLOW_REF_NOT_FOUND', `El flujo a invocar no existe: ${ref}`);
+  const chain = Array.isArray(run.callChain) && run.callChain.length ? run.callChain : [run.flowId];
+  const nameOf = (id) => store.getFlow(id)?.name || id;
+  if (chain.includes(child.id)) throw flowErr('FLOW_RECURSION', `Llamada circular entre flujos: ${[...chain, child.id].map(nameOf).join(' → ')}`);
+  if (chain.length >= MAX_FLOW_CHAIN) throw flowErr('FLOW_CHAIN_TOO_DEEP', `Cadena de flujos demasiado larga (máximo ${MAX_FLOW_CHAIN}): ${[...chain, child.id].map(nameOf).join(' → ')}`);
+  let only = null; let from = null;
+  if (opts.step) {
+    const r = store.findStep(child, String(opts.step));
+    if (!r.step) throw flowErr(r.code || 'STEP_NOT_FOUND', `«${child.name}»: ${r.error}`);
+    if (opts.scope === 'from') from = r.step.id; else only = r.step.id;
+  }
+  const vars = opts.vars && typeof opts.vars === 'object' ? opts.vars : null;
+  const p = externalRunProblem(child, { only, from, vars });
+  if (p) throw flowErr(p.code, `«${child.name}»: ${p.error}`);
+  const g = await childGuard(child, only || (from ? fromSetOf(child, from) : null));
+  if (g) throw flowErr('CHILD_PREFLIGHT_FAILED', `«${child.name}» no puede arrancar: ${g}`);
+  if (signal?.aborted) throw flowErr('STOPPED', 'Detenido');
+  let runId;
+  try { runId = startRun(child.id, { input: String(input ?? ''), only, from, vars, trigger: `flow:${parentFlow.id}`, usePins: false, breakpoints: false, rehearsal: !!run.rehearsal, callChain: [...chain, child.id], parent: { flowId: parentFlow.id, runId: run.id, stepKey: opts.stepKey || null } }); }
+  catch (e) { throw flowErr(e.code || 'CHILD_FAILED', `«${child.name}»: ${e.message}`); }
+  const childRun = { flowId: child.id, runId };
+  log({ kind: 'hook_log', text: `→ invocando el flujo «${child.name}» (run ${runId})`, childRun });
+  if (opts.wait === false && !run.rehearsal) return { ...childRun, status: 'started', result: runId, json: childRun }; // detached: cancelling the caller does not stop it
+  const onAbort = () => { try { stopRun(child.id, runId); } catch {} };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    const left = Math.max(1000, (run.deadlineAt || now() + 3600000) - now());
+    const r = await waitRun(child.id, runId, Math.min(left, Number(opts.timeoutSec) > 0 ? Number(opts.timeoutSec) * 1000 : Infinity));
+    if (r?.waitTimedOut) { onAbort(); throw flowErr('CHILD_TIMEOUT', `«${child.name}» no terminó a tiempo: se detuvo`, { childRun }); }
+    if (r?.status === 'paused') onAbort(); // calls never pause (no breaks); just in case
+    const sum = runSummary(store.getFlow(child.id) || child, store.getRun(child.id, runId) || r);
+    if (sum.status !== 'success') throw flowErr('CHILD_FAILED', `El flujo «${child.name}» terminó en ${sum.status}${sum.error ? `: ${String(sum.error).slice(0, 300)}` : ''}`, { childRun: { ...childRun, status: sum.status } });
+    return { ...childRun, status: 'success', result: sum.result, json: sum.json };
+  } finally { signal?.removeEventListener('abort', onAbort); }
+}
+
+export function startRun(flowId, { input = '', only = null, from = null, trigger = 'manual', vars = null, usePins = true, idempotencyKey = null, deadlineSec = null, breakpoints = false, rehearsal = false, callChain = null, parent = null } = {}) {
   const flow = store.getFlow(flowId);
   if (!flow) throw new Error('Flujo no encontrado');
   if (only && !flow.steps.some((s) => s.id === only)) throw new Error('Step no encontrado');
@@ -978,7 +1050,7 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
   // Spec 28: an empty variable takes the policy default ("ambiente por defecto")
   const runVars = POL.withDefaults(flow, { ...(flow.vars || {}), ...(vars && typeof vars === 'object' && !Array.isArray(vars) ? vars : {}) });
   // Rehearsal (spec 28, "ensayo acotado"): breaks off, no "Al terminar", read-only AI, capped steps, lastRun untouched
-  if (rehearsal) { breakpoints = false; trigger = 'rehearsal'; }
+  if (rehearsal) { breakpoints = false; if (!String(trigger).startsWith('flow:')) trigger = 'rehearsal'; } // a child of a rehearsal keeps who called it
   const rflow = { ...structuredClone(flow), vars: runVars };
   const snap = { steps: flow.steps.map(({ lastRun, memory, chatSessionId, chatContextHash, position, ...s }) => s), edges: flow.edges.map(({ source, target, when, pick }) => ({ source, target, when, pick })), vars: runVars, cwd: flow.cwd };
   const limit = clampInt(deadlineSec, 10, 14400, clampInt(flow.runTimeoutSec, 10, 14400, 3600));
@@ -988,6 +1060,7 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
     flowSnapshotHash: crypto.createHash('sha256').update(JSON.stringify(snap)).digest('hex'), flowUpdatedAt: flow.updatedAt,
     deadlineAt: t0 + limit * 1000, eventSeq: 0, status: 'running', startedAt: t0, steps: {}, usedPins: [], breakpoints: !!breakpoints, pauses: [],
     ...(rehearsal ? { rehearsal: true, rehearsalStepSec: REHEARSAL_STEP_SEC } : {}),
+    ...(Array.isArray(callChain) ? { callChain } : {}), ...(parent ? { parent } : {}),
     // spec 28: which version of each step ran (the review ignores evidence from versions that no longer exist)
     stepHashes: Object.fromEntries(flow.steps.map((s) => [s.id, stepHash(s)])),
   };

@@ -43,6 +43,10 @@ function open(box) {
   d.setAuthTag(Buffer.from(box.tag, 'base64'));
   return Buffer.concat([d.update(Buffer.from(box.data, 'base64')), d.final()]).toString('utf8');
 }
+// spec 11: per-flow tokens use the same machine key (sealed to reveal, HMAC to validate)
+export const sealText = (t) => seal(t);
+export const openText = (b) => open(b);
+export const macText = (t) => crypto.createHmac('sha256', key()).update(`afs-flow-token:${t}`).digest('hex');
 function readAll() { try { return JSON.parse(fs.readFileSync(FILE(), 'utf8')).items || []; } catch { return []; } }
 function writeAll(items) { fs.mkdirSync(DATA, { recursive: true }); fs.writeFileSync(FILE(), JSON.stringify({ version: 1, items }, null, 2), { mode: 0o600 }); }
 

@@ -55,7 +55,9 @@ export default function IntegrationWizard({ flow, initialStep = '', initialScope
       const sampleOf = (s) => String(s ?? '').replace(/\{\{[^}]+\}\}/g, 'EJEMPLO-1').replace(/\{[A-Z_][A-Z0-9_]*\}/g, 'ejemplo');
       const body = { input: sampleOf(m.input), vars: Object.fromEntries(Object.entries(m.vars || {}).map(([k, v]) => [k, sampleOf(v)])), source: caller || 'test', ...(opt.step ? { step: opt.step, ...(opt.scope === 'from' ? { scope: 'from' } : {}) } : {}), ...(real ? {} : { dryRun: true }) };
       const keyHdr = m.idempotencyKey ? { 'Idempotency-Key': `${sampleOf(m.idempotencyKey)}-${Date.now()}` } : {};
-      const r = await fetch(`/api/ext/flows/${encodeURIComponent(flow.id)}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${info.token}`, ...keyHdr }, body: JSON.stringify(body) });
+      const tm = await api.get(`/api/flows/${encodeURIComponent(flow.id)}/token?reveal=1`);
+      const tok = tm.exists ? tm.token : (await api.post(`/api/flows/${encodeURIComponent(flow.id)}/token`, {})).token;
+      const r = await fetch(`/api/ext/flows/${encodeURIComponent(flow.id)}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}`, ...keyHdr }, body: JSON.stringify(body) });
       setTest({ status: r.status, body: await r.json().catch(() => ({})), real, sent: body });
     } catch (e) { setTest({ error: e.message }); }
   }

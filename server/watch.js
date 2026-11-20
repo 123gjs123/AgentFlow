@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { SAFE_GIT, untrusted } from './safe.js';
+import { SAFE_GIT, untrusted , childEnv } from './safe.js';
 import * as store from './store.js';
 import * as P from './prompt.js';
 import * as engine from './engine.js';
@@ -26,7 +26,7 @@ export const ICON = { git: '🌿', url: '🌐', file: '📄', command: '⌨️',
 const MAX_ITEMS = 500;
 const clip = (s, n) => { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
 const sha = (s) => crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 16);
-const flowCwd = (flow) => (flow.cwd && fs.existsSync(flow.cwd) ? flow.cwd : os.homedir());
+const flowCwd = (flow) => store.flowCwd(flow);
 let deps = { emit: () => {}, onNews: () => {}, runGuard: async () => 'sin verificación de ejecución configurada' };
 export function init(d) { deps = { ...deps, ...d }; }
 
@@ -54,7 +54,7 @@ export function cleanPolling(p) {
 }
 
 const run = (file, args, { cwd, timeout = 60000, signal } = {}) => new Promise((resolve) => {
-  execFile(file, args, { cwd, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true, signal: signal || undefined, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } },
+  execFile(file, args, { cwd, encoding: 'utf8', timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true, signal: signal || undefined, env: childEnv({ GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }) },
     (err, stdout, stderr) => resolve({ ok: !err, out: String(stdout || ''), err: String(stderr || err?.message || '') }));
 });
 const git = (repo, args, o) => run('git', ['-C', repo, ...SAFE_GIT, ...args], o);

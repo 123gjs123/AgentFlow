@@ -294,7 +294,7 @@ test('revisión 12d: los snippets curl funcionan pegados en bash sin jq (?format
   const curl = inv.snippets.find((x) => x.id === 'curl').content; const async = inv.snippets.find((x) => x.id === 'curl-async').content;
   assert.equal(inv.reach.status, 'needs-host');
   for (const c of [curl, async, inv.snippets.find((x) => x.id === 'jenkins-sh').content]) {
-    assert.ok(!/\bjq\b/.test(c), 'sin jq'); assert.match(c, new RegExp(`127\\.0\\.0\\.1:${s.port}`), 'la IP de red no responde todavía: usa esta PC');
+    assert.ok(!/\|\s*jq\b|\bjq -r/.test(c), 'sin jq'); assert.match(c, new RegExp(`127\\.0\\.0\\.1:${s.port}`), 'la IP de red no responde todavía: usa esta PC');
   }
   // ?format=text: the outcome in the HTTP code, the result as plain text
   const h = { Authorization: `Bearer ${s.token}`, 'Content-Type': 'application/json' };

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { childEnv } from './safe.js';
 
 let cachedBin = null;
 export function claudeBin() {
@@ -175,7 +176,7 @@ function runClaudeNow(opts) {
     const workDir = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
     const [file, argv] = claudeSpawn(args);
     // opts.env (spec 28): policy env (git author) and the step's Bash time limit (BASH_*_TIMEOUT_MS)
-    const child = spawn(file, argv, { cwd: workDir, env: { ...process.env, ...(opts.env || {}) }, windowsHide: true });
+    const child = spawn(file, argv, { cwd: workDir, env: childEnv(opts.env || {}), windowsHide: true });
     if (child.pid) { try { opts.onSpawn?.(child.pid); } catch {} }
     const kill = () => killTree(child); // never by PID once the process exited: Windows reuses PIDs
     signal?.addEventListener?.('abort', kill, { once: true });
@@ -233,7 +234,7 @@ function runClaudeNow(opts) {
 export function probeInit(cwd) {
   return new Promise((resolve) => {
     const [file, argv] = claudeSpawn(['-p', '--output-format', 'stream-json', '--verbose']);
-    const child = spawn(file, argv, { cwd: cwd && fs.existsSync(cwd) ? cwd : os.homedir(), windowsHide: true });
+    const child = spawn(file, argv, { cwd: cwd && fs.existsSync(cwd) ? cwd : os.homedir(), windowsHide: true, env: childEnv() });
     let buf = ''; let finished = false;
     const finish = () => { if (finished) return; finished = true; try { child.kill(); } catch {} resolve({ ...lastInit }); };
     child.stdout.on('data', (d) => {

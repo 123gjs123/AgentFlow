@@ -97,7 +97,7 @@ test('Jenkins remoto (on-prem): la base de red se reemplaza por la real y un flu
   if (!(tools.bash && tools.python)) return t.skip('falta bash/python');
   const g = await gen('jenkins-declarative', {}, failing);
   assert.equal(g.reachability.status, 'needs-host');
-  assert.match(g.files.find((f) => f.name === 'Jenkinsfile').content, /withCredentials\(\[string\(credentialsId: 'afs-token', variable: 'AFS_TOKEN'\)\]\)/);
+  assert.match(g.files.find((f) => f.name === 'Jenkinsfile').content, /withCredentials\(\[string\(credentialsId: 'afs-token-falla-en-ci', variable: 'AFS_TOKEN'\)\]\)/ /* spec 11: one credential per flow */);
   const r = await sim.jenkins(g, { root: work(), env: { AFS_TOKEN: s.token, BUILD_TAG: `fail-${Date.now()}`, JOB_NAME: 'j', BUILD_NUMBER: '1', GIT_COMMIT: 'c' }, baseFrom: g.reachability.base, baseTo: s.base });
   assert.equal(r.code, 1);
   assert.match(r.stderr, /\[error\] Tests EXIT_NONZERO/);

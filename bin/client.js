@@ -7,9 +7,13 @@ import { fileURLToPath } from 'node:url';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const BASE = (process.env.AFS_URL || 'http://127.0.0.1:4317').replace(/\/$/, '');
 
+/** AFS_TOKEN, else AFS_TOKEN_FILE (a flow token kept out of shell history), else this installation's admin token. */
 export function token() {
   if (process.env.AFS_TOKEN) return process.env.AFS_TOKEN;
-  try { return JSON.parse(fs.readFileSync(path.join(process.env.AFS_DATA || path.join(ROOT, 'data'), 'config.json'), 'utf8')).token; } catch { return ''; }
+  if (process.env.AFS_TOKEN_FILE) { try { return fs.readFileSync(process.env.AFS_TOKEN_FILE, 'utf8').trim(); } catch (e) { throw Object.assign(new Error(`No se pudo leer AFS_TOKEN_FILE (${e.code || e.message})`), { code: 'TOKEN_FILE' }); } }
+  let c = {}; try { c = JSON.parse(fs.readFileSync(path.join(process.env.AFS_DATA || path.join(ROOT, 'data'), 'config.json'), 'utf8')); } catch {}
+  if (c.adminDisabled) { throw Object.assign(new Error('El token de administración está desactivado: define AFS_TOKEN o AFS_TOKEN_FILE con el token del flujo (afs token <flujo>)'), { code: 'ADMIN_DISABLED' }); }
+  return c.token || '';
 }
 
 /** UI access key of this installation (local commands like export/import use the UI API). */
@@ -29,7 +33,9 @@ export async function callUi(method, url, body) {
 export async function call(method, url, body, headers = {}) {
   const r = await fetch(BASE + '/api/ext' + url, {
     method,
-    headers: { Authorization: `Bearer ${token()}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers },
+    // a flow started from inside another flow carries the chain of calls (the recursion guard holds); with the admin token
+    // disabled, a local command authenticates with this installation's UI key (only accepted from this machine)
+    headers: { Authorization: `Bearer ${token()}`, ...(process.env.AFS_CALL_CHAIN ? { 'X-AFS-Call-Chain': process.env.AFS_CALL_CHAIN } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const j = await r.json().catch(() => ({}));
@@ -42,7 +48,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Starts the server in the background if it's local and not responding. */
 export async function ensureServer(log = () => {}) {
   try { await call('GET', '/ping'); return; } catch (e) {
-    if (e.status === 401) throw e;
+    if (e.status === 401 || e.code === 'ADMIN_DISABLED' || e.code === 'TOKEN_FILE') throw e; // a token problem is not "the server is down"
     if (!/127\.0\.0\.1|localhost/.test(BASE)) throw new Error(`No responde ${BASE}: ${e.message}`);
   }
   log('Iniciando Agent Flow Studio en segundo plano…');

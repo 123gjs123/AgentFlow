@@ -22,14 +22,18 @@ test('B1: directorio de trabajo que no existe → no arranca (CWD_MISSING), ni d
   assert.ok(pv.warnings.some((w) => w.code === 'CWD_MISSING'));
 });
 
-test('B1: sin directorio, los steps que editan/ejecutan avisan; los que solo leen o razonan no cambian (flujo simple)', async () => {
+test('B1: sin directorio, un flujo nuevo trabaja en su carpeta propia; uno que trabaja en tu carpeta de usuario avisa en los steps que editan/ejecutan (spec 11)', async () => {
   const writer = role('Escribe', '[[mock:say ok]]', { id: 's_w', allowedTools: 'Read Edit Write', permissionMode: 'acceptEdits' });
   const reader = role('Lee', '[[mock:say ok]]', { id: 's_r', allowedTools: 'Read Grep' });
   const thinker = role('Piensa', '[[mock:say ok]]', { id: 's_t', allowedTools: '' });
-  const f = await s.flow('Sin cwd', [writer, reader, thinker]);
+  const own = await s.flow('Carpeta propia', [{ ...writer }]);
+  const r0 = await s.runUi(own.id);
+  assert.equal(r0.status, 'success');
+  assert.ok(!r0.steps.s_w.warnings.some((w) => /carpeta de usuario/.test(w)), 'con su carpeta propia no avisa');
+  const f = await s.flow('Sin cwd', [writer, reader, thinker], [], { workspace: 'home' });
   const run = await s.runUi(f.id);
   assert.equal(run.status, 'success');
-  assert.ok(run.steps.s_w.warnings.some((w) => /no tiene directorio de trabajo/.test(w)));
+  assert.ok(run.steps.s_w.warnings.some((w) => /trabaja en tu carpeta de usuario/.test(w)));
   assert.ok(!run.steps.s_r.warnings.some((w) => /directorio/.test(w)));
   assert.ok(!run.steps.s_t.warnings.some((w) => /directorio/.test(w)));
   const pv = await s.uiOk('POST', `/api/flows/${f.id}/steps/s_w/preview`, {});

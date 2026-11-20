@@ -38,7 +38,7 @@ function readDefinition(step, flow) {
 }
 
 function claudeCodeSection(flow) {
-  const cwd = flow.cwd && fs.existsSync(flow.cwd) ? flow.cwd : os.homedir();
+  const cwd = store.flowCwdPath(flow); // what Claude really loads (spec 11); a preview creates nothing
   const files = [path.join(os.homedir(), '.claude', 'CLAUDE.md'), path.join(cwd, 'CLAUDE.md'), path.join(cwd, '.claude', 'CLAUDE.md')]
     .filter((f, i, a) => a.indexOf(f) === i)
     .map((f) => { try { const st = fs.statSync(f); return { path: f, chars: st.size }; } catch { return null; } })

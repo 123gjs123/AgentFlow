@@ -15,7 +15,7 @@ import tls from 'node:tls';
 import { execFile, execFileSync } from 'node:child_process';
 import { DATA } from './store.js';
 import { frontmatter, listSkills } from './catalog.js';
-import { SAFE_GIT } from './safe.js';
+import { SAFE_GIT , childEnv } from './safe.js';
 import { readZip, safeRel, buildZip } from './unzip.js';
 
 const fail = (status, error, code, extra = {}) => Object.assign(new Error(error), { status, code, ...extra });
@@ -309,7 +309,7 @@ export const gitArgs = (hooks, pin = [], { background = false } = {}) => [
 ];
 /** git's environment: background checks never open a credential prompt (no account lockouts, no pop-ups). */
 export function gitEnv({ background = false } = {}) {
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1', GIT_OPTIONAL_LOCKS: '0' };
+  const env = childEnv({ GIT_TERMINAL_PROMPT: '0', GIT_LFS_SKIP_SMUDGE: '1', GIT_OPTIONAL_LOCKS: '0' });
   if (background) { env.GCM_INTERACTIVE = 'never'; env.GIT_ASKPASS = ''; delete env.SSH_ASKPASS; env.SSH_ASKPASS_REQUIRE = 'never'; }
   return env;
 }

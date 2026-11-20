@@ -108,7 +108,7 @@ export function ExternalInvoke({ flow }) {
   if (!info) return <div className="muted small pad">Cargando…</div>;
   const base = `http://127.0.0.1:${info.port}`;
   const name = flow?.name || 'Mi flujo';
-  const tok = show ? info.token : '<TOKEN>';
+  const tok = info.adminEnabled === false ? '<TOKEN-DEL-FLUJO>' : show ? info.token : '<TOKEN>';
   const enc = encodeURIComponent(name);
   const cli = `node "${info.cli}"`;
   const snippets = {
@@ -158,7 +158,8 @@ export function ExternalInvoke({ flow }) {
       {flow ? <IntegrationWizard flow={flow} /> : <p className="muted small">Abre un flujo para usar el asistente de integración.</p>}
       <details className="advanced"><summary>Snippets rápidos y token</summary>
       <div className="row wrap">
-        <span className="small"><b>Token:</b> <code>{show ? info.token : '••••••••••••'}</code></span>
+        <span className="small" data-testid="admin-token"><b>Token de administración</b> (abre todos los flujos; para un solo flujo usa el suyo en 🔌 Invocar):{' '}<code>{show ? info.token : '••••••••••••'}</code></span>
+        <label className="toggle small"><input type="checkbox" data-testid="admin-enabled" checked={info.adminEnabled !== false} onChange={async (e) => { const r = await api.put('/api/info/admin-token', { enabled: e.target.checked }); setInfo({ ...info, adminEnabled: r.adminEnabled }); }} /> activo</label>
         <button className="ghost small" onClick={() => setShow(!show)}>{show ? 'ocultar' : 'mostrar en snippets'}</button>
         <button className="ghost small" onClick={() => navigator.clipboard.writeText(info.token)}>copiar</button>
         <button className="ghost small danger" onClick={async () => { if (confirm('¿Regenerar el token? Lo que use el anterior dejará de funcionar.')) { const r = await api.post('/api/info/rotate-token'); setInfo({ ...info, token: r.token }); } }}>regenerar</button>

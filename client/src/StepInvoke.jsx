@@ -78,8 +78,9 @@ export default function StepInvoke({ flow, step }) {
           <pre className="mono small code">{sn.content}</pre>
         </div>)}
         <div className="small muted">
-          El token no va dentro del código: guárdalo como <code>AFS_TOKEN</code> (en Jenkins, una credencial <i>Secret text</i> llamada <code>afs-token</code>).{' '}
-          {token ? <><code className="mono" data-testid="invoke-token">{token}</code> <Copy text={token} /></> : <button className="ghost small" onClick={() => api.get('/api/info').then((i) => setToken(i.token)).catch(() => {})}>Mostrar token</button>}
+          El token no va dentro del código: guárdalo como <code>AFS_TOKEN</code> (en Jenkins, una credencial <i>Secret text</i> llamada <code>{inv.credId || 'afs-token'}</code>). Es el <b>token de este flujo</b>: solo abre este flujo.{' '}
+          {token ? <><code className="mono" data-testid="invoke-token">{token}</code> <Copy text={token} /> <button className="ghost small danger" onClick={async () => { if (confirm('¿Regenerar el token de este flujo? Lo que use el anterior dejará de funcionar.')) setToken((await api.post(`/api/flows/${flow.id}/token`, {})).token); }}>regenerar</button></>
+            : <button className="ghost small" data-testid="invoke-show-token" onClick={async () => { try { const m = await api.get(`/api/flows/${flow.id}/token?reveal=1`); setToken(m.exists ? m.token : (await api.post(`/api/flows/${flow.id}/token`, {})).token); } catch (e) { setErr(e.message); } }}>Mostrar token del flujo</button>}
           {' · '}<a href={`/api/flows/${flow.id}/invoke.md`} target="_blank" rel="noreferrer">INVOKE.md del flujo</a>
         </div>
         <details className="small"><summary>GitHub Actions, Bitbucket, GitLab, Jira… (asistente de integración)</summary>

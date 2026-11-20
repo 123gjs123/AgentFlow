@@ -20,7 +20,7 @@ test('auth: sin token / token malo → 401; Bearer, X-AFS-Token y ?token= → 20
   assert.equal((await s.ext('GET', '/ping', undefined, { 'X-AFS-Token': s.token }, { auth: false })).status, 200);
   assert.equal((await s.ext('GET', `/ping?token=${s.token}`, undefined, {}, { auth: false })).status, 200);
   const r = await s.ext('GET', '/ping');
-  assert.deepEqual(r.body, { ok: true, app: 'agent-flow-studio' });
+  assert.deepEqual(r.body, { ok: true, app: 'agent-flow-studio', scope: 'admin' }); // spec 11: which token it was
 });
 
 test('GET /flows lista flujos, steps y SOLO los nombres de las variables', async () => {

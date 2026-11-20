@@ -300,6 +300,7 @@ export function buildTemplate(callerId, o) {
   const url = `${o.base}/api/ext/flows/${o.flowId}/run`;
   const local = o.reach.status === 'ok-local';
   const label = o.flowName.replace(/[^\p{L}\p{N} ._-]/gu, '').slice(0, 60) || o.flowId;
+  const credId = jenkinsCredId(o.flowName, o.flowId); // one Jenkins credential per flow (its own token, spec 11)
 
   switch (callerId) {
     case 'jira-cloud':
@@ -336,14 +337,14 @@ export function buildTemplate(callerId, o) {
       const unix = pyCmd(o, a);
       const win = psCmd(o, a);
       const body = (ind) => `if (isUnix()) {\n${ind}  sh '''\n${groovyTriple(unix).split('\n').map((l) => `${ind}    ${l}`).join('\n')}\n${ind}  '''\n${ind}} else {\n${ind}  powershell '''\n${ind}    ${groovyTriple(win)}\n${ind}  '''\n${ind}}`;
-      const creds = (ind, inner) => (local ? inner : `withCredentials([string(credentialsId: 'afs-token', variable: 'AFS_TOKEN')]) {\n${inner.split('\n').map((l) => '  ' + l).join('\n')}\n${ind}}`);
+      const creds = (ind, inner) => (local ? inner : `withCredentials([string(credentialsId: '${credId}', variable: 'AFS_TOKEN')]) {\n${inner.split('\n').map((l) => '  ' + l).join('\n')}\n${ind}}`);
       const content = callerId === 'jenkins-declarative'
         ? `pipeline {\n  agent any\n  options { timeout(time: ${Math.ceil((o.timeoutSec + 120) / 60)}, unit: 'MINUTES') }\n  stages {\n    stage('Agent Flow: ${label}') {\n      steps {\n        script {\n          ${creds('          ', body('          ')).split('\n').join('\n          ').replace(/\n {10}(?=\n)/g, '\n')}\n        }\n      }\n      post { always { archiveArtifacts artifacts: 'afs-result.json', allowEmptyArchive: true } }\n    }\n  }\n}\n`
         : `node {\n  stage('Agent Flow: ${label}') {\n    checkout scm\n    ${creds('    ', body('    ')).split('\n').join('\n    ')}\n    archiveArtifacts artifacts: 'afs-result.json', allowEmptyArchive: true\n  }\n}\n`;
       files.push({ name: 'Jenkinsfile', language: 'groovy', content });
       files.push({ name: 'afs_call.py', language: 'python', content: PY_CLIENT });
       files.push({ name: 'afs-call.ps1', language: 'powershell', content: PS_CLIENT });
-      setup.push(...(local ? ['El agente de Jenkins corre en esta PC: la llamada va a 127.0.0.1 y no expones nada. Define AFS_TOKEN como variable de entorno del agente (o usa la credencial igual que en remoto).'] : ['Jenkins → Manage Jenkins → Credentials → Add → "Secret text" con el token, ID: afs-token.']),
+      setup.push(...(local ? ['El agente de Jenkins corre en esta PC: la llamada va a 127.0.0.1 y no expones nada. Define AFS_TOKEN como variable de entorno del agente (o usa la credencial igual que en remoto).'] : [`Jenkins → Manage Jenkins → Credentials → Add → "Secret text" con el token de este flujo (🔌 Invocar → Mostrar token), ID: ${credId}.`]),
         'Sube afs_call.py (agentes Linux, requiere python3) y afs-call.ps1 (agentes Windows) al repo, junto al Jenkinsfile.',
         'El stage falla si el flujo falla (exit 1), si no se pudo llamar (exit 2) o si se agota el tiempo (exit 3); el resumen queda como artefacto afs-result.json.');
       notes.push('Los datos del build ({BUILD_TAG}, {GIT_COMMIT}…) los reemplaza el script desde las variables de entorno: nunca pasan por el shell ni por Groovy, así que comillas o $ en los valores no rompen nada.', 'El token no se interpola en Groovy (comillas simples) y no se imprime. No agregues "set -x".', 'Idempotency-Key = {BUILD_TAG}: si reintentas el mismo build no se lanza otra ejecución (salvo que la anterior haya fallado).');
@@ -427,6 +428,7 @@ export function lintIntegration(files, { flow, flows, callerId, token, flowVars 
   const errors = []; const warnings = [];
   const caller = callerOf(callerId) || { location: 'onprem' };
   const all = [...files.map((f) => f.content || ''), ...texts].join('\n');
+  if (/afsf_[A-Za-z0-9_-]{20,}/.test(all)) errors.push({ code: 'TOKEN_LITERAL', message: 'El código o los pasos contienen un token de flujo (afsf_…): quítalo y usa el almacén de secretos del que llama.' });
   if (token && all.includes(token)) errors.push({ code: 'TOKEN_LITERAL', message: 'El código o los pasos contienen el token real: quítalo y usa el almacén de secretos del que llama.' });
   let baseHost = null; try { baseHost = new URL(base).host; } catch {}
   const flowExists = (ref) => flows.some((x) => x.id === ref || x.name.toLowerCase() === String(ref).toLowerCase());
@@ -539,7 +541,10 @@ export function stepContract(flow, step, { scope = 'only', fromSet = null } = {}
  * Copy-ready snippets for ONE step (STEPINV-4/5/6/8). Never contain the token: they read AFS_TOKEN from the
  * environment / a CI credential. `local` = this PC, `remote` = what another machine uses (reachability).
  */
+/** The Jenkins credential id of a flow's token: one per flow, never the same secret for every flow (spec 11). */
+export const jenkinsCredId = (name, id) => `afs-token-${String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || id}`;
 export function stepInvoke(flow, step, { localBase, remote, scope = 'only', fromSet = null, cliPath, mcpServer = 'agent-flow-studio' }) {
+  const credId = jenkinsCredId(flow.name, flow.id);
   const contract = stepContract(flow, step, { scope, fromSet });
   const slug = step.slug;
   const path = `/api/ext/flows/${flow.id}/steps/${slug}/run`;
@@ -593,17 +598,17 @@ export function stepInvoke(flow, step, { localBase, remote, scope = 'only', from
     { id: 'jenkins-sh', label: 'Jenkins (sh)', language: 'groovy', where: 'remote', content: [
       `stage(${groovySingle(`AFS: ${step.name}`)}) {`,
       '  steps {',
-      "    withCredentials([string(credentialsId: 'afs-token', variable: 'AFS_TOKEN')]) {",
+      `    withCredentials([string(credentialsId: '${credId}', variable: 'AFS_TOKEN')]) {`,
       "      sh '''",
       '        set -e',
       ...groovyTriple(curlSync(rb, 'jenkins')).split('\n').map((l) => `        ${l}`),
       "      '''",
       '    }', '  }', '}',
-    ].join('\n'), note: 'Agente Linux. La credencial "afs-token" es un Secret text con el token.' },
+    ].join('\n'), note: `Agente Linux. La credencial "${credId}" es un Secret text con el token de este flujo.` },
     { id: 'jenkins-ps', label: 'Jenkins (Windows)', language: 'groovy', where: 'remote', content: [
       `stage(${groovySingle(`AFS: ${step.name}`)}) {`,
       '  steps {',
-      "    withCredentials([string(credentialsId: 'afs-token', variable: 'AFS_TOKEN')]) {",
+      `    withCredentials([string(credentialsId: '${credId}', variable: 'AFS_TOKEN')]) {`,
       "      powershell '''",
       ...groovyTriple(ps(rb, 'jenkins')).split('\n').map((l) => `        ${l}`),
       "      '''",
@@ -613,7 +618,7 @@ export function stepInvoke(flow, step, { localBase, remote, scope = 'only', from
     { id: 'mcp', label: 'Claude Code (MCP)', language: 'text', where: 'local', content: `Usa la herramienta run_flow de ${mcpServer} con flow ${JSON.stringify(flow.id)} («${mdLine(flow.name)}»), step ${JSON.stringify(step.id)} («${mdLine(step.name)}»)${scope === 'from' ? ', from: true' : ''} e input "<input>"${contract.vars.length ? ` y vars ${JSON.stringify(vars)}` : ''}. Si falla dime en qué step y por qué.`, note: 'Con el MCP de la app registrado (Integraciones → Otro agente / Claude Code).' },
     { id: 'webhook', label: 'Webhook (URL)', language: 'text', where: 'remote', content: `POST ${rb}${path}?source=webhook\nAuthorization: Bearer <AFS_TOKEN>\nContent-Type: application/json\n\n${JSON.stringify(body('webhook'), null, 2)}\n\nSi la herramienta no permite headers (último recurso, el token queda en logs):\n${rb}${path}?source=webhook&token=<AFS_TOKEN>`, note: 'No espera: la respuesta trae runId y statusUrl.' },
   ];
-  return { flowId: flow.id, stepId: step.id, slug, scope, endpoint: { method: 'POST', path, local: lb + path, remote: rb + path }, contract, reach: { status: remote.status, base: rb, explanation: remote.explanation, options: (remote.options || []).map(({ config, ...o }) => o) }, snippets };
+  return { flowId: flow.id, stepId: step.id, slug, scope, credId, endpoint: { method: 'POST', path, local: lb + path, remote: rb + path }, contract, reach: { status: remote.status, base: rb, explanation: remote.explanation, options: (remote.options || []).map(({ config, ...o }) => o) }, snippets };
 }
 
 /** INVOKE.md of a flow (STEPINV-9): every step with endpoint, CLI and Jenkins examples; the token is a placeholder. */

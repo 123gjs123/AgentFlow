@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import * as P from './prompt.js';
 import { lastInit, probeInit } from './claude.js';
 import { credentialChecks, credentialRefs } from './credentials.js';
+import { childEnv } from './safe.js';
 
 export const REQ_TYPES = ['tool', 'file', 'env', 'url', 'mcp'];
 export const ICON = { tool: '🧰', file: '📄', env: '🔑', url: '🌐', mcp: '🔌', credential: '🔐' };
@@ -46,7 +47,7 @@ function run(file, args, { timeoutMs = 20000, shell = false } = {}) {
   return new Promise((resolve) => {
     let out = ''; let done = false;
     let child;
-    try { child = spawn(file, args, { windowsHide: true, shell }); } catch (e) { resolve({ code: -1, out: e.message }); return; }
+    try { child = spawn(file, args, { windowsHide: true, shell, env: childEnv() }); } catch (e) { resolve({ code: -1, out: e.message }); return; }
     const t = setTimeout(() => { if (done) return; done = true; try { child.kill(); } catch {} resolve({ code: -2, out: 'tiempo agotado' }); }, timeoutMs);
     child.stdout?.setEncoding('utf8'); child.stderr?.setEncoding('utf8');
     child.stdout?.on('data', (d) => { out += d; }); child.stderr?.on('data', (d) => { out += d; });

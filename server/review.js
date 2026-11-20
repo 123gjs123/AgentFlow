@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { SAFE_GIT, NO_TEXTCONV } from './safe.js';
+import { SAFE_GIT, NO_TEXTCONV , childEnv } from './safe.js';
 import { fileURLToPath } from 'node:url';
 import * as store from './store.js';
 import * as P from './prompt.js';
@@ -108,8 +108,8 @@ export function recentDigests(flow) {
   const list = store.listRuns(flow.id).filter((r) => r.status !== 'running' && r.status !== 'paused');
   const pick = [];
   const add = (r) => { if (r && !pick.some((x) => x.id === r.id) && pick.length < 10) pick.push(r); };
-  list.filter((r) => r.trigger !== 'rehearsal').slice(0, 5).forEach(add);
-  list.filter((r) => r.trigger === 'rehearsal').slice(0, 2).forEach(add);
+  list.filter((r) => !r.rehearsal && r.trigger !== 'rehearsal').slice(0, 5).forEach(add);
+  list.filter((r) => r.rehearsal || r.trigger === 'rehearsal').slice(0, 2).forEach(add);
   list.filter((r) => ['error', 'timeout'].includes(r.status) && Date.now() - r.startedAt < 14 * 86400e3).forEach(add);
   // the digest cache is checked BEFORE reading the (possibly 1 MB) run file
   return pick.map((r) => digestCache.get(`${r.id}:${r.status}:${r.endedAt || 0}`) || runDigest(flow, store.getRun(flow.id, r.id))).filter(Boolean);
@@ -140,11 +140,39 @@ export async function lintFlow(flow, { probes = true, fresh = false } = {}) {
 
   const ext = has('noExternalWrites');
   for (const s of flow.steps) {
-    const isAi = s.kind !== 'command';
+    const isAi = s.kind !== 'command' && s.kind !== 'flow';
     const toks = tokens(s.allowedTools);
     // R-REF: a skill or agent that does not exist on this machine
     if (s.kind === 'skill' && s.skillRef && !findSkill(s.skillRef, flow.cwd, flow.id)) add({ rule: 'R-REF', severity: 'block', category: 'ref', stepId: s.id, subject: s.skillRef, title: `La skill «${s.skillRef}» no existe en esta máquina`, detail: 'El step va a correr sin la skill (o fallar). Elige una skill existente o créala.', evidence: [{ type: 'def', stepId: s.id, quote: `skillRef: ${s.skillRef}` }] });
     if (s.kind === 'agent' && s.agentRef && !findAgent(s.agentRef, flow.cwd)) add({ rule: 'R-REF', severity: 'block', category: 'ref', stepId: s.id, subject: s.agentRef, title: `El agente «${s.agentRef}» no existe en esta máquina`, detail: 'Elige un agente existente o créalo.', evidence: [{ type: 'def', stepId: s.id, quote: `agentRef: ${s.agentRef}` }] });
+    // spec 11: 🔀 Flujo steps — the called flow exists, its step exists, no cycles, not too deep, not quarantined
+    if (s.kind === 'flow') {
+      const t = s.flowRef ? store.getFlow(s.flowRef) : null;
+      if (!t) add({ rule: 'R-FLOW-REF', severity: 'block', category: 'ref', stepId: s.id, subject: s.flowRef || '', title: s.flowRef ? 'El flujo que invoca ya no existe' : 'No elige qué flujo invocar', detail: 'Elige el flujo en el step 🔀 Flujo; sin él, el step falla con FLOW_REF_MISSING / FLOW_REF_NOT_FOUND.', evidence: [{ type: 'def', stepId: s.id, quote: `flowRef: ${s.flowRef || '(vacío)'}` }] });
+      else {
+        if (s.flowStep && !store.findStep(t, s.flowStep).step) add({ rule: 'R-FLOW-STEP', severity: 'block', category: 'ref', stepId: s.id, subject: s.flowStep, title: `«${t.name}» no tiene el step «${s.flowStep}»`, detail: 'Elige un step existente del flujo invocado o deja vacío para correrlo entero.', evidence: [{ type: 'def', stepId: s.id, quote: `flowStep: ${s.flowStep}` }] });
+        if (t.quarantine) add({ rule: 'R-FLOW-QUARANTINED', severity: 'block', category: 'ref', stepId: s.id, subject: t.id, title: `«${t.name}» está en revisión (importado)`, detail: 'Un flujo en cuarentena no se puede invocar hasta que lo revises y lo habilites.', evidence: [{ type: 'def', stepId: s.id, quote: `flowRef: ${t.id}` }] });
+        // static walk of the calls: a path back to this flow is a cycle; a chain longer than 5 fails at run time
+        const seen = new Set([flow.id]); let cycle = null; let deep = 0;
+        const walk = (f, chain) => {
+          deep = Math.max(deep, chain.length);
+          for (const x of f.steps || []) if (x.kind === 'flow' && x.flowRef) {
+            if (x.flowRef === flow.id) { cycle = cycle || [...chain, flow.id]; continue; }
+            if (seen.has(x.flowRef) || chain.length > 8) continue;
+            seen.add(x.flowRef); const n = store.getFlow(x.flowRef); if (n) walk(n, [...chain, n.id]);
+          }
+        };
+        seen.add(t.id); walk(t, [flow.id, t.id]);
+        const nm = (id) => store.getFlow(id)?.name || id;
+        if (cycle) add({ rule: 'R-FLOW-CYCLE', severity: 'block', category: 'ref', stepId: s.id, subject: t.id, title: 'Llamada circular entre flujos', detail: `${cycle.map(nm).join(' → ')}: al ejecutarse falla con FLOW_RECURSION.`, evidence: [{ type: 'def', stepId: s.id, quote: `flowRef: ${t.id}` }] });
+        else if (deep > 5) add({ rule: 'R-FLOW-DEPTH', severity: 'risk', category: 'ref', stepId: s.id, subject: t.id, title: 'Cadena de flujos de más de 5', detail: 'Al ejecutarse falla con FLOW_CHAIN_TOO_DEEP: acorta la cadena.', evidence: [{ type: 'def', stepId: s.id, quote: `flowRef: ${t.id}` }] });
+      }
+    }
+    if (/invokeFlow\(\s*(?!['"`])/.test(String(s.hooks || ''))) add({ rule: 'R-FLOW-HOOK', severity: 'risk', category: 'ref', stepId: s.id, subject: 'dinámico', title: 'Un hook invoca un flujo calculado en tiempo de ejecución', detail: 'No se puede saber a qué flujo llama (no aparece en «Llamadas entre flujos»). Escribe su id entre comillas.', evidence: [{ type: 'def', stepId: s.id, quote: (String(s.hooks).match(/invokeFlow\([^)]{0,80}/) || [''])[0] }] });
+    for (const m of String(s.hooks || '').matchAll(/invokeFlow\(\s*(['"`])([^'"`]{1,200})\1/g)) {
+      const ok = store.getFlow(m[2]) || store.listFlows().filter((x) => String(x.name).trim().toLowerCase() === m[2].trim().toLowerCase()).length === 1;
+      if (!ok) add({ rule: 'R-FLOW-HOOK', severity: 'risk', category: 'ref', stepId: s.id, subject: m[2], title: `El hook invoca «${m[2]}», que no existe (o hay varios con ese nombre)`, detail: 'ctx.invokeFlow fallará con FLOW_REF_NOT_FOUND / FLOW_AMBIGUOUS.', evidence: [{ type: 'def', stepId: s.id, quote: m[0] }] });
+    }
     // R-MCP: connectors the CLI does not load
     const servers = [...new Set(toks.filter((t) => t.startsWith('mcp__')).map((t) => t.slice(5).split('__')[0]))];
     if (servers.length && !sys.cliKnown) notVerifiable.push(`Qué conectores MCP carga el CLI (lo usa «${s.name}»): abre ⚙ Configuración › Claude Code CLI para comprobarlo.`);
@@ -395,7 +423,7 @@ export function assertionTexts(flow, digests, max = 6) {
 }
 /** {ok, code, out}: code 1 is git's "no" (merge-base --is-ancestor); a timeout/abort/other error is NOT a "no". */
 const gitRun = (repo, args, signal, timeout = 30000) => new Promise((resolve) => {
-  execFile('git', ['-C', repo, ...SAFE_GIT, ...args], { encoding: 'utf8', timeout: Math.max(1000, timeout), maxBuffer: 4 * 1024 * 1024, windowsHide: true, signal, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } },
+  execFile('git', ['-C', repo, ...SAFE_GIT, ...args], { encoding: 'utf8', timeout: Math.max(1000, timeout), maxBuffer: 4 * 1024 * 1024, windowsHide: true, signal, env: childEnv({ GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }) },
     (err, out) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' && !err.killed ? err.code : null) : 0, out: String(out || '') }));
 });
 const noTags = (s) => String(s).replace(/<\/?untrusted-data>/gi, '[etiqueta]');
@@ -683,7 +711,7 @@ function checkFact(e, inv, evidenceDir, extraDirs) {
     const repo = inv.repos.find((r) => path.resolve(String(e.repo || '')).toLowerCase() === r.toLowerCase());
     const args = (Array.isArray(e.args) ? e.args : []).map(String).slice(0, 20);
     if (!repo || !args.length) return Promise.resolve(false);
-    return new Promise((resolve) => execFile(process.execPath, [REVIEW_GIT, repo, ...args], { env: { ...process.env, ...inv.env }, timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (err, out) => resolve(!err && norm(out).includes(q))));
+    return new Promise((resolve) => execFile(process.execPath, [REVIEW_GIT, repo, ...args], { env: childEnv(inv.env || {}), timeout: 60000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (err, out) => resolve(!err && norm(out).includes(q))));
   }
   const roots = [evidenceDir, ...inv.repos, ...inv.readDirs, ...extraDirs].map((r) => path.resolve(r));
   const p = path.resolve(evidenceDir, String(e.path || ''));

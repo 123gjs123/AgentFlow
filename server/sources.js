@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as P from './prompt.js';
 import { flowSkillDirs } from './skills.js';
+import * as store from './store.js';
 
 export const SOURCE_TYPES = ['file', 'folder', 'url', 'jira', 'confluence'];
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'target', '.venv', 'venv', '__pycache__', '.idea', '.vs', 'obj']);
@@ -28,7 +29,7 @@ export function sourcesOf(flow, step) {
 
 /** {{vars.x}} / {{input}} in paths, URLs and keys ("the ticket that arrives as input"). */
 const renderRef = (v, flow, input, runId) => P.render(String(v || ''), { flow, vars: flow.vars, input, runId }).trim();
-const absPath = (p, flow) => (path.isAbsolute(p) ? p : path.resolve(flow.cwd && fs.existsSync(flow.cwd) ? flow.cwd : process.cwd(), p));
+const absPath = (p, flow) => (path.isAbsolute(p) ? p : path.resolve(store.flowCwd(flow), p));
 const isKeys = (s) => /^[A-Z][A-Z0-9_]+-\d+(\s*[,\s]\s*[A-Z][A-Z0-9_]+-\d+)*$/.test(s);
 
 function countFiles(dir, max = 5000, depth = 6) {
