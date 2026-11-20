@@ -168,6 +168,8 @@ for (const w of [...scope.matchAll(/\[\[mock:write\s+([^\]]+)\]\]/g)]) toolUse('
 if (dir('deny') !== null) { denials.push({ tool_name: dir('deny').trim() || 'Bash', tool_use_id: 'x', tool_input: { command: 'rm -rf build' } }); }
 // spec 28: a denied Bash command with its text, and a Bash left in the background (false success)
 for (const d of [...scope.matchAll(/\[\[mock:deny-cmd\s+([^\]]+)\]\]/g)]) denials.push({ tool_name: 'Bash', tool_use_id: 'x', tool_input: { command: d[1].trim() } });
+// [[mock:cd-blocked DIR]]: Claude Code refuses a cd outside the session's allowed folders (a denial; nothing ran)
+if (dir('cd-blocked') !== null) { const d = dir('cd-blocked').trim(); const cmd = `cd ${d}; ls`; toolUse('Bash', { command: cmd }, `cd in '${d}' was blocked. For security, Claude Code may only change directories to the allowed working directories for this session: 'C:/x'.`, true); denials.push({ tool_name: 'Bash', tool_use_id: 'x', tool_input: { command: cmd } }); }
 if (dir('bash-bg') !== null) toolUse('Bash', { command: dir('bash-bg').trim(), run_in_background: true }, 'Command running in background with ID: b123');
 if (dir('bash-timeout') !== null) toolUse('Bash', { command: dir('bash-timeout').trim() }, 'Command timed out after 10m 0s', true);
 if (dir('env-echo') !== null) toolUse('Bash', { command: 'env' }, `GIT_AUTHOR_EMAIL=${process.env.GIT_AUTHOR_EMAIL || ''} BASH_MAX_TIMEOUT_MS=${process.env.BASH_MAX_TIMEOUT_MS || ''}`);

@@ -380,7 +380,7 @@ export function gitAccess(flow) {
   return {
     repos, allowed: `Bash(node ${REVIEW_GIT}:*)`, env: { AFS_REVIEW_REPOS: repos.join(path.delimiter) },
     block: `## Git de solo lectura (para decidir con lo que el código ya tiene)
-Comando exacto: node ${REVIEW_GIT} <repo> <log|show|branch|diff|grep|merge-base|for-each-ref|…> [args]. Ningún otro comando de Bash está permitido. Los valores van pegados a su opción (--grep=x, --format=%h, -n20, -S"texto") y las rutas son relativas al repositorio.
+Comando exacto: node ${REVIEW_GIT} <repo> <log|show|branch|diff|grep|merge-base|for-each-ref|…> [args]. Ningún otro comando de Bash está permitido, tampoco cd: el helper recibe la ruta del repo y funciona desde cualquier carpeta (un cd fuera de las carpetas permitidas se bloquea). Los valores van pegados a su opción (--grep=x, --format=%h, -n20, -S"texto") y las rutas son relativas al repositorio.
 Repositorios: ${repos.map((r) => r.replace(/\\/g, '/')).join(' · ')}
 Ejemplos: node ${REVIEW_GIT} <repo> branch -a --list "*SBK-123*" · node ${REVIEW_GIT} <repo> log --all --oneline -20 --grep="SBK-123" · node ${REVIEW_GIT} <repo> log --all --oneline -S"texto esperado"`,
   };

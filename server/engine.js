@@ -711,6 +711,11 @@ ${cgit.block}`;
           if (c.error) { error = c.error; code = c.code; }
         }
         // Strict success (VER-1)
+        // Claude Code blocks a "cd" outside the session's allowed folders: nothing ran, the step went on without it
+        const cdOnly = (d) => d.tool === 'Bash' && /^\s*\{?\s*"?command"?\s*:\s*"\s*cd\s+[^;&|"]+\s*(;|&&)/.test(String(d.input || ''));
+        const cdGuard = (rs.events || []).some((e) => e.kind === 'tool_result' && e.isError && /^cd in .* was blocked. For security, Claude Code may only change directories/.test(String(e.content || '')));
+        const cdBlocked = cdGuard ? rs.denials.filter(cdOnly) : [];
+        if (cdBlocked.length) { rs.denials = rs.denials.filter((d) => !cdOnly(d)); rs.warnings.push(`Claude intentó cambiar de carpeta fuera de las permitidas (${cdBlocked.length}): se bloqueó sin ejecutar nada y el step siguió.`); }
         if (!error && rs.denials.length && !step.allowDenials && !run.rehearsal) { error = `Se denegaron herramientas: ${[...new Set(rs.denials.map((d) => d.tool))].join(', ')}. Dale acceso en "Acceso" o marca "Permitir permisos denegados".`; code = 'PERMISSION_DENIED'; }
         // the real cause first: the connector the step needed is not loaded in the CLI
         if (error && rs.mcpMissing?.length) { error = `${mcpMissingText(rs.mcpMissing)} ${error}`; code = 'MCP_UNAVAILABLE'; }

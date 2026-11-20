@@ -40,7 +40,8 @@ test('git de solo lectura: lee los repos del flujo y rechaza escrituras, program
   // the allowlist keeps the useful forms
   assert.match(run(repo, 'log', '-n1', '--format=%s'), /Arreglo/);
   assert.match(run(repo, 'grep', '-n', '-ex'), /a\.txt:1/);
-  assert.throws(() => run(repo, 'log', '--grep', 'x'), /pegado/, 'el valor separado se rechaza: va pegado');
+  run(repo, 'log', '--grep', 'x'); // a mandatory value may go separated (git always takes it as the value)
+  assert.throws(() => run(repo, 'diff', '-U', '5'), /pegado/, 'un valor OPCIONAL separado se rechaza: va pegado (git lo leería como otra cosa)');
 });
 
 test('revisión que investiga: evidencia completa y git en sus herramientas; parte un step; "aplicar las seguras" deja lo destructivo', async () => {

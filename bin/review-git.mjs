@@ -41,6 +41,9 @@ const ALLOW = {
 // branch/tag with a positional name would CREATE one: only with an explicit list mode (tag -a would ANNOTATE: not allowed)
 const LIST_MODE = { branch: /^(-l|--list|-a|--all|-r|--remotes|--contains|--no-contains|--merged|--no-merged|--points-at)$/, tag: /^(-l|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/ };
 const MAX = 60000;
+// Options whose value is MANDATORY: git always takes the next argument as their value, so "-e patrón" is as safe as
+// "-epatrón" (the risk was only with optional values: -U, --pretty, --abbrev). The value may not look like an option.
+const VAL_NEXT = new Set(['-e', '-A', '-B', '-C', '-n', '--max-count', '--grep', '--author', '--committer', '--since', '--until', '--after', '--before', '--skip', '--max-depth', '--context', '--after-context', '--before-context']);
 
 const repos = String(process.env.AFS_REVIEW_REPOS || '').split(path.delimiter).map((r) => r.trim()).filter(Boolean).map((r) => path.resolve(r));
 const [repoArg, sub, ...rest] = process.argv.slice(2);
@@ -73,10 +76,13 @@ export function check(sub, args) {
     if (a === '--') { positional.push(...args.slice(i + 1)); break; }
     if (!a.startsWith('-') || a === '-') { positional.push(a); continue; }
     if (flags.has(a)) continue;
+    // -il = -i -l (git accepts grouped short flags): only when EVERY letter is an allowed flag on its own
+    if (/^-[A-Za-z]{2,8}$/.test(a) && [...a.slice(1)].every((ch) => flags.has(`-${ch}`))) continue;
     if (s.num && /^-\d{1,6}$/.test(a)) continue;
     const eq = a.indexOf('=');
     if (a.startsWith('--') && eq > 0 && val.has(a.slice(0, eq))) continue; // --format=x
     if (/^-[A-Za-z]/.test(a) && !a.startsWith('--') && val.has(a.slice(0, 2)) && a.length > 2) continue; // -n20, -Stext, -U5
+    if (val.has(a) && VAL_NEXT.has(a) && i + 1 < args.length && !String(args[i + 1]).startsWith('-')) { i++; continue; }
     if (val.has(a)) return { error: `Escribe el valor pegado a la opción: ${a.startsWith('--') ? `${a}=valor` : `${a}valor (p. ej. ${a}20)`}` };
     return { error: `Opción no permitida en modo lectura: ${a} (se aceptan solo las de la lista, escritas completas)` };
   }

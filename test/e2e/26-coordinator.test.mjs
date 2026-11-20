@@ -158,3 +158,30 @@ test('el coordinador decide con git de solo lectura sobre los repos del flujo (c
   assert.match(ch.prompt, /Git de solo lectura/);
   assert.match(arg(ch, '--disallowedTools'), /Edit/);
 });
+
+// ---- real flow (2026-11-20): the coordinator was stopped by a blocked "cd" and by "-il" in the read-only git helper ----
+test('freno 1: un cd que Claude Code bloquea (fuera de las carpetas permitidas) no ejecutó nada: aviso, no error; otro permiso denegado sigue fallando', async () => {
+  const f = await s.flow('Cd bloqueado', [role('Coordinador', '[[mock:cd-blocked /c/Users/fosh]] [[mock:say decisión tomada]]', { id: 's_c' }), role('Sigue', '[[mock:say sigo]]', { id: 's_s' })], [['s_c', 's_s']]);
+  const r = await run(f.id);
+  assert.equal(r.steps.s_c.status, 'success', JSON.stringify(r.steps.s_c.error));
+  assert.ok((r.steps.s_c.warnings || []).some((w) => /cambiar de carpeta/.test(w)));
+  assert.equal(r.steps.s_s.status, 'success', 'el flujo sigue');
+  const g = await s.flow('Denegado de verdad', [role('Paso', '[[mock:deny-cmd cd /tmp && rm -rf x]] [[mock:say listo]]', { id: 's_d' })]);
+  assert.equal((await run(g.id)).steps.s_d.code, 'PERMISSION_DENIED', 'sin el aviso de Claude Code sobre el cd, una denegación sigue siendo un error');
+});
+
+test('freno 2: el git de solo lectura acepta opciones cortas juntas (-il) cuando cada letra está permitida; una letra no permitida se sigue rechazando', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const fs = await import('node:fs'); const path = await import('node:path');
+  const repo = path.join(s.tmp, 'repo-il'); fs.mkdirSync(repo, { recursive: true });
+  const git = (...a) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: repo, encoding: 'utf8' });
+  git('init', '-q'); fs.writeFileSync(path.join(repo, 'a.feature'), 'Feature: NGame live manager\n'); git('add', '-A'); git('commit', '-qm', 'x');
+  const helper = path.resolve(import.meta.dirname, '..', '..', 'bin', 'review-git.mjs');
+  const h = (...a) => spawnSync(process.execPath, [helper, repo, ...a], { encoding: 'utf8', env: { ...process.env, AFS_REVIEW_REPOS: repo } });
+  const ok = h('grep', '-il', '-e', 'ngame', '-e', 'livemanager');
+  assert.equal(ok.status, 0, ok.stderr); assert.match(ok.stdout, /a\.feature/);
+  assert.equal(h('log', '--all', '--oneline', '-n', '5', '--grep', 'x').status, 0, 'valores separados en opciones con valor obligatorio');
+  assert.equal(h('grep', '-e', '--output=x', 'y').status, 2, 'un valor que parece opción se rechaza');
+  const bad = h('grep', '-iO', 'ngame');
+  assert.equal(bad.status, 2); assert.match(bad.stderr, /no permitida/);
+});
