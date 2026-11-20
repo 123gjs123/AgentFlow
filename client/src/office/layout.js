@@ -1,0 +1,87 @@
+// Spec 29: the office floor plan, generated from the flow (any flow fits). Pure.
+// Tiles (gx, gy) on an isometric grid. Reception on the left (the window with the coordinator, the queue, the turn
+// display, Entrada), one column of desks per execution level (max 6 desks per column, 6 columns per room; more rooms
+// stack below), the shelves Contexto/Memoria/Expedientes on each room's back wall, Salida and Archivo at the end.
+
+export const TILE_W = 64; export const TILE_H = 32;
+export const iso = (gx, gy) => ({ x: (gx - gy) * (TILE_W / 2), y: (gx + gy) * (TILE_H / 2) });
+export const depth = (gx, gy) => gx + gy;
+export const MAX_DESKS = 60;
+const REC_W = 4; // reception / corridor columns (gx 0..3)
+const PER_COL = 6; const COLS_PER_ROOM = 6;
+const COL_STRIDE = 4; const ROW_STRIDE = 3;
+
+/** Execution levels (1-based), like the canvas badge; unreached / cyclic steps go to a final level. */
+export function levelsOf(flow) {
+  const steps = flow?.steps || []; const edges = (flow?.edges || []).filter((e) => e && e.source !== e.target);
+  const ids = new Set(steps.map((s) => s.id));
+  const indeg = new Map(steps.map((s) => [s.id, 0]));
+  for (const e of edges) if (ids.has(e.source) && ids.has(e.target)) indeg.set(e.target, indeg.get(e.target) + 1);
+  const lvl = new Map(); let frontier = steps.filter((s) => !indeg.get(s.id)).map((s) => s.id); let k = 1;
+  while (frontier.length) {
+    const next = [];
+    for (const id of frontier) { if (lvl.has(id)) continue; lvl.set(id, k); for (const e of edges) if (e.source === id && ids.has(e.target)) { indeg.set(e.target, indeg.get(e.target) - 1); if (!indeg.get(e.target)) next.push(e.target); } }
+    frontier = next; k++;
+  }
+  const rest = steps.filter((s) => !lvl.has(s.id));
+  if (rest.length) { for (const s of rest) lvl.set(s.id, k); }
+  return lvl;
+}
+
+/** The whole floor plan: desks, furniture, walkable grid. Deterministic for the same steps and edges. */
+export function officeLayout(flow) {
+  const all = flow?.steps || [];
+  const steps = all.slice(0, MAX_DESKS);
+  const lvl = levelsOf({ ...flow, steps });
+  // columns: one per level; a level with more than PER_COL desks spills into extra sub-columns
+  const byLevel = new Map();
+  for (const s of steps) { const l = lvl.get(s.id) || 1; if (!byLevel.has(l)) byLevel.set(l, []); byLevel.get(l).push(s); }
+  const columns = [];
+  for (const l of [...byLevel.keys()].sort((a, b) => a - b)) { const list = byLevel.get(l); for (let i = 0; i < list.length; i += PER_COL) columns.push({ level: l, steps: list.slice(i, i + PER_COL) }); }
+  const rooms = Math.max(1, Math.ceil(columns.length / COLS_PER_ROOM));
+  // as big as this flow needs (never smaller than the reception and the three shelves)
+  const usedCols = Math.min(COLS_PER_ROOM, Math.max(1, columns.length));
+  const cols = Math.max(REC_W + 1 + usedCols * COL_STRIDE + 1, REC_W + 12);
+  const maxPerCol = Math.max(1, ...columns.map((c) => c.steps.length));
+  const ROOM_H = Math.max(11, 2 + maxPerCol * ROW_STRIDE + 2); // back wall + access row, desks, spare rows
+  const rows = rooms * ROOM_H;
+  const cells = new Uint8Array(cols * rows).fill(1);
+  const block = (gx, gy) => { if (gx >= 0 && gy >= 0 && gx < cols && gy < rows) cells[gy * cols + gx] = 0; };
+  const desks = [];
+  columns.forEach((c, ci) => {
+    const room = Math.floor(ci / COLS_PER_ROOM); const cr = ci % COLS_PER_ROOM;
+    const gx = REC_W + 1 + cr * COL_STRIDE;
+    c.steps.forEach((s, ri) => {
+      const gy = room * ROOM_H + 2 + ri * ROW_STRIDE;
+      block(gx, gy); block(gx + 1, gy); // the desk (2 tiles)
+      desks.push({ id: s.id, kind: s.kind, level: c.level, room, gx, gy, seat: { gx, gy: gy + 1 }, visit: { gx: gx + 1, gy: gy + 1 } });
+    });
+  });
+  // furniture
+  const furniture = [];
+  const put = (id, gx, gy, w, h, access, extra = {}) => { for (let x = gx; x < gx + w; x++) for (let y = gy; y < gy + h; y++) block(x, y); furniture.push({ id, gx, gy, w, h, access, ...extra }); };
+  put('display', 0, 0, 1, 1, { gx: 1, gy: 2 });
+  put('window', 1, 0, 2, 1, { gx: 1, gy: 2 });
+  put('entrada', 3, 0, 1, 1, { gx: 3, gy: 1 });
+  for (let r = 0; r < rooms; r++) {
+    const y = r * ROOM_H;
+    put(`shelf:contexto:${r}`, REC_W + 1, y, 2, 1, { gx: REC_W + 1, gy: y + 1 }, { shelf: 'contexto', room: r });
+    put(`shelf:memoria:${r}`, REC_W + 5, y, 2, 1, { gx: REC_W + 5, gy: y + 1 }, { shelf: 'memoria', room: r });
+    put(`shelf:expedientes:${r}`, REC_W + 9, y, 2, 1, { gx: REC_W + 9, gy: y + 1 }, { shelf: 'expedientes', room: r });
+  }
+  const lastY = rows - 2;
+  put('salida', 0, lastY, 1, 1, { gx: 1, gy: lastY });
+  put('archivo', 2, lastY, 2, 1, { gx: 2, gy: lastY - 1 });
+  const chair = { gx: 1, gy: 2 };
+  const queue = [0, 1, 2, 3, 4].map((i) => ({ gx: 0, gy: 4 + i }));
+  const grid = { cols, rows, cells };
+  const hubOf = (level) => { const d = desks.find((x) => x.level === level); return d ? { gx: d.gx + 2, gy: d.room * ROOM_H + 1 } : chair; };
+  const hash = `${steps.map((s) => `${s.id}:${s.kind}`).join(',')}|${(flow?.edges || []).map((e) => `${e.source}>${e.target}`).join(',')}`;
+  return { cols, rows, rooms, roomH: ROOM_H, grid, desks, furniture, chair, queue, hubOf, overflow: Math.max(0, all.length - MAX_DESKS), hash };
+}
+/** The access tile of a shelf nearest to a desk's room. */
+export function shelfAccess(layout, shelf, room = 0) {
+  const f = layout.furniture.find((x) => x.shelf === shelf && x.room === room) || layout.furniture.find((x) => x.shelf === shelf);
+  return f?.access || layout.chair;
+}
+export const furnitureAccess = (layout, id) => layout.furniture.find((f) => f.id === id)?.access || layout.chair;

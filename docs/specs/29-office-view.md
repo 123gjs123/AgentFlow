@@ -1,6 +1,102 @@
 # 29 · 🏢 Vista "Oficina" (animated office view)
 
-Status: **Proposed** (2026-11-17), not implemented. Parked by the user to first refine what exists ("refinemos que todo lo que tenemos ahora funcione correctamente").
+Status: **Implemented** (2026-11-20) as option C (a procedurally drawn office), verified by `test/e2e/37-*` and `38-*`. See "Implementation" below.
+
+## Implementation (2026-11-20)
+
+**Decision: option C, a procedurally drawn office.** Option A needs the user's illustration, which is outside the repo and carries institutional coats of arms. Option B needs sprite sheets that do not exist. Instead, the office is drawn in isometric SVG by code:
+- Desks are generated from the steps, so it fits any flow.
+- It needs no new dependencies and no image assets.
+- The characters go through a renderer interface (`client/src/office/characters.jsx`), so sprites can replace the vector people later without touching the logic.
+
+The plan came from an architect review. The open questions are settled:
+1. **A or B:** C, as above.
+2. **Asset list:** not needed yet.
+3. **Characters:** per flow, stored on the step (`step.persona`).
+
+**Where it is.** `🔲 Cajas | 🏢 Oficina` at the top of the canvas area.
+- The choice is kept per tab, as the default for new tabs, and in the URL (`?view=office`).
+- The office code is its own chunk (`React.lazy`).
+- It never edits the flow: clicking opens the existing panels.
+
+| Click on | Opens |
+|---|---|
+| A desk, character or computer | The step |
+| A floor arrow | The edge panel |
+| The Memoria shelf | Flujo › Memoria |
+| The Contexto shelf or Archivo | Flujo › settings |
+| The turn display, Entrada/Salida, Tomás or Expedientes | Flujo › Ejecuciones on that run |
+| The window with the bell 🔔 | The break review |
+
+**Modules** (`client/src/office/`; the pure ones are tested from node):
+- `model.js`: the cast.
+  - Each step gets a distinct name (never "Tomás", who is the coordinator) and a look, both deterministic from the step id.
+  - The step's function suggests the name: Análisis → Lucía, Planificación → Marta, Ejecución → Diego, Revisión → Valeria, Archivo → Bruno.
+  - `step.persona` overrides both.
+- `layout.js`: the floor plan.
+  - Reception: the window, the queue, the turn display and Entrada.
+  - One column of desks per execution level, at most 6 desks per column and 6 columns per room. More rooms stack below.
+  - Each room has the shelves Contexto, Memoria and Expedientes; Salida and Archivo are at the end.
+  - Sized to the flow; at most 60 desks, then "+N más".
+- `path.js`: BFS walking on the grid.
+- `scene.js`: the reducer. It turns the events the app already emits (`run.started`, `step.status`, `run.event`, `run.paused`/`resumed`, `run.finally`, `run.finished`, `review.started`/`done`) into what each character does, following the table above. It is deterministic, and time comes only from the messages. The coordinator's target is derived in this order: a break, an error (the window), "Al terminar" (Archivo), a desk that has just received work, the hub when several desks run, then the chair.
+- `Office.jsx`: the view.
+  - **Live feed:** it catches up on runs already going, then follows `/ws`, with no duplicates by `seq`.
+  - **Movement:** one `requestAnimationFrame` loop moves walkers through refs. It runs only while the office is mounted, the tab is visible and something moves.
+  - **Other runs going** wait in the queue with their ticket.
+  - **A rehearsal** is drawn in grey.
+  - **Toolbar:** "Movimiento reducido" (it follows the system preference unless set), sound off by default (only the bell, a WebAudio ping) and a 📜 Bitácora.
+  - **Screen readers:** an `aria-live` summary.
+  - **Keyboard:** desks and furniture are buttons (Enter or Space).
+
+**"▶ Ver la jornada".** It rebuilds a stored run into the same messages (`timelineOfRun`) and plays them at 1×, 4×, 8× or 16×. Waits longer than 1.5 s are shortened. "✕ Volver al vivo" returns to the live view.
+
+**`step.persona = {name?, look?}`**
+- **Editor:** "🏢 Personaje en la Oficina" in the step's Config tab: name, skin, hair, hair colour, clothes and accessory, a preview, and "↺ Automático".
+- **Server cleaning (`cleanPersona`):** the name has at most 40 characters and no control characters; the look keeps 6 known keys, each an integer from 0 to 15.
+- **Portable:** it lives in `flow.json` and travels in exports.
+- **It never counts as "what executes":** it is left out of the linked-flow fingerprint (spec 09), the step hash and the run snapshot. Renaming a character changes neither the trust of a linked flow nor what a model sees. Like moving a box, it is still a definition change: it can create an automatic version and mark the last AI review as older than the flow.
+- **Copies:** a duplicated step or a saved box gets its own character.
+
+**Test contract (`data-*`).**
+- `office`: `data-mode` (live/replay), `data-reduced-motion`, `data-animating`, `data-run`, `data-drill`.
+- `office-desk`: `data-step`, `data-activity`, `data-status`, `data-name`.
+- `office-walker`: `data-step`, `data-activity`.
+- `office-coordinator`: `data-target`, `data-tile`, `data-moving`.
+- `office-computer`: `data-state` (idle/running/ok/err).
+- `office-window`: `data-bell`. `office-salida`: `data-stamp`. `office-display`: `data-ticket`.
+
+**Tests.**
+- `37-office-model` (8): the cast, the floor plan (no overlaps, everything reachable, 60 → 10 rooms, overflow), BFS, the reducer row by row, breaks and overlapping runs, replay against live, a real run rebuilt, and persona on the server, including a linked flow.
+- `38-ui-office` (7): the toggle and URL, the live run, a break, clicks, replay, reduced motion and a hidden tab, and the persona editor.
+- The Claude mock gains `[[mock:hold N]]`, which keeps a step working after its tool calls.
+
+**First adversarial pass.** It found three medium issues and three low ones, each proved with the harness and a browser. All are fixed with regression tests (`revisión 29` in `37-*` and `38-*`):
+- **(M) Reloading during a run repeated steps.** While the snapshot was loading, messages that arrived over `/ws` were applied again on top of it, so a step went back to "recibe la carpeta". Buffered transitions the snapshot already has are now skipped. A repeated status counts once; the engine may send `success` several times after a break.
+- **(M) The character's name reached the AI review's prompt.** In a linked flow it was a channel with no quarantine, because persona is outside the fingerprint. Persona is now left out of the review dossier and its evidence, so it never reaches a model.
+- **(M) A replay survived a change of flow.** The office is now keyed by flow, so a new flow starts live.
+- **(L) The live log used the names from when the view opened.** It now uses the current names.
+- **(L) A `step.status` without a step id threw.** It is ignored now.
+- **(L) Replay could show a finished step still writing.** This happened when the step's last event had the same millisecond as its end. The final status now goes after the step's own events.
+- **Closing check.** The 7 fixes hold. It found three more low issues, all fixed:
+  - the persona no longer reaches the step contract or INVOKE.md;
+  - a success after a break's "continue" no longer repeats the hand-off;
+  - a queued step replays as queued.
+- **(L) A failed catch-up left the office blind** to a run already going. Live events of an unknown run now start following it.
+
+**Known limits, deferred.**
+- Replay does not show pauses, resumes or earlier attempts of a retried break. Those status changes are not stored as events.
+- Not yet built:
+  - sprite characters;
+  - typing and ambient sounds;
+  - zoom and pan;
+  - arcs for papers;
+  - door animations;
+  - an inspector walking the desks (it stands at the window);
+  - a crowd for for-each items (a badge `i/n` instead);
+  - visiting the called flow's office;
+  - touch support;
+  - GIF export.
 
 ## Origin
 

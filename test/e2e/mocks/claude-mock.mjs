@@ -179,6 +179,8 @@ if (isChat && /<consult-answers>/.test(prompt)) {
 }
 if (isChat && dir('consult') !== null) { const [st, ...q] = dir('consult').split('|'); await finish(`Lo consulto.\n<consult step="${st.trim()}">${q.join('|').trim()}</consult>`); }
 
+// spec 29: [[mock:hold N]] keeps the step working N s AFTER its tool calls (the office shows them live)
+{ const h = dir('hold'); if (h !== null) await sleep(Number(h) * 1000); }
 let reply;
 if (dir('empty') !== null) reply = '';
 else if (correcting) {

@@ -12,6 +12,8 @@ import SkillPicker from './SkillPicker.jsx';
 import ContextSources, { FsPicker } from './Sources.jsx';
 import RequirementsEditor from './Requirements.jsx';
 import ReviewPanel from './ReviewPanel.jsx';
+import { castOf, PALETTE, LOOK_KEYS } from './office/model.js';
+import { CharacterPreview } from './office/characters.jsx';
 
 const MODELS = [['', 'Por defecto'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -210,6 +212,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
               <input type="checkbox" checked={!!step.coordinator} onChange={(e) => onChange({ coordinator: e.target.checked || undefined })} /> 🧭 Coordinador del flujo <span className="muted small">(atiende el chat general y decide qué step responde{flow.steps.some((x) => x.coordinator && x.id !== step.id) ? `; hoy lo es «${flow.steps.find((x) => x.coordinator && x.id !== step.id).name}» y dejará de serlo` : ''})</span>
             </label>
           )}
+          <PersonaBox flow={flow} step={step} onChange={onChange} />
           <ForEachBox flow={flow} step={step} onChange={onChange} />
           <WatchBox flow={flow} step={step} watch={watch} onChange={onChange} />
           <OutputsBox step={step} onChange={onChange} />
@@ -762,5 +765,44 @@ function Versions({ flow, onChange }) {
         </ul>
       )}
     </div>
+  );
+}
+
+/** Spec 29: who sits at this step's desk in the 🏢 Oficina view (name and look; empty = automatic). */
+const LOOK_LABEL = { skin: 'Piel', hair: 'Pelo', hairColor: 'Color de pelo', top: 'Ropa', bottom: 'Pantalón', accessory: 'Accesorio' };
+const HAIR_LABEL = { short: 'corto', long: 'largo', bun: 'rodete', curly: 'rulos', bald: 'sin pelo' };
+const ACC_LABEL = { none: 'nada', glasses: 'anteojos', headset: 'auriculares', cap: 'gorra', scarf: 'bufanda', earrings: 'aros' };
+function PersonaBox({ flow, step, onChange }) {
+  const auto = castOf({ ...flow, steps: flow.steps.map((s) => (s.id === step.id ? { ...s, persona: undefined } : s)) }).get(step.id);
+  const mine = castOf(flow).get(step.id);
+  const p = step.persona || {};
+  const set = (patch) => {
+    const next = { ...p, ...patch };
+    if (next.look && !Object.keys(next.look).length) delete next.look;
+    if (!next.name) delete next.name;
+    onChange({ persona: Object.keys(next).length ? next : undefined });
+  };
+  const swatch = (k, i) => {
+    const v = PALETTE[k][i]; const on = (mine?.look?.[k] ?? 0) === i;
+    const isColor = typeof v === 'string' && v.startsWith('#');
+    return <button key={i} type="button" className={`swatch${on ? ' active' : ''}`} title={k === 'hair' ? HAIR_LABEL[v] : k === 'accessory' ? ACC_LABEL[v] : v} onClick={() => set({ look: { ...(p.look || {}), [k]: i } })}
+      style={isColor ? { background: v } : undefined}>{isColor ? '' : (k === 'hair' ? HAIR_LABEL[v] : ACC_LABEL[v])}</button>;
+  };
+  return (
+    <details className="ctx-block" data-testid="persona-box">
+      <summary>🏢 Personaje en la Oficina: <b>{mine?.name}</b>{step.persona ? '' : <span className="muted small"> (automático)</span>}</summary>
+      <div className="row" style={{ alignItems: 'flex-start', gap: 12, marginTop: 6 }}>
+        <CharacterPreview look={mine?.look || {}} />
+        <div className="col" style={{ flex: 1, gap: 6 }}>
+          <label className="small">Nombre
+            <input data-testid="persona-name" maxLength={40} value={p.name || ''} placeholder={auto?.name} onChange={(e) => set({ name: e.target.value.slice(0, 40) })} />
+          </label>
+          {LOOK_KEYS.filter((k) => k !== 'bottom').map((k) => (
+            <div key={k} className="small"><span className="muted">{LOOK_LABEL[k]}: </span><span className="swatches">{PALETTE[k].map((_, i) => swatch(k, i))}</span></div>
+          ))}
+          {step.persona && <button type="button" className="ghost small" data-testid="persona-reset" onClick={() => onChange({ persona: undefined })}>↺ Automático</button>}
+        </div>
+      </div>
+    </details>
   );
 }

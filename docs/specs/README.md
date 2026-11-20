@@ -36,7 +36,7 @@ This folder holds the product and technical specs. Each spec stands on its own a
 | 26 | [🔑 Credenciales](26-credentials.md) | Implemented (2026-11-17; e2e: `test/e2e/20-*`) |
 | 27 | [🔔 Necesita atención, notificaciones y ⚙ Configuración](27-attention-notifications-settings.md) | Implemented (2026-11-17; e2e: `test/e2e/21-*`, `22-*`) |
 | 28 | [🩺 Revisión del flujo, 📜 Reglas y 🧪 Ensayo](28-flow-review.md) | Implemented (2026-11-17; round 2 2026-11-18: investigates and reshapes; e2e: `test/e2e/23-*`, `24-*`, `25-*`) |
-| 29 | [🏢 Vista "Oficina" (animated office view)](29-office-view.md) | Proposed (2026-11-17); unparked 2026-11-20, next after 09 |
+| 29 | [🏢 Vista "Oficina" (animated office view)](29-office-view.md) | Implemented 2026-11-20 (option C: procedural SVG office; e2e `37-*`, `38-*`) |
 | 30 | [🧭 Coordinador del flujo](30-coordinator.md) | Implemented (2026-11-18; e2e: `test/e2e/26-*`) |
 
 **Status meanings**

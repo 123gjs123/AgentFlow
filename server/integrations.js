@@ -518,7 +518,7 @@ const VAR_RE = /\{\{\{?\s*vars\.([A-Za-z0-9_-]+)/g;
 const INPUT_RE = /\{\{\{?\s*input\b/;
 /** What a step reads and gives (STEPINV-7), from its definition only (never from run data). */
 function definitionText(s) {
-  const { lastRun, memory, pinned, chatSessionId, chatContextHash, ...def } = s;
+  const { lastRun, memory, pinned, chatSessionId, chatContextHash, persona, position, ...def } = s; // the office character never defines what a step reads
   return JSON.stringify(def);
 }
 export function stepContract(flow, step, { scope = 'only', fromSet = null } = {}) {

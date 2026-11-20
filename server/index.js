@@ -379,9 +379,23 @@ function cleanRequirements(list) {
  * Step fields added by spec 10 (watches) and spec 15 DATA-10 (forEach): sanitised on every save AND on import.
  * Watch ids are unique across the flow (a duplicated step must not share another watch's snapshot).
  */
+/** Spec 29: the step's character in the 🏢 Oficina view (name ≤ 40, look = small integers the client maps to its palette). */
+const LOOK_KEYS = ['skin', 'hair', 'hairColor', 'top', 'bottom', 'accessory'];
+function cleanPersona(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+  const out = {};
+  if (typeof p.name === 'string') { const n = p.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 40); if (n) out.name = n; }
+  if (p.look && typeof p.look === 'object' && !Array.isArray(p.look)) {
+    const look = {};
+    for (const k of LOOK_KEYS) { const v = Number(p.look[k]); if (Number.isInteger(v)) look[k] = Math.min(15, Math.max(0, v)); }
+    if (Object.keys(look).length) out.look = look;
+  }
+  return Object.keys(out).length ? out : null;
+}
 function cleanStepExtras(steps) {
   const seen = new Set();
   for (const s of steps) {
+    if ('persona' in s) { const p = cleanPersona(s.persona); if (p) s.persona = p; else Reflect.deleteProperty(s, 'persona'); }
     // spec 11: a step that calls another flow (by id), optionally one of its steps, with an input template
     if (s.kind === 'flow') {
       s.flowRef = typeof s.flowRef === 'string' && /^f_[\w-]{1,60}$/.test(s.flowRef) ? s.flowRef : '';

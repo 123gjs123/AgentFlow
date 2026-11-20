@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (375 tests)
+## Qué cubre (394 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -76,6 +76,8 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `34-flow-folders` | Spec 09: una carpeta por flujo (flow.json portable, state.json de la máquina), migración automática de la carpeta vieja (respaldo completo, cortes en cada fase, archivo bloqueado, re-ejecución que solo agrega), correr solo toca state.json, renombrar la carpeta al reiniciar, borrar |
 | `35-linked-folders` | Spec 09: carpetas vinculadas (p. ej. un repo git): cuarentena al vincular y ante cambios de afuera que tocan lo que se ejecuta, detiene lo que corre, conflicto, carpeta desenchufada, rutas prohibidas, ids, git limpio y sin secretos, mover/desvincular/volver a vincular/borrar, importar una carpeta, 📂 y README, CWD_IN_DATA |
 | `36-ui-flow-folders` | Spec 09 en el navegador: 🔗 vincular y mover, selector agrupado (🔗, no disponible), 📂, banner de revisión de un vinculado |
+| `37-office-model` | Spec 29 (lógica pura + servidor): personajes (nombres distintos, función → nombre, persona), plano (sin superposiciones, todo alcanzable, salas, tope 60), BFS, el reductor evento por evento, breaks y ejecuciones superpuestas, la jornada igual al vivo, una ejecución real reconstruida, persona limpia y que no ejecuta |
+| `38-ui-office` | Spec 29 en el navegador: 🔲 Cajas / 🏢 Oficina (URL), en vivo (estantería, Tomás, computadora en rojo, RECHAZADO, bitácora), break con 🔔, clicks → paneles, jornada a 16×, movimiento reducido y pestaña oculta, editor del personaje |
 | `28-watch` | Spec 10 🔔 Novedades: rama git (primera foto, commits nuevos, se acumulan hasta "Visto", aviso 🔔), archivos y comando elemento por elemento, error sin perder la foto, Jira con Haiku de solo lectura (la app hace el diff), "ejecutar desde este step" y API externa `/status`, URL (ETag / contenido / HTTP de error), polling saneado, UI con 🔔 en el nodo |
 | `27-for-each` | Spec 15 DATA-10: "para cada": un step corre una vez por elemento de una lista JSON de arriba (`{{item.key}}`, `$env:AFS_ITEM`), de a N, junta los resultados en una lista; si uno falla los demás corren; lista vacía omite lo que sigue; origen que no es lista da error claro; UI 🔁 |
 

@@ -161,7 +161,7 @@ const stable = (v) => (Array.isArray(v) ? v.map(stable) : v && typeof v === 'obj
 export function execFingerprint(flow) {
   const { def } = splitFlow(ensureSlugs(structuredClone(flow)));
   const { name, description, versionEveryMin, format, formatVersion, id, ...rest } = def;
-  rest.steps = (rest.steps || []).map(({ position, ...s }) => s);
+  rest.steps = (rest.steps || []).map(({ position, persona, ...s }) => s); // where a box sits and who sits there never execute
   rest.edges = (rest.edges || []).map(({ sourceHandle, targetHandle, ...e }) => e);
   return sha(JSON.stringify(stable(rest)));
 }
@@ -698,7 +698,7 @@ export function listRuns(flowId) {
 // ---------- step library (spec 18: reusable boxes across flows) ----------
 const LIB = () => path.join(dir(), 'library.json');
 /** Run/session state never travels with a saved box. */
-const portable = ({ id, lastRun, memory, pinned, chatSessionId, chatContextHash, position, ...s }) => s;
+const portable = ({ id, lastRun, memory, pinned, chatSessionId, chatContextHash, position, persona, ...s }) => s; // a saved box gets its own character
 export const listLibrary = () => readJson(LIB(), []);
 export function saveToLibrary(step, name) {
   const item = { id: uid('l_'), name: String(name || step.name || 'Step').slice(0, 120), kind: step.kind, savedAt: Date.now(), step: portable(step) };

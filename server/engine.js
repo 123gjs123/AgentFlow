@@ -1062,7 +1062,7 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
   // Rehearsal (spec 28, "ensayo acotado"): breaks off, no "Al terminar", read-only AI, capped steps, lastRun untouched
   if (rehearsal) { breakpoints = false; if (!String(trigger).startsWith('flow:')) trigger = 'rehearsal'; } // a child of a rehearsal keeps who called it
   const rflow = { ...structuredClone(flow), vars: runVars };
-  const snap = { steps: flow.steps.map(({ lastRun, memory, chatSessionId, chatContextHash, position, ...s }) => s), edges: flow.edges.map(({ source, target, when, pick }) => ({ source, target, when, pick })), vars: runVars, cwd: flow.cwd };
+  const snap = { steps: flow.steps.map(({ lastRun, memory, chatSessionId, chatContextHash, position, persona, ...s }) => s), edges: flow.edges.map(({ source, target, when, pick }) => ({ source, target, when, pick })), vars: runVars, cwd: flow.cwd };
   const limit = clampInt(deadlineSec, 10, 14400, clampInt(flow.runTimeoutSec, 10, 14400, 3600));
   const t0 = now();
   const run = {
@@ -1571,7 +1571,7 @@ const STEP_NUMBERS = { bashTimeoutMin: [1, 120], timeoutSec: [10, 7200] };
 const PERMISSION_MODES_OK = new Set(['', 'default', 'acceptEdits', 'plan', 'dontAsk']);
 const toolTokens = (list) => String(list || '').match(/[^\s,()]+(?:\([^)]*\))?/g) || [];
 /** Definition of a step without run/chat state: what a review proposal is anchored to (REVIEW_STALE). */
-export const stepHash = (s) => { if (!s) return null; const { lastRun, memory, pinned, chatSessionId, chatContextHash, position, ...d } = s; return crypto.createHash('sha1').update(JSON.stringify(d)).digest('hex').slice(0, 16); };
+export const stepHash = (s) => { if (!s) return null; const { lastRun, memory, pinned, chatSessionId, chatContextHash, position, persona, ...d } = s; return crypto.createHash('sha1').update(JSON.stringify(d)).digest('hex').slice(0, 16); };
 /**
  * Spec 28 (adversarial B1): what a proposal may NEVER do, whoever wrote it (a chat, the review, or text that came from a
  * ticket or a run's output). The person can still do it by hand in the step.

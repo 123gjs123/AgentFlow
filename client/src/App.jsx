@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { api, onWs, onConn, pendingSave, TAB_ID } from './api.js';
 import { mergeFlows } from './merge.js';
@@ -12,6 +12,9 @@ import { AddSkillModal } from './SkillPicker.jsx';
 import { SettingsModal } from './Settings.jsx';
 import { AttentionButton, AttentionDrawer, AttentionToasts, flowPrefix } from './Attention.jsx';
 import { StepPicker, AiFlowModal, HelpMenu, HelpModal, Tour } from './Help.jsx';
+// spec 29: the 🏢 Oficina view is its own chunk (the canvas bundle does not grow)
+const Office = React.lazy(() => import('./office/Office.jsx'));
+const urlView = () => { try { return new URLSearchParams(location.search).get('view') === 'office' ? 'office' : null; } catch { return null; } };
 
 const ls = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 // Per-tab memory: each browser tab keeps its own open flow (also in the URL, so reload and links work).
@@ -65,6 +68,10 @@ export default function App() {
   const [attOpen, setAttOpen] = useState(URL_OPEN === 'attention');
   const [attToasts, setAttToasts] = useState([]);
   const [focusRun, setFocusRun] = useState(null); // {runId, n}: open this run in Flujo › Ejecuciones
+  // spec 29: 🔲 Cajas | 🏢 Oficina (per tab; a new tab starts with the last one used)
+  const [view, setViewState] = useState(() => urlView() || ss.get('afs.view') || ls.get('afs.view') || 'canvas');
+  const viewRef = useRef(view); viewRef.current = view;
+  const setView = (v) => { setViewState(v); ss.set('afs.view', v); ls.set('afs.view', v); try { const u = new URL(location.href); if (v === 'office') u.searchParams.set('view', 'office'); else u.searchParams.delete('view'); history.replaceState(null, '', u.toString()); } catch {} };
   useEffect(() => { api.get('/api/attention').then((r) => setAttention(r.items || [])).catch(() => {}); }, []);
   const importInput = useRef(null);
   const [skillReview, setSkillReview] = useState(null);
@@ -163,7 +170,7 @@ export default function App() {
     historyRef.current.clear(); setHistTick((n) => n + 1);
     setFlow(f); setSelectedId(null); setSelectedEdge(null); setLive({}); setPaused(null); setReviewOpen(false);
     ls.set('afs.flow', id); ss.set('afs.flow', id);
-    try { history.replaceState(null, '', `?flow=${encodeURIComponent(id)}`); } catch {}
+    try { history.replaceState(null, '', `?flow=${encodeURIComponent(id)}${viewRef.current === 'office' ? '&view=office' : ''}`); } catch {}
     // A run of this flow may be waiting at a break (e.g. after reloading the page).
     // (when 🔔 asked for a specific run, that one wins: never replace it with another paused run)
     if (!targetRun) api.get(`/api/flows/${id}/runs`).then((runs) => { const p = (runs || []).find((r) => r.status === 'paused'); if (p) { setPaused({ runId: p.id }); if (review) setReviewOpen(true); } }).catch(() => {});
@@ -391,7 +398,7 @@ export default function App() {
   function duplicateStep(id) {
     const src = flow.steps.find((s) => s.id === id);
     if (!src) return;
-    const { lastRun, memory, pinned, chatSessionId, chatContextHash, slug, ...rest } = structuredClone(src);
+    const { lastRun, memory, pinned, chatSessionId, chatContextHash, slug, persona, ...rest } = structuredClone(src); // a copy gets its own character (spec 29)
     const copy = { ...rest, id: rid('s_'), name: `${src.name} (copia)`, memory: [], lastRun: null, position: { x: src.position.x + 40, y: src.position.y + 130 } };
     mutate((f) => { f.steps.push(copy); return f; });
     setSelectedId(copy.id);
@@ -535,12 +542,28 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
       {flow ? (
         <main className="main">
           <section className="canvas" data-tour="canvas">
-            <ReactFlowProvider>
-              <Canvas flow={flow} live={live} watch={watchView} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect} onReconnect={onReconnect}
-                selectedEdge={selectedEdge} onSelectEdge={setSelectedEdge}
-                onDeleteSteps={onDeleteSteps} onDeleteEdges={onDeleteEdges} onMove={onMove} />
-            </ReactFlowProvider>
-            {!flow.steps.length && (
+            <div className="view-toggle" role="tablist" aria-label="Vista del flujo">
+              <button role="tab" data-testid="view-canvas" aria-selected={view !== 'office'} className={view !== 'office' ? 'on' : ''} onClick={() => setView('canvas')}>🔲 Cajas</button>
+              <button role="tab" data-testid="view-office" aria-selected={view === 'office'} className={view === 'office' ? 'on' : ''} onClick={() => setView('office')}>🏢 Oficina</button>
+            </div>
+            {view === 'office' ? (
+              <Suspense fallback={<div className="office-loading muted">Abriendo la oficina…</div>}>
+                <Office key={flow.id} flow={flow} selectedId={selectedId} paused={paused}
+                  onOpenStep={(id) => { setSelectedEdge(null); setSelectedId(id); setStepTab(live[id]?.status === 'running' ? 'activity' : 'config'); }}
+                  onOpenEdge={(id) => { setSelectedId(null); setSelectedEdge(id); }}
+                  onOpenRun={(runId) => { setSelectedId(null); setSelectedEdge(null); setFlowTab('runs'); if (runId) setFocusRun({ runId, n: Date.now() }); }}
+                  onOpenFlowTab={(tab) => { setSelectedId(null); setSelectedEdge(null); setFlowTab(tab); }}
+                  onOpenReview={() => setReviewOpen(true)}
+                  onBackground={() => { setSelectedId(null); setSelectedEdge(null); }} />
+              </Suspense>
+            ) : (
+              <ReactFlowProvider>
+                <Canvas flow={flow} live={live} watch={watchView} selectedId={selectedId} onSelect={(id) => setSelectedId(id)} onConnect={onConnect} onReconnect={onReconnect}
+                  selectedEdge={selectedEdge} onSelectEdge={setSelectedEdge}
+                  onDeleteSteps={onDeleteSteps} onDeleteEdges={onDeleteEdges} onMove={onMove} />
+              </ReactFlowProvider>
+            )}
+            {!flow.steps.length && view !== 'office' && (
               <div className="empty">
                 <div>Agrega steps desde la barra superior y conéctalos arrastrando del borde derecho de un step al izquierdo de otro.</div>
                 {leftovers && (leftovers.description || leftovers.vars || leftovers.memory || leftovers.chats || leftovers.runs || leftovers.schedule) ? (
@@ -556,7 +579,7 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
                 ) : null}
               </div>
             )}
-            <div className="hint-bar small muted">Arrastra entre puntos para relacionar · Supr borra lo seleccionado · Click en el fondo = chat general</div>
+            {view !== 'office' && <div className="hint-bar small muted">Arrastra entre puntos para relacionar · Supr borra lo seleccionado · Click en el fondo = chat general</div>}
           </section>
           <aside className="side" data-tour="side">
             {edgeObj ? (

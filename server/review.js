@@ -477,7 +477,7 @@ export function buildDossier(flow, lint, digests) {
   // configuration first and whole (a long task must never hide allowedTools or the limits: real bug found on a real
   // flow); long texts are clipped one by one
   const def = flow.steps.map((s) => {
-    const { lastRun, memory, chatSessionId, chatContextHash, position, pinned, role, task, context, command, hooks, ...cfg } = s;
+    const { lastRun, memory, chatSessionId, chatContextHash, position, pinned, persona, role, task, context, command, hooks, ...cfg } = s; // persona (spec 29) is not definition the model reviews
     const txt = [['role', role, 1500], ['task', task, 2500], ['context', context, 1200], ['command', command, 2500], ['hooks', hooks, 800]].filter(([, v]) => String(v || '').trim()).map(([k, v, n]) => `${k}:\n${clip(v, n)}`).join('\n');
     return `### ${s.name} [${s.id}] (${s.kind}${s.skillRef ? `: ${s.skillRef}` : ''}${s.agentRef ? `: ${s.agentRef}` : ''})\nconfiguración: ${JSON.stringify(cfg)}\n${txt}`;
   }).join('\n\n');
@@ -523,7 +523,7 @@ function verifyEvidence(flow, dossier, digests, ev, factsText = '') {
     return !!d && norm(valuesText(d).join(' ')).includes(q);
   }
   const { lastRun, memory, ...rest } = flow;
-  return norm(valuesText({ ...rest, steps: flow.steps.map(({ lastRun: _l, memory: _m, chatSessionId, chatContextHash, ...s }) => s) }).join(' ')).includes(q) || norm(dossier.replace(/<untrusted-data>[\s\S]*<\/untrusted-data>/, '')).includes(q);
+  return norm(valuesText({ ...rest, steps: flow.steps.map(({ lastRun: _l, memory: _m, chatSessionId, chatContextHash, persona, ...s }) => s) }).join(' ')).includes(q) || norm(dossier.replace(/<untrusted-data>[\s\S]*<\/untrusted-data>/, '')).includes(q);
 }
 const resolveStep = (flow, ref) => (ref && !/^(flujo|flow)$/i.test(ref) ? flow.steps.find((s) => s.id === ref || s.name.toLowerCase() === String(ref).toLowerCase()) : null);
 
