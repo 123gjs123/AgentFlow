@@ -133,3 +133,15 @@ test('UI: mientras corre, qué está haciendo en palabras (✓ Leyó a.md) y el 
     assert.deepEqual(page.errors, []);
   } finally { await ui.close?.(); }
 });
+
+test('los pasos no heredan ELECTRON_RUN_AS_NODE (con eso Cypress y otros programas Electron no arrancan)', async () => {
+  const prev = process.env.ELECTRON_RUN_AS_NODE; process.env.ELECTRON_RUN_AS_NODE = '1';
+  const s2 = await startServer({ name: 'electron-env' });
+  try {
+    await s2.start();
+    const { cmd } = await import('./helpers/harness.mjs');
+    const f = await s2.flow('Env', [cmd('Mira', 'Write-Output "E=[$env:ELECTRON_RUN_AS_NODE]"', { id: 's_e' })]);
+    const r = await s2.runUi(f.id);
+    assert.match(r.steps.s_e.output, /E=\[\]/);
+  } finally { await s2.stop(); if (prev === undefined) delete process.env.ELECTRON_RUN_AS_NODE; else process.env.ELECTRON_RUN_AS_NODE = prev; }
+});
