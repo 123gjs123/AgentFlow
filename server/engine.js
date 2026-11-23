@@ -17,6 +17,9 @@ import { flowSkillDirs } from './skills.js';
 import * as P from './prompt.js';
 import { validate, parseSchema } from './schema.js';
 import * as POL from './policies.js';
+import * as ITEMS from './items.js';
+import { secretValues } from './credentials.js';
+ITEMS.setKnownSecrets(secretValues);
 
 // Rehearsal (spec 28): each step runs at most this long; AI steps in plan mode (they describe, never change anything)
 const REHEARSAL_STEP_SEC = Math.max(10, Number(process.env.AFS_REHEARSAL_STEP_SEC) || 180);
@@ -197,9 +200,11 @@ export function addMemory(flowId, scope, text, source = 'manual') {
     const target = scope === '_flow' ? f : f.steps.find((s) => s.id === scope);
     if (!target) return;
     target.memory = target.memory || [];
-    if (!target.memory.some((m) => m.text === item.text)) target.memory.push(item);
+    if (!target.memory.some((m) => m.text === item.text)) { target.memory.push(item); item.added = true; }
   });
   if (flow) flowChanged(flow);
+  if (flow && item.added) { try { const st = flow.steps.find((s) => s.id === scope); store.appendJournal(flowId, { at: now(), type: 'memory', by: source, step: st?.name || (scope === '_flow' ? 'flujo' : scope), what: 'Memoria agregada', detail: item.text.slice(0, 300), ok: true }); } catch { /* the log never blocks */ } }
+  delete item.added;
   return item;
 }
 export function removeMemory(flowId, scope, memId) {
@@ -474,6 +479,8 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   const setLast = (patch) => { if (!opts.nested && !run.rehearsal) setStepRun(flow.id, step.id, patch); };
   const pending = new Map();
   let writeCalls = 0; // tool calls that may change something (counted at tool_use, even if no result ever arrives)
+  // D59: tool calls kept for the journal (independent of the 3000-event cap), what the step raised and what it received
+  const jev = []; let raisedRaw = []; let corpus = ''; const readData = []; let readLen = 0; // readData: what the step READ (real data a quote may come from)
   // Live child processes ({pid, at}): removed on exit, so recovery after a crash only kills what was really running.
   const trackPid = (pid) => { (rs.pids ||= []).push({ pid, at: now() }); try { store.saveRun(run); } catch {} };
   const untrackPid = (pid) => { if (rs.pids) rs.pids = rs.pids.filter((p) => (p?.pid ?? p) !== pid); };
@@ -499,6 +506,9 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
   };
   const log = (ev) => {
     const e = { ...ev, t: now() };
+    if (ev.kind === 'tool_use' && ev.id && /^(mcp__|Bash$|PowerShell$|Write$|Edit$|MultiEdit$|NotebookEdit$)/.test(String(ev.name || '')) && jev.length < 2000) jev.push(e);
+    else if (ev.kind === 'tool_result' && ev.id && jev.some((x) => x.id === ev.id)) jev.push(e);
+    if (ev.kind === 'tool_result' && !ev.isError && readLen < 2_000_000) { const nm = pending.get(ev.id)?.name || ''; if (nm === 'Read' || (nm.startsWith('mcp__') && isReadOnlyTool(nm))) { const c = String(ev.content || ''); readData.push(c); readLen += c.length; } }
     if (ev.kind === 'init' && !ev.sub) checkMcp(ev);
     if (ev.kind === 'tool_use' && ev.id) { pending.set(ev.id, { name: ev.name, input: ev.input }); if (!isReadOnlyTool(ev.name)) writeCalls++; }
     if (ev.kind === 'queued' && rs.status === 'running') { rs.status = 'queued'; opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'queued' }); setLast({ status: 'queued' }); }
@@ -699,7 +709,10 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
       const rt = POL.runtimeFor(flow, step);
       rctx.policyNotes = rt.notes;
       rctx.rehearsal = !!run.rehearsal;
+      rctx.raisedBefore = run.rehearsal ? [] : ITEMS.openForStep(flow.id, step.id);
       const prompt = P.runUserPrompt(flow, step, ctx.input, upstream, data, rctx);
+      // a quote must come from DATA: the input and what command steps produced (Pull Jira…), plus what it reads below
+      corpus = [ctx.input || '', ...(upstream || []).filter((u) => flow.steps.find((s) => s.id === u.id)?.kind === 'command').map((u) => `${u.output || ''}\n${u.json === undefined ? '' : JSON.stringify(u.json)}`)].join('\n');
       const cgit = coordinatorGit(flow, step);
       let system = P.runSystemPrompt(flow, step, rctx);
       if (cgit) system += `
@@ -730,6 +743,7 @@ ${cgit.block}`;
       if (r.isError) { error = r.error || 'error'; code = r.aborted ? null : 'CLI_ERROR'; }
       else {
         let tags = P.extractTags(r.text);
+        raisedRaw = tags.raised;
         for (const m of tags.remember) addMemory(flow.id, step.id, m, 'run');
         output = takeRoutes(tags.clean);
         if (wantsJson) {
@@ -741,6 +755,7 @@ ${cgit.block}`;
             else {
               sessionId = r2.sessionId || sessionId;
               tags = P.extractTags(r2.text);
+              if (tags.raised.length) raisedRaw = tags.raised;
               for (const m of tags.remember) addMemory(flow.id, step.id, m, 'run');
               const routesBefore = rs.routes;
               c = checkJson(takeRoutes(tags.clean));
@@ -905,7 +920,14 @@ ${cgit.block}`;
     let jsonFits = true;
     try { jsonFits = rs.json === undefined || JSON.stringify(rs.json).length < 300000; }
     catch { rs.json = undefined; (rs.warnings ||= []).push('El JSON de la salida no se puede guardar (¿referencias circulares o BigInt?): se descartó.'); }
+    if (!run.rehearsal) {
+      try {
+        if (raisedRaw.length) rs.raised = ITEMS.recordRaised(flow.id, { runId: run.id, stepId: step.id, stepName: step.name, raised: ITEMS.parseRaised(raisedRaw), corpus: `${corpus}\n${readData.join('\n')}` });
+        store.appendJournal(flow.id, ITEMS.journalFromEvents(jev, { runId: run.id, step: step.name }));
+      } catch (e) { (rs.warnings ||= []).push(`No se pudo registrar lo levantado o el registro: ${e.message}`); }
+    }
     setLast({
+      raised: rs.raised || undefined,
       status: rs.status, endedAt: rs.endedAt, output: rs.output, json: jsonFits ? rs.json : undefined, files: rs.files, actions: rs.actions,
       pinned: !!rs.pinned, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, sessionId: rs.sessionId || null, runId: run.id,
       assertions: rs.assertions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: rs.attempts.length,
@@ -1012,9 +1034,14 @@ export async function runFinally(flow, run, { input = '', data = new Map(), stat
   const t = setTimeout(() => ctl.abort(), limit * 1000);
   const startedAt = now();
   emit({ type: 'run.finally', flowId: flow.id, runId: run.id, status: 'running' });
-  const r = await sh(cmd, { cwd: flowCwd(flow), shell, input: '', env: { ...q.env, AFS_RUN_ID: run.id, AFS_RUN_STATUS: status, AFS_RUN_STEPS_JSON: JSON.stringify(steps), FLOW_INPUT: input || '', AFS_FLOW: flow.name }, signal: ctl.signal, delayed: q.values.length > 0 });
+  // D59: only the questions about the work item may leave the app (open and not yet published, or changed), plus the
+  // published ones that got resolved. «Al terminar» prints AFS-PUBLISHED <id> [ref] / AFS-CLOSED <id> [ref].
+  const pub = ITEMS.publishable(flow.id);
+  const nonce = crypto.randomBytes(8).toString('hex'); // only «Al terminar» knows it: echoed text cannot mark anything
+  const r = await sh(cmd, { cwd: flowCwd(flow), shell, input: '', env: { ...q.env, AFS_RUN_ID: run.id, AFS_RUN_STATUS: status, AFS_RUN_STEPS_JSON: JSON.stringify(steps), FLOW_INPUT: input || '', AFS_FLOW: flow.name, AFS_QUESTIONS_JSON: JSON.stringify(pub.questions), AFS_RESOLVED_JSON: JSON.stringify(pub.resolved), AFS_PUBLISH_NONCE: nonce }, signal: ctl.signal, delayed: q.values.length > 0 });
   clearTimeout(t);
-  r.stdout = hide(r.stdout); r.stderr = hide(r.stderr);
+  try { ITEMS.markPublished(flow.id, run.id, r.stdout, { nonce, ok: r.code === 0 && !ctl.signal.aborted, delivered: { questions: new Set(pub.questions.map((x) => x.id)), resolved: new Set(pub.resolved.map((x) => x.id)) } }); } catch (e) { console.error('items', e); }
+  r.stdout = hide(r.stdout.split(nonce).join('…')); r.stderr = hide(r.stderr);
   const res = { status: ctl.signal.aborted ? 'timeout' : r.code === 0 ? 'success' : 'error', exitCode: r.code, output: clipS(r.stdout.trim(), 4000), error: r.code === 0 ? undefined : clipS((r.stderr || r.stdout).trim(), 2000), startedAt, endedAt: now(), runStatus: status };
   emit({ type: 'run.finally', flowId: flow.id, runId: run.id, status: res.status });
   return res;
@@ -1324,6 +1351,8 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
       run.status = 'error'; run.error = e.message;
     }
     clearTimeout(deadline);
+    // D59: open items whose step ran again without raising them are resolved (with the reason) before publishing
+    if (!run.rehearsal) { try { ITEMS.settleRun(flowId, run, rflow); } catch (e) { console.error('items', e); } }
     // Spec 22 (B2): "Al terminar" runs after every full run, whatever its status (cleanup, notifications).
     if (!only && !run.rehearsal && hasFinally(rflow)) {
       // The run stays "running" until its cleanup ends, so pollers (UI, afs, API wait) don't see it finished too early.
@@ -1336,6 +1365,15 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
     for (const k of [...pendingReviews.keys()]) if (k.startsWith(`${run.id}:`)) pendingReviews.get(k).resolve({ action: 'stop' });
     run.pauses = [];
     run.endedAt = now();
+    if (!run.rehearsal) {
+      try {
+        const keys = [...new Set(String(input || '').match(ITEMS.KEY_RE) || [])].slice(0, 10);
+        store.appendJournal(flowId, [
+          ...(run.finally ? [{ at: run.finally.endedAt || now(), type: 'finally', runId: run.id, step: '«Al terminar»', ok: run.finally.status === 'success', what: `«Al terminar»: ${run.finally.status}`, detail: String(run.finally.output || run.finally.error || '').slice(0, 600), tickets: keys, ticket: keys[0] || null }] : []),
+          { at: now(), type: 'run', runId: run.id, ok: run.status === 'success', what: `Ejecución ${only ? 'de un paso' : run.from ? 'desde un paso' : 'completa'}: ${run.status}`, status: run.status, trigger: run.trigger || null, startedAt: run.startedAt, tickets: keys, ticket: keys[0] || null },
+        ]);
+      } catch (e) { console.error('journal', e); }
+    }
     try { run.totals = runTotals(run); delete run.dirty; store.saveRun(run); } catch (err) { console.error('No se pudo guardar la ejecución', run.id, err); }
     activeRuns.delete(run.id);
     emit({ type: 'run.finished', flowId, runId: run.id, status: run.status, error: run.error, ...(run.rehearsal ? { rehearsal: true } : {}) });
@@ -1892,6 +1930,7 @@ export async function applyProposal(flowId, key, messageId, proposalId, { runId 
   const result = await applyChange(flowId, key, p, { runId, confirmWiden });
   if (result?.prevContent !== undefined) { markProposal(flowId, key, messageId, proposalId, { prev: result.prevContent }); delete result.prevContent; }
   markProposal(flowId, key, messageId, proposalId, { applied: true, appliedAt: now() });
+  try { store.appendJournal(flowId, { at: now(), type: 'change', by: 'user', what: `Propuesta aplicada (${p.kind})`, step: key === '_flow' ? 'flujo' : (store.getFlow(flowId)?.steps.find((s) => s.id === key)?.name || key), detail: String(p.path || p.text || JSON.stringify(p.patch || p.policy || p.output || '')).slice(0, 300), ok: true }); } catch { /* the log never blocks */ }
   return result;
 }
 /**

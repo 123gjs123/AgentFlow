@@ -38,7 +38,7 @@ $env:AFS_PLAYWRIGHT = "C:\ruta\a\otro-proyecto\node_modules\playwright-core"; np
 
 Si un test de UI falla, deja la captura y el texto de la página en `test-results/ui-*.png|txt`.
 
-## Qué cubre (407 tests)
+## Qué cubre (410 tests)
 
 | Archivo | Qué prueba |
 |---|---|
@@ -81,6 +81,9 @@ Si un test de UI falla, deja la captura y el texto de la página en `test-result
 | `39-run-report` | 📋 Informe de una ejecución: dónde se cortó y por qué (error y última salida), cada paso con su motivo, «Al terminar», descarga .md, sin secretos; botón en Ejecuciones (lista y detalle) |
 | `40-run-from-step` | ▶▶ Desde aquí: reintentar desde el paso que falló; los anteriores pasan su última salida, sin input se reusa la de la última ejecución completa (las parciales no cuentan); botón en el step solo si tiene pasos después |
 | `41-what-happened` | «Qué pasó»: causa en una frase, arreglo según el problema (lectura en un clic; lo que escribe o envía con confirmación; intérpretes y comandos que escriben nunca; nombre real del conector), reintentar; omitidos con la causa raíz; log plegado; mientras corre, qué hace en palabras y el log en vivo plegado; los pasos no heredan ELECTRON_RUN_AS_NODE |
+| `42-stop-keeps-last` | Detener una ejecución no borra lo último que produjeron los pasos: el que no llegó a correr conserva su último resultado real (para «Desde aquí» y `{{steps.X}}`); solo el registro de la ejecución detenida dice que se omitió |
+| `43-raised-items` | D59: lo que levanta un paso (`<raise>{json}</raise>`) se clasifica (duda del ticket, problema del flujo, control, acción, aprendizaje); solo la duda con cita y sin hablar del flujo sale por «Al terminar», una vez; resueltos por silencio con motivo; cierre avisado una vez; `journal.jsonl` y vista de tickets |
+| `44-tickets-registro-ui` | D59 UI: 🎫 Tickets (conteos por ticket, ítems por clase, Llevar al ticket / Descartar con motivo / Reabrir, registro del ticket, última ejecución abre en Ejecuciones), 🧾 Registro (más nuevo primero, ruta y descarga del .jsonl, filtros por ticket y tipo) y «Lo que levantó este paso» en el panel del step |
 | `28-watch` | Spec 10 🔔 Novedades: rama git (primera foto, commits nuevos, se acumulan hasta "Visto", aviso 🔔), archivos y comando elemento por elemento, error sin perder la foto, Jira con Haiku de solo lectura (la app hace el diff), "ejecutar desde este step" y API externa `/status`, URL (ETag / contenido / HTTP de error), polling saneado, UI con 🔔 en el nodo |
 | `27-for-each` | Spec 15 DATA-10: "para cada": un step corre una vez por elemento de una lista JSON de arriba (`{{item.key}}`, `$env:AFS_ITEM`), de a N, junta los resultados en una lista; si uno falla los demás corren; lista vacía omite lo que sigue; origen que no es lista da error claro; UI 🔁 |
 

@@ -174,6 +174,16 @@ function describeKind(step, flow) {
  * Labelled pieces of the system prompt for RUNNING a step (spec 17 CTX-1). The engine joins them; the context
  * preview shows them one by one — same code, so the preview is exactly what gets sent.
  */
+/** D59: one channel for "something is missing", the same for every flow. Only a question may leave the app. */
+export const RAISE_RULES = `- Si algo falta o no se pudo hacer, NO lo anotes como pendiente en un archivo ni lo pidas a una persona en el texto: levántalo al final, un bloque por punto:
+  <raise>{"kind":"question","item":"<clave del ticket>","for":"PO|Dev|…","text":"la duda","quote":"frase LITERAL de los datos recibidos que la origina","blocks":"qué bloquea"}</raise>
+  · question: SOLO una duda sobre el trabajo en sí (requisito, criterio de aceptación, alcance, una decisión de negocio) que solo esa persona puede contestar. Es lo único que puede llegar al ticket; sin cita literal no sale.
+  · blocker: un problema del flujo o del ambiente (herramienta, permiso, instalación, repositorio, archivo, dato técnico). Lo resuelve la app con el usuario; nunca va al ticket.
+  · check: una condición de proceso o de salida que no se cumple (p. ej. un bug vinculado sigue abierto). La verifica el cierre, no se pregunta.
+  · action: un cambio en otro sistema que el flujo debería hacer y no hiciste (vincular, mover un estado, mergear).
+  · lesson: lo que el contexto o la skill de este step deberían decir para la próxima vez.
+  Antes de levantar algo, verifícalo con los datos actuales de esta ejecución: no repitas lo que ya no es cierto.`;
+
 export function systemSections(flow, step, rctx = {}) {
   const S = (id, label, source, text) => ({ id, label, source, toModel: 'system', text });
   const ref = step.kind === 'skill' ? step.skillRef : step.kind === 'agent' ? step.agentRef : '';
@@ -206,7 +216,12 @@ ${routed.map(({ e, t }) => `- ${t.name}${e.label ? `: ${e.label}` : ''}`).join('
   out.push(S('rules', 'Reglas de salida (fijas)', 'app', `## Reglas de salida
 - Tu respuesta final ES la salida de este step y se pasa a los steps siguientes: concreta y accionable.
 - Si descubres un hecho duradero útil para futuras ejecuciones de este step, agrégalo al final como <remember>hecho</remember> (uno por línea).
-- No inventes datos: si te falta información o una herramienta fue denegada, dilo explícitamente.`));
+- No inventes datos: si te falta información o una herramienta fue denegada, dilo explícitamente.
+${RAISE_RULES}`));
+  const before = rctx.raisedBefore || [];
+  if (before.length) out.push(S('raisedBefore', `Ya levantado por este step (${before.length})`, 'registro de la app (items.json)', `## Ya levantado antes por este step
+${before.map((it) => `- ${it.id} (${it.kind}${it.item ? `, ${it.item}` : ''}${it.published ? ', ya publicado' : ''}): ${it.text}`).join('\n')}
+Verifícalo con los datos de ESTA ejecución. Si sigue vigente: <raise>{"id":"<id>"}</raise> (no lo reescribas). Si ya no aplica: <raise>{"id":"<id>","resolved":"por qué, con el dato actual"}</raise>.`));
   return out;
 }
 
@@ -562,11 +577,12 @@ export function extractTags(text) {
     ...all(/<structure-update>([\s\S]*?)<\/structure-update>/g).map((m) => ({ kind: 'structure', patch: json(m[1]) })),
     ...remember.map((text) => ({ kind: 'memory', text })),
   ];
+  const raised = all(/<raise>([\s\S]*?)<\/raise>/g).map((m) => m[1].trim()).filter(Boolean);
   const clean = t
-    .replace(/<(remember|step-update|flow-update|output-update|run-request|policy-update|structure-update)>[\s\S]*?<\/\1>/g, '')
+    .replace(/<(remember|step-update|flow-update|output-update|run-request|policy-update|structure-update|raise)>[\s\S]*?<\/\1>/g, '')
     .replace(/<file-update\s+path\s*=\s*"[^"]+"\s*>[\s\S]*?<\/file-update>/g, '')
     .trim();
-  return { remember, updates, proposals, clean };
+  return { remember, updates, proposals, raised, clean };
 }
 
 /** Pulls the last ```json block (or a bare JSON answer) out of a step's text. */

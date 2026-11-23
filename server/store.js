@@ -577,6 +577,25 @@ export function listReviews(flowId) {
 }
 /** Findings the person dismissed: {fp: {anchor, reason, at}} (a dismissed finding stays hidden while its anchor holds). */
 // spec 10: 🔔 news of the watched sources (snapshots, pending changes) per flow
+// D59: what steps raised (questions, blockers, checks, actions, lessons), with a stable id and a state
+export const getItems = (flowId) => readJson(flowFile(flowId, 'items.json'), []);
+export const saveItems = (flowId, list) => { flowSub(flowId); writeJson(flowFile(flowId, 'items.json'), list); };
+// D59: the log of everything done (journal.jsonl: one JSON object per line, append-only, readable outside the app)
+export const journalFile = (flowId) => flowFile(flowId, 'journal.jsonl');
+let journalFilter = (e) => e; // items.js masks secrets in every entry, whoever writes it
+export const setJournalFilter = (fn) => { journalFilter = fn; };
+export function appendJournal(flowId, entries) {
+  const list = (Array.isArray(entries) ? entries : [entries]).filter(Boolean).map((e) => journalFilter(e));
+  if (!list.length) return;
+  flowSub(flowId);
+  fs.appendFileSync(journalFile(flowId), list.map((e) => JSON.stringify(e)).join('\n') + '\n');
+}
+export function readJournal(flowId) {
+  let t = ''; try { t = fs.readFileSync(journalFile(flowId), 'utf8'); } catch { return []; }
+  const out = [];
+  for (const line of t.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch { /* a torn line is skipped */ } }
+  return out;
+}
 export const getWatch = (flowId) => readJson(flowFile(flowId, 'sources.json'), {});
 export const saveWatch = (flowId, v) => { flowSub(flowId); writeJson(flowFile(flowId, 'sources.json'), v); };
 export const getSuppressed = (flowId) => readJson(flowFile(flowId, 'reviews', 'suppressed.json'), {});
@@ -727,6 +746,7 @@ export const getVersion = (flowId, id) => readJson(flowFile(flowId, 'versions', 
 export function saveVersion(flow, { label = '', auto = false } = {}) {
   const v = { id: uid('v_'), at: Date.now(), label: String(label || '').slice(0, 120), auto: !!auto, rev: flow.rev || 0, hash: definitionHash(flow), flow: definitionOf(flow) };
   writeJson(path.join(verDir(flow.id), `${v.id}.json`), v);
+  if (!auto) { try { appendJournal(flow.id, { at: v.at, type: 'version', by: 'user', what: `Versión guardada: ${v.label || v.id}`, detail: v.id, ok: true }); } catch { /* the log never blocks */ } }
   // keep the last 30 automatic versions (named ones are never pruned)
   const autos = listVersions(flow.id).filter((x) => x.auto);
   for (const old of autos.slice(30)) fs.rmSync(flowFile(flow.id, 'versions', `${safe(old.id)}.json`), { force: true });

@@ -73,7 +73,7 @@ a { color: var(--accent); cursor: pointer; }
 .panel-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .title-input { font-size: 15px; font-weight: 600; background: transparent; border-color: transparent; }
 .title-input:hover { border-color: var(--line); }
-.tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); }
+.tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); }
 .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); }
 .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
 .panel-body { flex: 1; overflow: auto; min-height: 0; }
@@ -548,3 +548,33 @@ pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }
 .live-summary .ls-now { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .live-summary .ls-done { color: var(--muted); }
 .live-summary .ls-done.err { color: var(--err, #d55); }
+/* D59: 🎫 Tickets, 🧾 Registro and «Lo que levantó este paso» */
+a.btn { display: inline-block; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; text-decoration: none; white-space: nowrap; }
+a.btn:hover { border-color: var(--accent); }
+.tk-list, .tk-items, .journal-list, .raised-items ul { list-style: none; padding: 0; margin: 0; }
+.tk-row { padding: 8px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
+.tk-row:hover { background: var(--bg3); }
+.tk-row.on { border-color: var(--accent); }
+.tk-key { font-family: var(--mono); }
+.tk-counts { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); }
+.tk-counts b { color: var(--text); }
+.tk-detail { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 6px; }
+.tk-detail h4 { margin: 4px 0 8px; font-family: var(--mono); }
+.tk-group { margin-bottom: 10px; }
+.tk-item { background: var(--bg3); border-radius: 6px; padding: 6px 8px; margin: 4px 0; display: flex; flex-direction: column; gap: 3px; }
+.tk-item.st-resolved, .tk-item.st-dismissed, .tk-item.st-answered { opacity: .75; }
+.tk-text { white-space: pre-wrap; }
+.tk-quote { margin: 0; padding: 2px 8px; border-left: 2px solid var(--accent); color: var(--muted); white-space: pre-wrap; }
+.tk-acts { flex-wrap: wrap; }
+.journal-file code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.journal-filters { flex-wrap: wrap; margin: 8px 0; }
+.journal-filters select { width: auto; flex: 1 1 140px; }
+.journal-entry { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.je-line { display: flex; gap: 8px; align-items: baseline; }
+.je-time { font-family: var(--mono); flex: none; }
+.je-text { word-break: break-word; }
+.je-meta .chip { margin-left: 4px; }
+.je-detail { white-space: pre-wrap; max-height: 4.5em; overflow: hidden; font-family: var(--mono); }
+.raised-items { margin: 8px 10px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 6px; }
+.raised-item { padding: 4px 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
+.raised-item:first-child { border-top: none; }

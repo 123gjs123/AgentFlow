@@ -31,6 +31,7 @@ import * as OUT from './outputs.js';
 import * as POL from './policies.js';
 import * as notify from './notify.js';
 import { checkSystem } from './system.js';
+import * as ITEMS from './items.js';
 import { runReport } from './report.js';
 import { cachedPreflight, setOnChecked } from './preflight.js';
 import { REQ_TYPES, preflight, preflightMessage, suggestRequirements, createFromTemplate, clearPreflightCache } from './preflight.js';
@@ -337,6 +338,20 @@ app.post('/api/flows/:id/versions', wrap((req) => store.saveVersion(need(req.par
 app.get('/api/flows/:id/versions/:vid', wrap((req) => { need(req.params.id); const v = store.getVersion(req.params.id, req.params.vid); if (!v) throw fail(404, 'Versión no encontrada', 'VERSION_NOT_FOUND'); return v; }));
 app.delete('/api/flows/:id/versions/:vid', wrap((req) => { need(req.params.id); store.deleteVersion(req.params.id, req.params.vid); }));
 /** Restore: the current state is saved first ("Antes de restaurar…"), so a restore can always be undone. Run state is kept for steps that still exist. */
+// D59: what steps raised (items), the tickets view and the log of everything done (journal.jsonl, readable outside)
+app.get('/api/flows/:id/items', wrap((req) => { need(req.params.id); return store.getItems(req.params.id); }));
+app.post('/api/flows/:id/items/:itemId/state', wrap((req) => { need(req.params.id); return ITEMS.setState(req.params.id, req.params.itemId, String(req.body?.state || ''), String(req.body?.reason || '')); }));
+app.get('/api/flows/:id/tickets', wrap((req) => { need(req.params.id); return ITEMS.ticketsView(req.params.id, store.listRuns(req.params.id)); }));
+app.get('/api/flows/:id/journal', wrap((req) => {
+  need(req.params.id);
+  const q = req.query; const lim = Math.min(5000, Math.max(1, Number(q.limit) || 500));
+  let list = store.readJournal(req.params.id);
+  if (q.ticket) list = list.filter((e) => e.ticket === q.ticket || (e.tickets || []).includes(q.ticket));
+  if (q.type) list = list.filter((e) => e.type === q.type);
+  if (q.run) list = list.filter((e) => e.runId === q.run);
+  return { file: store.journalFile(req.params.id), total: list.length, entries: list.slice(-lim).reverse() };
+}));
+app.get('/api/flows/:id/journal.jsonl', wrap(async (req, res) => { need(req.params.id); res.type('application/x-ndjson; charset=utf-8'); const f = store.journalFile(req.params.id); res.send(fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''); return undefined; }));
 app.post('/api/flows/:id/versions/:vid/restore', wrap((req) => {
   const cur = need(req.params.id);
   const v = store.getVersion(req.params.id, req.params.vid);

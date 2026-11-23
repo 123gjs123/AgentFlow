@@ -67,6 +67,7 @@ export default function App() {
   const [attention, setAttention] = useState([]);
   const [attOpen, setAttOpen] = useState(URL_OPEN === 'attention');
   const [attToasts, setAttToasts] = useState([]);
+  const [focusTicket, setFocusTicket] = useState(null); // {key, n}: open 🎫 Tickets (on that ticket) — D59
   const [focusRun, setFocusRun] = useState(null); // {runId, n}: open this run in Flujo › Ejecuciones
   // spec 29: 🔲 Cajas | 🏢 Oficina (per tab; a new tab starts with the last one used)
   const [view, setViewState] = useState(() => urlView() || ss.get('afs.view') || ls.get('afs.view') || 'canvas');
@@ -592,9 +593,10 @@ Se conserva el nombre, el directorio de trabajo y la URL/token de invocación.
             ) : step ? (
               <StepPanel key={step.id} onDuplicate={() => duplicateStep(step.id)} onSaveLib={() => saveToLibrary(step.id)} flow={flow} step={step} catalog={catalog} live={live[step.id]} watch={watchView} running={anyRunning} tab={stepTab} setTab={setStepTab}
                 onChange={(p) => patchStep(step.id, p)} onDelete={() => onDeleteSteps([step.id])} onRun={(inp) => runStep(step.id, inp)} onRunFrom={(inp) => runFrom(step.id, inp)} onProbe={probe}
-                onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
+                onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }}
+                onOpenTickets={(key) => { setSelectedId(null); setSelectedEdge(null); setFlowTab('tickets'); setFocusTicket({ key: key || null, n: Date.now() }); }} />
             ) : (
-              <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} running={anyRunning} focusRun={focusRun} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
+              <FlowPanel key={`${flow.id}:${resetNonce}`} onReset={resetFlow} flow={flow} running={anyRunning} focusRun={focusRun} focusTicket={focusTicket} tab={flowTab} setTab={setFlowTab} onChange={(p) => mutate((f) => ({ ...f, ...p }))}
                 onOpenStep={(id) => { setSelectedId(id); setStepTab('chat'); }} />
             )}
           </aside>

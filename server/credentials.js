@@ -117,6 +117,16 @@ export function resolveCredential(name, field) {
   return { value: v, secret: false };
 }
 
+/** Every secret value (decrypted), to MASK it in logs. Cached briefly: the journal masks on every entry. Never shown. */
+let secretCache = { at: 0, values: [] };
+export function secretValues() {
+  if (Date.now() - secretCache.at < 30000) return secretCache.values;
+  const values = [];
+  for (const c of readAll()) for (const f of TYPES[c.type]?.fields || []) if (f.secret && c.secrets?.[f.k]) { try { values.push(open(c.secrets[f.k])); } catch { /* unreadable: nothing to mask */ } }
+  secretCache = { at: Date.now(), values };
+  return values;
+}
+
 /** {{cred.x.y}} references used by a flow's command steps and "Al terminar". */
 export const CRED_RE = /\{\{\{?\s*cred\.([a-z][a-z0-9_-]*)\.([a-z]+)\s*\}?\}\}/gi;
 export function credentialRefs(flow, only = null) {

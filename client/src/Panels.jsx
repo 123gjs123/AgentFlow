@@ -12,6 +12,7 @@ import SkillPicker from './SkillPicker.jsx';
 import ContextSources, { FsPicker } from './Sources.jsx';
 import RequirementsEditor from './Requirements.jsx';
 import ReviewPanel from './ReviewPanel.jsx';
+import { TicketsPanel, JournalPanel, RaisedItems } from './Tickets.jsx';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { Modal } from './Help.jsx';
@@ -169,7 +170,7 @@ function Field({ label, hint, children, div }) {
   return <Tag className="field"><span className="field-label">{label}{hint && <span className="hint"> — {hint}</span>}</span>{children}</Tag>;
 }
 
-export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab, setTab, onChange, onDelete, onRun, onRunFrom, onProbe, onOpenStep, onDuplicate, onSaveLib }) {
+export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab, setTab, onChange, onDelete, onRun, onRunFrom, onProbe, onOpenStep, onDuplicate, onSaveLib, onOpenTickets }) {
   const [runInput, setRunInput] = useState('');
   const [runEvents, setRunEvents] = useState(null);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
@@ -200,6 +201,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
       </div>
 
       {!['running', 'queued', 'paused'].includes(status) && <WhatHappened flow={flow} step={step} tools={tools} running={running} onChange={onChange} onRun={() => { onRun(''); setTab('activity'); }} onRunFrom={onRunFrom && (() => { onRunFrom(''); setTab('activity'); })} onGoStep={(id) => { onOpenStep?.(id); setTab('activity'); }} onShowLog={() => setTab('activity')} />}
+      {!['running', 'queued', 'paused'].includes(status) && <RaisedItems step={step} onOpenTickets={onOpenTickets} />}
       {(tab === 'config' || tab === 'chat') && <ContextBox flow={flow} step={step} target={tab === 'chat' ? 'chat' : 'run'} />}
 
       {tab === 'config' && (
@@ -374,7 +376,7 @@ function insertIntoSuccess(code, snippet) {
   return code.slice(0, at) + snippet + code.slice(at);
 }
 
-export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOpenStep, onReset }) {
+export function FlowPanel({ flow, running, focusRun, focusTicket, tab, setTab, onChange, onOpenStep, onReset }) {
   const [varsText, setVarsText] = useState(JSON.stringify(flow.vars || {}, null, 2));
   const [varsErr, setVarsErr] = useState('');
   const [runs, setRuns] = useState([]);
@@ -388,12 +390,14 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
   // "Ver ejecución" from 🔔 (spec 27): open that run's detail
   useEffect(() => { if (focusRun?.runId) api.get(`/api/flows/${flow.id}/runs/${focusRun.runId}`).then(setRunDetail).catch(() => {}); }, [focusRun?.n]);
   const set = (k) => (e) => onChange({ [k]: e.target.value });
+  // D59: a run named in 🎫 Tickets / 🧾 Registro opens in Ejecuciones, like «Ver ejecución» from 🔔
+  const openRun = (runId) => { setTab('runs'); api.get(`/api/flows/${flow.id}/runs/${runId}`).then(setRunDetail).catch((e) => alert(e.message)); };
 
   return (
     <div className="panel">
       <div className="panel-head"><b>{flow.name}</b><span className="muted small">{flow.steps.length} steps</span></div>
       <div className="tabs">
-        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['review', '🩺 Revisión'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones'], ['versions', 'Versiones'], ['external', 'Invocar']].map(([k, l]) => (
+        {[['chat', 'Chat general'], ['settings', 'Flujo'], ['review', '🩺 Revisión'], ['memory', `Memoria (${flow.memory?.length || 0})`], ['runs', 'Ejecuciones'], ['tickets', '🎫 Tickets'], ['journal', '🧾 Registro'], ['versions', 'Versiones'], ['external', 'Invocar']].map(([k, l]) => (
           <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)} data-testid={`flow-tab-${k}`}>{l}</button>
         ))}
       </div>
@@ -469,6 +473,8 @@ export function FlowPanel({ flow, running, focusRun, tab, setTab, onChange, onOp
       )}
       {tab === 'review' && <ReviewPanel flow={flow} running={running} onChange={onChange} />}
       {tab === 'external' && <div className="panel-body pad"><ExternalInvoke flow={flow} /></div>}
+      {tab === 'tickets' && <TicketsPanel flow={flow} focusTicket={focusTicket} onOpenRun={openRun} />}
+      {tab === 'journal' && <JournalPanel flow={flow} onOpenRun={openRun} />}
       {tab === 'versions' && <div className="panel-body pad"><Versions flow={flow} onChange={onChange} /></div>}
       {tab === 'memory' && <Memory flowId={flow.id} scope="_flow" items={flow.memory} />}
       {tab === 'runs' && (
