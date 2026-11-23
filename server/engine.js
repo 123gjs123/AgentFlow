@@ -219,6 +219,15 @@ function setStepRun(flowId, stepId, patch) {
   if (flow) flowChanged(flow);
   return flow;
 }
+/** Puts a step's lastRun back as it was (null = it had none). */
+function restoreStepRun(flowId, stepId, last) {
+  const flow = store.updateFlow(flowId, (f) => {
+    const s = f.steps.find((x) => x.id === stepId);
+    if (s) { if (last) s.lastRun = last; else delete s.lastRun; }
+  });
+  if (flow) flowChanged(flow);
+  return flow;
+}
 
 const clipS = (x, n) => (typeof x === 'string' && x.length > n ? x.slice(0, n) + `\n… [${x.length - n} chars más]` : x);
 const EFFECT_RE = /^(create|add|edit|update|transition|delete|send|share|trash|copy|move|upload|post)/i;
@@ -1134,12 +1143,16 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
     }
   };
   const exec = async (...args) => { executing++; syncClock(); try { return await executeStep(...args); } finally { executing--; syncClock(); } };
+  const prevLast = new Map(); // stepId -> its lastRun before a «before» break of this run
   const pauseAt = (step, when, info) => new Promise((resolve) => {
     const key = `${run.id}:${step.id}`;
     const p = { stepId: step.id, step: step.name, when, at: now(), actions: REVIEW_ACTIONS[when], ...info };
     run.pauses.push(p); run.status = 'paused'; syncClock();
-    if (when === 'before') run.steps[step.id] = { status: 'paused', pausedWhen: 'before', output: '', events: [], startedAt: now() };
-    else run.steps[step.id].status = 'paused';
+    if (when === 'before') {
+      // what the step last produced, to put back if the run is stopped before it runs (it never ran in this run)
+      if (!prevLast.has(step.id)) prevLast.set(step.id, store.getFlow(flowId)?.steps.find((x) => x.id === step.id)?.lastRun ?? null);
+      run.steps[step.id] = { status: 'paused', pausedWhen: 'before', output: '', events: [], startedAt: now() };
+    } else run.steps[step.id].status = 'paused';
     setStepRun(flowId, step.id, { status: 'paused', runId: run.id });
     emit({ type: 'step.status', flowId, runId: run.id, stepId: step.id, status: 'paused' });
     store.saveRun(run);
@@ -1290,7 +1303,19 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
         if (controller.signal.aborted) break;
       }
       if (controller.signal.aborted) {
-        for (const id of levels.flat()) if (!run.steps[id] || run.steps[id].status === 'paused') skip(id, run.timedOut ? 'deadline' : 'cancelled', run.timedOut ? 'Omitido: se agotó el tiempo máximo de la ejecución.' : 'Omitido: la ejecución se detuvo.');
+        // A step that never ran in this run keeps its last real result: a stop is not a result, and «Desde aquí»
+        // and {{steps.X}} read the last successful output. Only this run's record says it was skipped.
+        for (const id of levels.flat()) {
+          const st = run.steps[id];
+          const neverRan = !st || (st.status === 'paused' && st.pausedWhen === 'before');
+          if (!neverRan && st.status !== 'paused') continue;
+          const reason = run.timedOut ? 'deadline' : 'cancelled';
+          const text = run.timedOut ? 'Omitido: se agotó el tiempo máximo de la ejecución.' : 'Omitido: la ejecución se detuvo.';
+          if (!neverRan || run.rehearsal) { skip(id, reason, text); continue; }
+          run.steps[id] = { status: 'skipped', skipReason: reason, output: '', events: [{ kind: 'error', text, t: now(), seq: ++run.eventSeq }] };
+          if (st) restoreStepRun(flowId, id, prevLast.get(id) ?? null); // undo the «paused» mark of the break
+          emit({ type: 'step.status', flowId, runId: run.id, stepId: id, status: 'skipped' });
+        }
       }
       const anyTimeout = Object.values(run.steps).some((x) => x.status === 'timeout');
       run.status = controller.signal.aborted ? (run.timedOut ? 'timeout' : 'stopped') : failed.size ? (anyTimeout ? 'timeout' : 'error') : 'success';
