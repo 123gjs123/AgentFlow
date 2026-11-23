@@ -112,3 +112,24 @@ test('UI: el conector con otro nombre en el CLI se corrige con un clic; cubierto
     assert.deepEqual(page.errors, []);
   } finally { await ui.close?.(); }
 });
+
+test('UI: mientras corre, qué está haciendo en palabras (✓ Leyó a.md) y el log en vivo plegado', async (t) => {
+  const { openUi } = await import('./helpers/browser.mjs');
+  const ui = await openUi('live-summary-ui');
+  try {
+    if (ui.skipReason) { t.skip(ui.skipReason); return; }
+    const { s: u, page } = ui;
+    const f = await u.flow('En vivo', [role('Lee', '[[mock:tool Read docs/a.md]] [[mock:hold 4]] [[mock:say listo]]', { id: 's_l' })]);
+    await page.goto(`${u.base}/?flow=${f.id}`);
+    await page.locator('.react-flow__node').first().click();
+    await page.locator('.tabs button', { hasText: 'Actividad' }).click();
+    await u.uiOk('POST', `/api/flows/${f.id}/run`, { input: '' });
+    const live = page.getByTestId('live-summary');
+    await live.getByText(/Leyó a\.md/).waitFor({ timeout: 20000 });
+    assert.equal(await page.getByTestId('run-log').getAttribute('open'), null, 'el log en vivo está plegado');
+    assert.equal(await page.locator('.ev-init').isVisible(), false, 'la sesión y los conectores no se ven');
+    await page.locator('.last-out', { hasText: 'listo' }).waitFor({ timeout: 20000 });
+    assert.equal(await live.count(), 0, 'al terminar se va');
+    assert.deepEqual(page.errors, []);
+  } finally { await ui.close?.(); }
+});

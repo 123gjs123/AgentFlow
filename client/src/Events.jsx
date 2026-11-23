@@ -92,3 +92,44 @@ function EventRow({ e, result }) {
       return null;
   }
 }
+
+/* ---------- while a step runs: what it is doing, in words; the log stays folded ---------- */
+const base = (p) => String(p || '').split(/[\/]/).filter(Boolean).pop() || String(p || '');
+const SYSTEM = (srv) => { const s = srv.replace(/^claude_ai_/, '').replace(/_/g, ' '); return /atlassian|jira/i.test(s) ? 'Jira' : /drive/i.test(s) ? 'Google Drive' : /playwright/i.test(s) ? 'el navegador' : s; };
+/** One tool call as a plain sentence (null = not worth telling). */
+export function actionText(e) {
+  const i = e.input || {};
+  const n = String(e.name || '');
+  if (n === 'ToolSearch' || n === 'TodoWrite') return null;
+  const file = base(i.file_path || i.path || i.notebook_path || toolSummary(n, i));
+  if (n === 'Read') return `Leyó ${file}`;
+  if (n === 'Write') return `Escribió ${file}`;
+  if (n === 'Edit' || n === 'MultiEdit') return `Editó ${file}`;
+  if (n === 'Glob' || n === 'Grep') return `Buscó ${short(i.pattern || '', 60)}`;
+  if (n === 'Bash' || n === 'PowerShell') return `Ejecutó ${short(i.command || '', 70)}`;
+  if (n === 'Skill') return `Cargó la skill ${i.skill || i.name || ''}`;
+  if (n === 'WebFetch' || n === 'WebSearch') return `Consultó la web${i.url ? ` (${short(i.url, 50)})` : ''}`;
+  if (n === 'Task' || n === 'Agent') return `Le pidió algo a un subagente`;
+  const m = /^mcp__(.+?)__(.+)$/.exec(n);
+  if (m) { const verb = /^(get|search|list|fetch|read|lookup|query|find)/i.test(m[2]) ? 'Consultó' : 'Usó'; return `${verb} ${SYSTEM(m[1])} (${m[2].replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase()})`; }
+  return `Usó ${n}`;
+}
+const ago = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`; };
+export function LiveSummary({ events = [], startedAt }) {
+  const [, tick] = useState(0);
+  React.useEffect(() => { const t = setInterval(() => tick((x) => x + 1), 1000); return () => clearInterval(t); }, []);
+  const results = new Set(events.filter((e) => e.kind === 'tool_result' && e.id).map((e) => e.id));
+  const tools = events.filter((e) => e.kind === 'tool_use');
+  const done = tools.filter((e) => results.has(e.id) && actionText(e)).map((e) => ({ text: actionText(e), err: events.some((r) => r.kind === 'tool_result' && r.id === e.id && r.isError) }));
+  const open = [...tools].reverse().find((e) => !results.has(e.id) && actionText(e));
+  const last = events[events.length - 1];
+  const now = open ? `${actionText(open)}…`.replace(/^(Leyó|Escribió|Editó|Buscó|Ejecutó|Cargó|Consultó|Usó|Le pidió)/, (v) => ({ Leyó: 'Leyendo', Escribió: 'Escribiendo', Editó: 'Editando', Buscó: 'Buscando', Ejecutó: 'Ejecutando', Cargó: 'Cargando', Consultó: 'Consultando', Usó: 'Usando', 'Le pidió': 'Pidiéndole' })[v])
+    : last?.kind === 'thinking_tokens' || last?.kind === 'thinking' ? 'Pensando…' : last?.kind === 'text' ? 'Redactando…' : 'Trabajando…';
+  const t0 = startedAt || events.find((e) => e.t)?.t;
+  return (
+    <div className="live-summary" data-testid="live-summary">
+      <div className="ls-now"><span className="spinner" /> <b>{now}</b>{t0 ? <span className="muted small"> · {ago(Date.now() - t0)}</span> : null}{done.length ? <span className="muted small"> · {done.length} {done.length === 1 ? 'acción' : 'acciones'}</span> : null}</div>
+      {done.slice(-3).map((d, i) => <div key={i} className={`ls-done small ${d.err ? 'err' : ''}`}>{d.err ? '✗' : '✓'} {d.text}</div>)}
+    </div>
+  );
+}

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { openCredentials } from './Credentials.jsx';
 import { api, pendingSave } from './api.js';
 import Chat from './Chat.jsx';
-import Events from './Events.jsx';
+import Events, { LiveSummary } from './Events.jsx';
 import { ACCESS, accessOf } from './presets.js';
 import { ExternalInvoke } from './Help.jsx';
 import { TplField, IoSettings, DataTab, VerifySettings, RunStats } from './Data.jsx';
@@ -322,7 +322,17 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
 
       {tab === 'activity' && (
         <div className="panel-body pad">
-          {['running', 'queued', 'paused'].includes(status) ? (live?.events?.length ? <Events events={live.events} running={status === 'running'} /> : runEvents ? <Events events={runEvents} /> : <div className="muted small">Arrancando…</div>) : (<>
+          {['running', 'queued', 'paused'].includes(status) ? (<>
+            {status === 'paused' ? <div className="live-summary"><b>⏸ En pausa para revisión</b> <span className="muted small">— seguí desde la ventana de revisión</span></div>
+              : status === 'queued' ? <div className="live-summary"><b>⏳ En cola</b> <span className="muted small">— espera su turno</span></div>
+                : <LiveSummary events={live?.events || []} startedAt={live?.startedAt || step.lastRun?.startedAt} />}
+            {(live?.events?.length || runEvents?.length) ? (
+              <details className="run-log" data-testid="run-log">
+                <summary>🔎 Ver el log en vivo ({(live?.events || runEvents).length} eventos)</summary>
+                <Events events={live?.events?.length ? live.events : runEvents} running={status === 'running'} />
+              </details>
+            ) : null}
+          </>) : (<>
             {step.lastRun?.output && <details className="last-out" open><summary>Salida</summary><pre>{step.lastRun.output}</pre></details>}
             {/* the log: only if you want to see it */}
             {(step.lastRun || live?.events?.length || runEvents) ? (

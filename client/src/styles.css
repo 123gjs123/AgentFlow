@@ -544,3 +544,7 @@ pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }
 .what-happened .wh-tech pre { white-space: pre-wrap; font-size: 11px; max-height: 160px; overflow: auto; }
 .run-log > summary { cursor: pointer; margin: 8px 0; }
 .node-live.blocked { color: var(--muted); }
+.live-summary { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
+.live-summary .ls-now { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.live-summary .ls-done { color: var(--muted); }
+.live-summary .ls-done.err { color: var(--err, #d55); }
