@@ -73,6 +73,7 @@ function StepNode({ data, selected }) {
       <div className="node-name" title={step.name}>{step.name}</div>
       <div className="node-sub" title={ref}>{ref || <span className="muted">—</span>}</div>
       {live?.activity && status === 'running' && <div className="node-live" title={live.activity}>{live.activity}</div>}
+      {status === 'skipped' && data.blockedName && <div className="node-live blocked" data-testid="node-blocked" title={`No corrió porque falló «${data.blockedName}»`}>⏭ falló «{data.blockedName}»</div>}
       {(news > 0 || step.watches?.length > 0 || step.actions?.length > 0 || step.deliverables?.length > 0 || step.breakpoint || step.contextSources?.length > 0 || step.memory?.length > 0 || step.hooks?.trim() || step.pinned || step.output?.format === 'json' || step.lastRun?.actions?.length > 0 || step.assertions?.length > 0) && (
         <div className="node-badges">
           {news > 0 ? <span className="news" data-testid="news-badge" title="Novedades en las fuentes que vigila este step">🔔 {news}</span> : step.watches?.length > 0 ? <span title={`Vigila ${step.watches.length} fuente(s): sin novedades pendientes`}>👀 {step.watches.length}</span> : null}
@@ -118,7 +119,7 @@ export default function Canvas({ flow, live, watch = {}, selectedId, onSelect, o
   useEffect(() => {
     setNodes((prev) => flow.steps.map((s) => {
       const p = prev.find((n) => n.id === s.id);
-      return { ...(p || {}), id: s.id, type: 'step', position: p?.dragging ? p.position : s.position, data: { step: s, live: live[s.id], order: order.get(s.id), news: Object.values(watch).reduce((a, v) => a + (v.stepId === s.id ? v.pending?.length || 0 : 0), 0) }, selected: s.id === selectedId };
+      return { ...(p || {}), id: s.id, type: 'step', position: p?.dragging ? p.position : s.position, data: { step: s, live: live[s.id], order: order.get(s.id), blockedName: s.lastRun?.skipReason === 'upstream_failed' && !live[s.id] ? flow.steps.find((x) => x.id === s.lastRun.blockedBy)?.name || null : null, news: Object.values(watch).reduce((a, v) => a + (v.stepId === s.id ? v.pending?.length || 0 : 0), 0) }, selected: s.id === selectedId };
     }));
   }, [flow.steps, live, selectedId, order, watch]);
 

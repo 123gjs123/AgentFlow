@@ -147,7 +147,9 @@ export function officeReduce(prev, msg, ctx = {}) {
     case 'run.finally': run.finally = msg.status || 'running'; if (msg.status === 'running' || !msg.status) logLine(s, t, `${'Tomás'} lleva el expediente a Archivo ("Al terminar").`); break;
     case 'run.finished': {
       run.status = msg.status || 'success';
-      run.stamp = run.status === 'success' ? 'APROBADO' : run.status === 'stopped' ? 'DETENIDO' : 'RECHAZADO';
+      // «CON ERROR», not «RECHAZADO»: nobody rejected it, something failed (the stamp opens the step that failed)
+      run.stamp = run.status === 'success' ? 'APROBADO' : run.status === 'stopped' ? 'DETENIDO' : 'CON ERROR';
+      run.failedStep = run.status !== 'success' && run.status !== 'stopped' ? Object.keys(run.steps).find((k) => ['error', 'timeout', 'interrupted'].includes(run.steps[k].status)) || null : null;
       run.bell = null;
       if (run.finally === 'running') run.finally = run.status;
       logLine(s, t, `Turno ${run.ticket}: ${run.stamp} (${run.status}).`);

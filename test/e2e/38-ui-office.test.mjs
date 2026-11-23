@@ -31,7 +31,7 @@ test('vista: 🏢 Oficina tiene un escritorio por step, queda en la URL y al rec
   } catch (e) { await captureOnFailure(page, { ...t, passed: false, name: t.name }); throw e; }
 });
 
-test('en vivo: Lucía va a la estantería Contexto, Tomás lleva la carpeta, la computadora pasa a rojo y la Salida dice RECHAZADO; la bitácora lo cuenta', async (t) => {
+test('en vivo: Lucía va a la estantería Contexto, Tomás lleva la carpeta, la computadora pasa a rojo y la Salida dice CON ERROR; la bitácora lo cuenta', async (t) => {
   if (skip(t)) return;
   try {
     const f = await s.flow('Oficina B', [
@@ -45,10 +45,13 @@ test('en vivo: Lucía va a la estantería Contexto, Tomás lleva la carpeta, la 
     await page.locator('[data-testid="office-walker"][data-step="s_a"][data-activity="reading"]').waitFor({ timeout: 15000 });
     await page.locator('[data-testid="office-computer"][data-state="running"]').waitFor({ timeout: 20000 });
     await page.locator('[data-testid="office-computer"][data-state="err"]').waitFor({ timeout: 20000 });
-    await page.locator('[data-testid="office-salida"][data-stamp="RECHAZADO"]').waitFor({ timeout: 20000 });
+    await page.locator('[data-testid="office-salida"][data-stamp="CON ERROR"]').waitFor({ timeout: 20000 });
     await page.getByTestId('office-log-btn').click();
     assert.match(await page.getByTestId('office-log').textContent(), /Contexto/);
     assert.match(await page.getByTestId('office-summary').textContent(), /Ejecución A/);
+    // the stamp leads to the step that failed, with its «Qué pasó»
+    await page.getByTestId('office-salida').dispatchEvent('click');
+    await page.getByTestId('what-happened').getByText(/El comando terminó con error/).waitFor();
     assert.deepEqual(page.errors, []);
   } catch (e) { await captureOnFailure(page, { ...t, passed: false, name: t.name }); throw e; }
 });
@@ -101,7 +104,7 @@ test('jornada: repetir una ejecución pasada (16×) recorre los escritorios hast
     await page.getByTestId('office-replay-speed').selectOption('16');
     await page.getByTestId('office-replay-run').selectOption(r.id);
     await page.locator('[data-testid="office"][data-mode="replay"]').waitFor();
-    await page.locator('[data-testid="office-salida"][data-stamp="RECHAZADO"]').waitFor({ timeout: 20000 });
+    await page.locator('[data-testid="office-salida"][data-stamp="CON ERROR"]').waitFor({ timeout: 20000 });
     assert.equal(await page.locator('[data-testid="office-computer"]').getAttribute('data-state'), 'err');
     await page.getByTestId('office-replay-stop').click();
     await page.locator('[data-testid="office"][data-mode="live"]').waitFor();

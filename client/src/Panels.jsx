@@ -199,6 +199,7 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
         ))}
       </div>
 
+      {!['running', 'queued', 'paused'].includes(status) && <WhatHappened flow={flow} step={step} tools={tools} running={running} onChange={onChange} onRun={() => { onRun(''); setTab('activity'); }} onRunFrom={onRunFrom && (() => { onRunFrom(''); setTab('activity'); })} onGoStep={(id) => { onOpenStep?.(id); setTab('activity'); }} onShowLog={() => setTab('activity')} />}
       {(tab === 'config' || tab === 'chat') && <ContextBox flow={flow} step={step} target={tab === 'chat' ? 'chat' : 'run'} />}
 
       {tab === 'config' && (
@@ -306,7 +307,6 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
             <button className="primary" onClick={() => { onRun(runInput); setTab('activity'); }} disabled={status === 'running' || status === 'queued' || status === 'paused'}>▶ Ejecutar step</button>
             {onRunFrom && flow.edges.some((e) => e.source === step.id) && <button data-testid="run-from-step" onClick={() => { onRunFrom(runInput); setTab('activity'); }} disabled={running || status === 'running' || status === 'queued' || status === 'paused'} title="Ejecuta este step y todos los que siguen. Los anteriores no se repiten: pasan su última salida. Sin input, usa el de la última ejecución completa.">▶▶ Desde aquí</button>}
           </div>
-          <DeniedTools step={step} tools={tools} onChange={onChange} />
           {step.lastRun?.output && (
             <details className="last-out"><summary>Última salida ({step.lastRun.status})</summary><pre>{step.lastRun.output}</pre></details>
           )}
@@ -322,10 +322,18 @@ export function StepPanel({ flow, step, catalog, live, watch = {}, running, tab,
 
       {tab === 'activity' && (
         <div className="panel-body pad">
-          {status !== 'running' && step.lastRun && <RunStats rs={step.lastRun} />}
-          {live?.events?.length ? <Events events={live.events} running={live.status === 'running'} /> : runEvents ? <Events events={runEvents} /> : <div className="muted small">Ejecuta el step o el flujo para ver su proceso interno.</div>}
-          {step.lastRun?.output && status !== 'running' && <details className="last-out" open><summary>Salida</summary><pre>{step.lastRun.output}</pre></details>}
-          {step.lastRun?.error && status !== 'running' && <div className="error-bar">{step.lastRun.error}</div>}
+          {['running', 'queued', 'paused'].includes(status) ? (live?.events?.length ? <Events events={live.events} running={status === 'running'} /> : runEvents ? <Events events={runEvents} /> : <div className="muted small">Arrancando…</div>) : (<>
+            {step.lastRun?.output && <details className="last-out" open><summary>Salida</summary><pre>{step.lastRun.output}</pre></details>}
+            {/* the log: only if you want to see it */}
+            {(step.lastRun || live?.events?.length || runEvents) ? (
+              <details className="run-log" data-testid="run-log">
+                <summary>🔎 Ver el log de la ejecución{(live?.events || runEvents)?.length ? ` (${(live?.events || runEvents).length} eventos)` : ''}</summary>
+                {step.lastRun && <RunStats rs={step.lastRun} />}
+                {live?.events?.length ? <Events events={live.events} /> : runEvents ? <Events events={runEvents} /> : null}
+                {step.lastRun?.error && <div className="error-bar">{step.lastRun.error}</div>}
+              </details>
+            ) : <div className="muted small">Ejecuta el step o el flujo para ver su proceso interno.</div>}
+          </>)}
         </div>
       )}
 
@@ -829,20 +837,106 @@ function RunReport({ flowId, report, onClose }) {
   );
 }
 
-/** A step that failed for a denied tool: allow exactly those tools with one click (added to the ones it already has). */
-export function deniedToolsOf(step) {
-  if (step.lastRun?.code !== 'PERMISSION_DENIED') return [];
-  const m = /Se denegaron herramientas: (.+?)\. Dale acceso/.exec(String(step.lastRun.error || ''));
-  return m ? m[1].split(',').map((t) => t.trim()).filter(Boolean) : [];
+/* ---------- «Qué pasó»: the cause in one sentence, the fix as a button, the retry ---------- */
+const CAUSE = {
+  PERMISSION_DENIED: 'Este paso necesitó herramientas que no tiene permitidas.',
+  MCP_UNAVAILABLE: 'Al Claude Code que ejecuta los flujos le faltó un conector que este paso usa.',
+  EXIT_NONZERO: 'El comando terminó con error.',
+  TIMEOUT: 'Se le acabó el tiempo.',
+  STOPPED: 'Se detuvo a mano.',
+  INTERRUPTED: 'El servidor se reinició en medio.',
+  INVALID_JSON: 'La salida no era el JSON que se pide.',
+  SCHEMA_MISMATCH: 'La salida no cumple el formato pedido.',
+  EMPTY_OUTPUT: 'El paso no devolvió nada.',
+  CREDENTIAL_MISSING: 'Falta una credencial.',
+  CWD_MISSING: 'No existe la carpeta de trabajo.',
+  ASSERTION_FAILED: 'No pasó una verificación del paso.',
+  HOOK_ERROR: 'Falló un hook del paso.',
+};
+/** Is the tool already allowed? exact name, a whole MCP server (mcp__server or mcp__server__*), or a Bash pattern that includes it. */
+export function covers(tools, t) {
+  if (tools.has(t)) return true;
+  const pat = /^(\w+)\((.*):\*\)$/.exec(t);
+  return [...tools].some((p) => {
+    if (p.startsWith('mcp__') && t.startsWith('mcp__')) { const srv = p.replace(/__\*$/, ''); if (srv.split('__').length === 2 && srv.slice(5) && t.startsWith(`${srv}__`)) return true; }
+    const q = /^(\w+)\((.*):\*\)$/.exec(p);
+    return !!(pat && q && q[1] === pat[1] && (pat[2] === q[2] || pat[2].startsWith(`${q[2]} `)));
+  });
 }
-function DeniedTools({ step, tools, onChange }) {
-  const missing = deniedToolsOf(step).filter((t) => !tools.has(t));
-  if (!missing.length) return null;
-  const allow = () => onChange({ allowedTools: [...tools, ...missing].join(' ') });
+/** What the last run of this step needs from you, as the server classified it (read = one click; confirm; blocked). */
+export function deniedOf(step) {
+  const lr = step.lastRun || {};
+  if (Array.isArray(lr.denied)) return lr.denied.map((d) => ({ ...d, kind: ['read', 'confirm', 'blocked'].includes(d.kind) ? d.kind : 'confirm' }));
+  const m = /Se denegaron herramientas: (.+?)\. Dale acceso/.exec(String(lr.error || '')); // runs from before the structured field: everything asks first
+  return m ? m[1].split(',').map((t) => t.trim()).filter(Boolean).map((tool) => ({ tool, kind: /^(Bash|PowerShell)$/.test(tool) ? 'blocked' : 'confirm' })) : [];
+}
+/** A denied mcp__S__x while the step allows mcp__T__x: the step uses another name for the same connector (T → S). */
+export function renamesOf(step, tools) {
+  const out = new Map();
+  for (const d of deniedOf(step)) {
+    const m = /^mcp__(.+?)__([^_].*)$/.exec(d.tool); if (!m) continue;
+    for (const t of tools) { const n = /^mcp__(.+?)__([^_].*)$/.exec(t); if (n && n[2] === m[2] && n[1] !== m[1]) out.set(n[1], m[1]); }
+  }
+  return [...out].map(([from, to]) => ({ from, to }));
+}
+function WhatHappened({ flow, step, tools, running, onChange, onRun, onRunFrom, onGoStep, onShowLog }) {
+  const lr = step.lastRun;
+  if (!lr) return null;
+  const nameOf = (id) => flow.steps.find((s) => s.id === id)?.name || id;
+  if (lr.status === 'skipped' && lr.skipReason === 'upstream_failed') {
+    const root = lr.blockedBy && flow.steps.some((s) => s.id === lr.blockedBy) ? lr.blockedBy : null;
+    return (
+      <div className="what-happened skipped" data-testid="what-happened">
+        <div className="wh-cause">⏭ No corrió porque {({ stopped: 'se detuvo', timeout: 'se le acabó el tiempo a', skipped: 'no corrió' })[flow.steps.find((s) => s.id === root)?.lastRun?.status] || 'falló'} «{root ? nameOf(root) : 'un paso anterior'}».</div>
+        {root && <div className="wh-actions"><button className="small" data-testid="wh-go-root" onClick={() => onGoStep(root)}>Ir a «{nameOf(root)}»</button></div>}
+      </div>
+    );
+  }
+  if (!['error', 'timeout', 'interrupted'].includes(lr.status)) return null;
+  const denied = deniedOf(step);
+  const renames = lr.code === 'MCP_UNAVAILABLE' ? renamesOf(step, tools) : [];
+  const pending = denied.filter((d) => d.kind !== 'blocked' && !covers(tools, d.tool));
+  const reads = pending.filter((d) => d.kind === 'read');
+  const writes = pending.filter((d) => d.kind === 'confirm');
+  const blocked = denied.filter((d) => d.kind === 'blocked' && !covers(tools, d.tool));
+  const fixed = denied.length > 0 && !pending.length && !blocked.length;
+  const add = (list) => onChange({ allowedTools: [...new Set([...tools, ...list])].join(' ') });
+  const READ_FIRST = /^(get|search|list|lookup|find|describe|view|read)(?=$|[A-Z_0-9])/;
+  const rename = ({ from, to }) => { const moved = [...tools].filter((t) => t.startsWith(`mcp__${from}__`)); const risky = moved.filter((t) => !READ_FIRST.test(t.split('__').pop()) || /(create|update|delete|remove|edit|write|add|send|transition|assign|publish)/i.test(t.split('__').pop())); if (risky.length && !confirm(`También se mueven a «${to}» herramientas que escriben: ${risky.map((t) => t.split('__').pop()).join(', ')}. ¿Seguir?`)) return; onChange({ allowedTools: [...new Set([...tools].map((t) => t.startsWith(`mcp__${from}__`) ? `mcp__${to}__${t.slice(from.length + 7)}` : t))].join(' ') }); };
+  const hasNext = flow.edges.some((e) => e.source === step.id);
+  const retry = hasNext && onRunFrom ? onRunFrom : onRun;
+  const cause = CAUSE[lr.code] || (lr.status === 'timeout' ? CAUSE.TIMEOUT : 'El paso terminó con error.');
+  const short = (t) => t.replace(/^mcp__(.+?)__/, (m, s) => `${s.replace(/^claude_ai_/, '').replace(/_/g, ' ')} · `);
   return (
-    <div className="denied-tools" data-testid="denied-tools">
-      <div className="small">⛔ La última ejecución falló porque este step no tiene permitido: {missing.map((t) => <code key={t}>{t}</code>)}</div>
-      <button className="small" data-testid="allow-denied" onClick={allow} title="Las agrega a «Tools permitidas» sin quitar las que ya tiene">➕ Permitir {missing.length === 1 ? 'esta herramienta' : `estas ${missing.length} herramientas`}</button>
+    <div className={`what-happened ${fixed ? 'fixed' : ''}`} data-testid="what-happened">
+      <div className="wh-cause">{fixed ? '✓ Ya está corregido: falta reintentar.' : `✗ ${cause}`}</div>
+      {!fixed && renames.map((r) => (
+        <div key={r.from} className="wh-fix">
+          <span>Este paso llama al conector «{r.from.replace(/_/g, ' ')}», pero tu Claude Code lo tiene como «{r.to.replace(/_/g, ' ')}».</span>
+          <button className="small primary" data-testid="wh-rename" onClick={() => rename(r)}>Usar «{r.to.replace(/_/g, ' ')}»</button>
+        </div>
+      ))}
+      {!fixed && reads.length > 0 && (
+        <div className="wh-fix">
+          <span>Necesita leer con: {reads.map((d) => <code key={d.tool} title={d.tool}>{short(d.tool)}</code>)}</span>
+          <button className="small primary" data-testid="wh-allow-read" onClick={() => add(reads.map((d) => d.tool))}>➕ Permitir {reads.length === 1 ? 'esta lectura' : `estas ${reads.length} lecturas`}</button>
+        </div>
+      )}
+      {!fixed && writes.map((d) => (
+        <div key={d.tool} className="wh-fix">
+          <span>{d.shell ? <>Quiso ejecutar <code title={d.tool}>{d.tool}</code>.</> : <>Quiso usar <code title={d.tool}>{short(d.tool)}</code>, que <b>puede modificar cosas o enviar datos</b>.</>}</span>
+          <button className="small" data-testid="wh-allow-write" onClick={() => confirm(`«${step.name}» va a poder usar ${d.tool}${d.shell ? ' (ese tipo de comando, en tu máquina)' : ', que puede escribir, cambiar cosas o enviar datos'}. ¿Permitirlo?`) && add([d.tool])}>Permitir…</button>
+        </div>
+      ))}
+      {!fixed && blocked.map((d) => (
+        <div key={d.tool} className="wh-fix muted small">Quiso ejecutar un comando que no se habilita con un clic{d.input ? <> (<code>{(() => { try { return JSON.parse(d.input).command; } catch { return d.input; } })()}</code>)</> : null}. Si de verdad hace falta, agregá ese comando concreto en Config › Avanzado (por ejemplo <code>{d.tool}(git status:*)</code>).</div>
+      ))}
+      <div className="wh-actions">
+        <button className={fixed || !pending.length ? 'primary small' : 'small'} data-testid="wh-retry" disabled={running} onClick={retry}>{retry === onRunFrom ? '▶▶ Reintentar desde aquí' : '▶ Reintentar este paso'}</button>
+        <button className="ghost small" onClick={onShowLog}>🔎 Ver el log</button>
+        {retry === onRunFrom && flow.finally?.command && !flow.finally.disabled && <span className="muted small">También corre «Al terminar».</span>}
+      </div>
+      {!fixed && lr.error && <details className="wh-tech"><summary>Detalle técnico</summary><pre>{lr.error}</pre></details>}
     </div>
   );
 }

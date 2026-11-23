@@ -534,3 +534,13 @@ pre.diff .add { color: #2f855a; } pre.diff .del { color: #c53030; }
 .run-report h1 { font-size: 17px; } .run-report h2 { font-size: 14px; margin-top: 14px; }
 .denied-tools { border: 1px solid var(--warn, #c90); border-radius: 6px; padding: 6px 8px; margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
 .denied-tools code { margin: 0 3px; word-break: break-all; }
+.what-happened { margin: 8px 10px 0; padding: 8px 10px; border: 1px solid var(--err, #d55); border-radius: 8px; background: color-mix(in srgb, var(--err, #d55) 10%, transparent); display: flex; flex-direction: column; gap: 6px; }
+.what-happened.fixed { border-color: var(--ok, #3a3); background: color-mix(in srgb, var(--ok, #3a3) 10%, transparent); }
+.what-happened.skipped { border-color: var(--line); background: transparent; }
+.what-happened .wh-cause { font-weight: 600; }
+.what-happened .wh-fix { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; font-size: 12px; }
+.what-happened .wh-fix code { margin: 0 3px; word-break: break-all; }
+.what-happened .wh-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.what-happened .wh-tech pre { white-space: pre-wrap; font-size: 11px; max-height: 160px; overflow: auto; }
+.run-log > summary { cursor: pointer; margin: 8px 0; }
+.node-live.blocked { color: var(--muted); }

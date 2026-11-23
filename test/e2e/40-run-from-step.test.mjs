@@ -61,24 +61,3 @@ test('UI: el step tiene ▶▶ Desde aquí (solo si tiene pasos después) y arra
     assert.deepEqual(page.errors, []);
   } finally { await ui.close?.(); }
 });
-
-test('UI: un step que falló por una herramienta denegada ofrece ➕ Permitir (la suma a las que ya tiene)', async (t) => {
-  const { openUi } = await import('./helpers/browser.mjs');
-  const ui = await openUi('allow-denied-ui');
-  try {
-    if (ui.skipReason) { t.skip(ui.skipReason); return; }
-    const { s: u, page } = ui;
-    const f = await u.flow('Permitir UI', [role('Busca', '[[mock:deny mcp__jira__search]] [[mock:say listo]]', { id: 's_d', allowedTools: 'Read Grep' })]);
-    const run = await u.runUi(f.id);
-    assert.equal(run.steps.s_d.code, 'PERMISSION_DENIED');
-    await page.goto(`${u.base}/?flow=${f.id}`);
-    await page.locator('.react-flow__node', { has: page.locator('.node-name', { hasText: /^Busca$/ }) }).click();
-    await page.getByTestId('denied-tools').getByText('mcp__jira__search').waitFor();
-    await page.getByTestId('allow-denied').click();
-    await page.getByTestId('denied-tools').waitFor({ state: 'detached' });
-    const deadline = Date.now() + 10000; let tools = '';
-    while (Date.now() < deadline) { tools = (await u.getFlow(f.id)).steps[0].allowedTools; if (tools.includes('mcp__jira__search')) break; await new Promise((r) => setTimeout(r, 200)); }
-    assert.deepEqual(tools.split(' ').sort(), ['Grep', 'Read', 'mcp__jira__search'], 'no pisa las que ya tenía');
-    assert.deepEqual(page.errors, []);
-  } finally { await ui.close?.(); }
-});

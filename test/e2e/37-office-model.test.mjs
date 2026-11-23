@@ -98,7 +98,7 @@ test('reductor: la tabla de eventos → lo que hace cada personaje (formas reale
   assert.equal(s.runs.r_abc123.steps.s_c.activity, 'storm');
   assert.equal(S.coordinatorTarget(s, layout).key, 'window', 'lleva el papel rojo a la ventanilla');
   r({ type: 'run.finished', status: 'error', t: 131 });
-  assert.equal(s.runs.r_abc123.stamp, 'RECHAZADO'); assert.equal(S.coordinatorTarget(s, layout).key, 'chair');
+  assert.equal(s.runs.r_abc123.stamp, 'CON ERROR'); assert.equal(S.coordinatorTarget(s, layout).key, 'chair');
   assert.ok(s.trace.some((x) => x.activity === 'reading') && s.trace.some((x) => x.activity === 'phone'));
   assert.match(s.log.map((l) => l.text).join('\n'), /Contexto/);
 });
@@ -133,7 +133,7 @@ test('jornada: una ejecución guardada, reconstruida, termina igual que en vivo;
   const tl = S.timelineOfRun(run);
   assert.equal(tl[0].type, 'run.started'); assert.equal(tl[tl.length - 1].type, 'run.finished');
   let s = S.initialScene(); for (const m of tl) s = S.officeReduce(s, m, { flow });
-  assert.equal(s.runs.r_z9.steps.s_a.status, 'success'); assert.equal(s.runs.r_z9.computers.s_b, 'err'); assert.equal(s.runs.r_z9.stamp, 'RECHAZADO');
+  assert.equal(s.runs.r_z9.steps.s_a.status, 'success'); assert.equal(s.runs.r_z9.computers.s_b, 'err'); assert.equal(s.runs.r_z9.stamp, 'CON ERROR');
   const clock = S.replayClock(tl, 1500);
   assert.ok(clock.total < 20000, `el hueco de 45 s se acorta (${clock.total})`);
   assert.equal(clock.due(clock.total), tl.length); assert.ok(clock.due(0) >= 1 && clock.due(0) < tl.length);
@@ -151,7 +151,7 @@ test('servidor: una ejecución real (mock) reconstruida muestra lectura, llamada
   const acts = sc.trace.filter((x) => x.stepId === 's_r').map((x) => x.activity);
   assert.ok(acts.includes('reading') && acts.includes('phone'), acts.join(','));
   assert.equal(sc.runs[run.id].steps.s_r.locked, true);
-  assert.equal(sc.runs[run.id].computers.s_c, 'err'); assert.equal(sc.runs[run.id].stamp, 'RECHAZADO');
+  assert.equal(sc.runs[run.id].computers.s_c, 'err'); assert.equal(sc.runs[run.id].stamp, 'CON ERROR');
 });
 
 test('servidor: persona se limpia al guardar, viaja en flow.json, no cuenta como "lo que ejecuta" y no cambia la huella del step', async () => {

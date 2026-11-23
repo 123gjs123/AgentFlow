@@ -257,7 +257,7 @@ export default function Office({ flow, selectedId, paused, onOpenStep, onOpenEdg
       items.push([d, <g key={f.id} data-testid="office-display" data-ticket={run && ACTIVE.has(run.status) ? run.ticket : ''} className="office-item" {...btn(`Turno ${run?.ticket || '—'}`, () => onOpenRun(shown.focusRunId))}><TurnDisplay gx={f.gx} gy={f.gy} tickets={tickets} /></g>]);
     } else if (f.id === 'entrada' || f.id === 'salida') {
       const stamp = f.id === 'salida' ? run?.stamp || '' : '';
-      items.push([d, <g key={f.id} data-testid={`office-${f.id}`} data-stamp={stamp} className="office-item" {...btn(f.id === 'entrada' ? 'Bandeja de Entrada (lo que recibe el flujo)' : `Bandeja de Salida${stamp ? `: ${stamp}` : ''}`, () => onOpenRun(shown.focusRunId))}><TrayPiece gx={f.gx} gy={f.gy} label={f.id === 'entrada' ? 'ENTRADA' : 'SALIDA'} stamp={stamp} /></g>]);
+      items.push([d, <g key={f.id} data-testid={`office-${f.id}`} data-stamp={stamp} className="office-item" {...btn(f.id === 'entrada' ? 'Bandeja de Entrada (lo que recibe el flujo)' : `Bandeja de Salida${stamp ? `: ${stamp}` : ''}${run?.failedStep ? ' — abre el paso que falló' : ''}`, () => (run?.failedStep && flow.steps.some((x) => x.id === run.failedStep) ? onOpenStep(run.failedStep) : onOpenRun(shown.focusRunId)))}><TrayPiece gx={f.gx} gy={f.gy} label={f.id === 'entrada' ? 'ENTRADA' : 'SALIDA'} stamp={stamp} /></g>]);
     } else if (f.id === 'archivo') {
       items.push([d, <g key={f.id} data-testid="office-archivo" data-finally={run?.finally || ''} className="office-item" {...btn('Archivo ("Al terminar" y entregables)', () => onOpenFlowTab('settings'))}><FilingPiece gx={f.gx} gy={f.gy} w={f.w} /></g>]);
     }

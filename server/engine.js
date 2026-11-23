@@ -266,8 +266,40 @@ export function builtinTools(step) {
 
 /** Tools that only read: a failed attempt that used only these can be retried safely. Bash and unknown MCP tools count as writes. */
 const READ_ONLY = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'Skill', 'ToolSearch', 'TodoWrite', 'LS', 'NotebookRead']);
-const MCP_READ_RE = /^(get|search|list|fetch|read|lookup|query|find|describe|view|atlassianUserInfo)/i;
-export const isReadOnlyTool = (name = '') => READ_ONLY.has(name) || (name.startsWith('mcp__') && MCP_READ_RE.test(name.split('__').pop()));
+// an MCP tool reads when its name STARTS with a read verb (a whole word) and no later word is a write verb:
+// getJiraIssue, listJiraIssueComments → read; getAndDelete, get_or_create_issue, searchAndReplace → write
+const MCP_READ_FIRST = new Set(['get', 'search', 'list', 'fetch', 'read', 'lookup', 'query', 'find', 'describe', 'view']);
+const MCP_WRITE_WORD = new Set(['create', 'update', 'delete', 'remove', 'edit', 'write', 'set', 'put', 'post', 'add', 'replace', 'move', 'send', 'exec', 'execute', 'run', 'insert', 'upsert', 'drop', 'patch', 'merge', 'assign', 'publish', 'upload', 'rename', 'archive', 'purge', 'transition', 'close', 'approve', 'grant', 'revoke']);
+const nameWords = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[\s_\-.]+/).filter(Boolean).map((w) => w.toLowerCase());
+const mcpReads = (name) => { const w = nameWords(name.split('__').pop()); if (name.endsWith('__atlassianUserInfo')) return true; return w.length > 0 && MCP_READ_FIRST.has(w[0]) && !w.slice(1).some((x) => MCP_WRITE_WORD.has(x)); };
+export const isReadOnlyTool = (name = '') => READ_ONLY.has(name) || (name.startsWith('mcp__') && mcpReads(name));
+/** «Qué pasó»: may a denied tool be allowed with ONE click? Only plain reads that cannot send data out (query/fetch/WebFetch ask first). */
+const ONE_CLICK_NOT = new Set(['WebFetch', 'WebSearch', 'Skill']);
+const oneClickRead = (t) => isReadOnlyTool(t) && !ONE_CLICK_NOT.has(t) && !(t.startsWith('mcp__') && ['query', 'fetch'].includes(nameWords(t.split('__').pop())[0]));
+// a denied shell command → a pattern for THAT kind of command, only from a short allowlist of commands that read
+const SHELL_SAFE = { git: new Set(['status', 'diff', 'log', 'show', 'rev-parse', 'ls-files', 'blame']), ls: null, dir: null, cat: null, type: null, head: null, tail: null, wc: null, 'get-childitem': null, 'get-content': null, pwd: null };
+function shellSuggestion(tool, input) {
+  let cmd = ''; try { cmd = String(JSON.parse(input || '{}').command || '').trim(); } catch { return null; }
+  if (!cmd || /[;&|><`$(){}'"\\\n]/.test(cmd)) return null; // compound, quoted or substituted: never
+  const [a, b] = cmd.split(/\s+/);
+  const first = String(a || '').toLowerCase();
+  if (!/^[\w.-]+$/.test(first) || !(first in SHELL_SAFE)) return null;
+  const subs = SHELL_SAFE[first];
+  if (!subs) return `${tool}(${a}:*)`;
+  return b && subs.has(b) ? `${tool}(${a} ${b}:*)` : null;
+}
+/** The denied tools of a failed step, one per name (a shell one per command), classified for «Qué pasó». */
+export function deniedView(denials = []) {
+  const m = new Map();
+  for (const d of denials) {
+    const shell = /^(Bash|PowerShell)$/.test(d.tool);
+    const key = shell ? `${d.tool} ${d.input}` : d.tool;
+    if (m.has(key)) continue;
+    if (shell) { const s = shellSuggestion(d.tool, d.input); m.set(key, s ? { tool: s, kind: 'confirm', shell: true, input: String(d.input || '').slice(0, 300) } : { tool: d.tool, kind: 'blocked', shell: true, input: String(d.input || '').slice(0, 300) }); }
+    else m.set(key, { tool: d.tool, kind: oneClickRead(d.tool) ? 'read' : 'confirm', input: String(d.input || '').slice(0, 300) });
+  }
+  return [...m.values()];
+}
 
 function emptyUsage() { return { model: null, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0, numTurns: 0, durationMs: 0, durationApiMs: 0 }; }
 function addUsage(u, r) {
@@ -374,7 +406,7 @@ async function executeForEach(flow, step, input, run, signal, upstream, opts) {
   const rs = run.steps[step.id] = { status: 'running', startedAt: now(), events: [], output: '', files: [], actions: [], inputs: upstream.map((u) => ({ step: u.name, stepId: u.id, source: u.source || 'run', fromRunId: u.fromRunId || null, at: u.at || null, viaRef: false })), assertions: [], warnings: [], denials: [], attempts: [] };
   const setLast = (patch) => { if (!run.rehearsal) setStepRun(flow.id, step.id, patch); };
   const note = (text, kind = 'hook_log') => { const e = { kind, text, t: now(), seq: ++run.eventSeq }; rs.events.push(e); emit({ type: 'run.event', flowId: flow.id, runId: run.id, stepId: step.id, event: e }); };
-  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null, declaredActions: undefined, deliverables: undefined });
+  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null, declaredActions: undefined, deliverables: undefined, denied: undefined, blockedBy: undefined });
   emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   const end = (status, extra = {}) => {
     Object.assign(rs, { status, ...extra }); rs.endedAt = now(); rs.durationMs = rs.endedAt - rs.startedAt;
@@ -470,7 +502,7 @@ async function executeStep(flow, step, input, run, signal, upstream, opts = {}) 
     }
     emit({ type: 'run.event', flowId: flow.id, runId: run.id, stepId: step.id, event: e });
   };
-  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null, declaredActions: undefined, deliverables: undefined });
+  setLast({ status: 'running', startedAt: rs.startedAt, endedAt: null, runId: run.id, error: null, code: null, declaredActions: undefined, deliverables: undefined, denied: undefined, blockedBy: undefined });
   opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: 'running' });
   store.saveRun(run);
 
@@ -868,6 +900,8 @@ ${cgit.block}`;
       status: rs.status, endedAt: rs.endedAt, output: rs.output, json: jsonFits ? rs.json : undefined, files: rs.files, actions: rs.actions,
       pinned: !!rs.pinned, routes: rs.routes || [], error: rs.error || null, code: rs.code || null, sessionId: rs.sessionId || null, runId: run.id,
       assertions: rs.assertions, usage: rs.usage, durationMs: rs.durationMs, warnings: rs.warnings, attempts: rs.attempts.length,
+      // «Qué pasó»: the tools that were denied, one per name, with the first input (a Bash pattern is suggested from it)
+      denied: rs.status === 'error' && rs.denials?.length ? deniedView(rs.denials) : undefined,
       deliverables: rs.deliverables || undefined, declaredActions: rs.declaredActions ? rs.declaredActions.map(OUT.lastRunView) : undefined,
     });
     opts.nested || emit({ type: 'step.status', flowId: flow.id, runId: run.id, stepId: step.id, status: rs.status });
@@ -1132,10 +1166,10 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
     const summaries = new Map();
     const failed = new Set();
     const notRouted = new Set(run.fromNotRouted || []);
-    const skip = (id, reason, text) => {
+    const skip = (id, reason, text, blockedBy) => {
       const benign = reason === 'not_routed' || reason === 'review';
-      run.steps[id] = { status: 'skipped', skipReason: reason, output: '', events: [{ kind: benign ? 'hook_log' : 'error', text, t: now(), seq: ++run.eventSeq }] };
-      if (!run.rehearsal) setStepRun(flowId, id, { status: 'skipped', endedAt: now(), runId: run.id, error: benign ? null : text, skipReason: reason, code: null });
+      run.steps[id] = { status: 'skipped', skipReason: reason, output: '', ...(blockedBy ? { blockedBy } : {}), events: [{ kind: benign ? 'hook_log' : 'error', text, t: now(), seq: ++run.eventSeq }] };
+      if (!run.rehearsal) setStepRun(flowId, id, { status: 'skipped', endedAt: now(), runId: run.id, error: benign ? null : text, skipReason: reason, code: null, blockedBy: blockedBy || undefined, denied: undefined });
       emit({ type: 'step.status', flowId, runId: run.id, stepId: id, status: 'skipped' });
     };
     const evalCond = (when, output, json) => evalAssertion(when, output, json);
@@ -1164,7 +1198,10 @@ export function startRun(flowId, { input = '', only = null, from = null, trigger
             const bad = !only && inEdges.map((e) => e.source).find((u) => failed.has(u));
             if (bad) {
               failed.add(id);
-              skip(id, 'upstream_failed', `Omitido: falló o se omitió "${rflow.steps.find((s) => s.id === bad)?.name || bad}".`);
+              // the step that really failed (not the skipped one right before): a chain of 7 skips names the same cause
+              const root = run.steps[bad]?.blockedBy || bad;
+              const nm = (x) => rflow.steps.find((s) => s.id === x)?.name || x;
+              skip(id, 'upstream_failed', `Omitido: falló "${nm(root)}"${root !== bad ? ` (antes que "${nm(bad)}")` : ''}.`, root);
               continue;
             }
             // Which arrows carry data in this run, and what each one carries.
